@@ -1,16 +1,14 @@
-# EzFlex 插件套件 项目交接文档（V1.01 稳定版）
+# EzFlex 插件套件 项目交接文档（V1.02 稳定版）
 
 > 供新窗口继续开发使用。硬数据，无闲聊。
-> **本版为 V1.01 稳定版**（`__version__="1.0.1"`，`pyproject.toml` 同步 1.0.1）。此前 1.4/1.6/1.0 等均为**测试版/RC**，现定为一个稳定维护分支 `1.0.1`。
-> **V1.01 新增修复**：NodeSwitchGroup 多节点/同名分组状态键 + 定时器按节点、ParamPresetControl 换预设不断连。
-> **依赖**：新增 `mutagen>=1.46.0`（音频/视频标签读取，可选增强）；`ffprobe` 为外部可选（`shutil.which` 探测），不装则只走 sidecar JSON 兜底。
-> **已清理**：删除废弃的 `web/freeswitch_node.js`（旧 EzFlex-FreeSwitch 拆分的占位，未 serve/未引用）。
-> 保留：`web/modelscombo.js` + `web/modelscombo.html`（全屏编辑器，可选功能，非死代码，谨慎起见未删）；
-> `web/FreeLatent.HTML`（设计参考）。
+> **本版为 V1.02 稳定版**（`__version__="1.0.2"`，`pyproject.toml` 同步 1.0.2）。此前 1.4/1.6/1.0 等均为**测试版/RC**，V1.01 定稿后进入稳定维护分支；本次升到 **1.0.2**。
+> **V1.02 变更**：①ModelsCombo 浏览弹窗搜索增强（按 标题/作者/类别/基础模型/标签/触发词/描述/版本/文件/全部 字段过滤 + 「搜索范围」下拉）；②移除全屏编辑器页面 `web/modelscombo.html`、设计参考 `web/FreeLatent.HTML`；③删除孤儿 `web/modelscombo.js`（侧边栏「模型组合」菜单入口，无节点引用、指向已删页面）与 `.bak_*` 备份残留。
+> **依赖**：`mutagen>=1.46.0`（音频/视频标签读取，可选增强）；`ffprobe` 外部可选（`shutil.which` 探测），不装则只走 sidecar JSON 兜底。
+> **已删**：`web/freeswitch_node.js`（旧 FreeSwitch 拆分占位，未 serve/未引用）；`web/modelscombo.html`、`web/FreeLatent.HTML`（用户已删）；`web/modelscombo.js` 与 `web/*.js.bak_*`、`__init__.py.bak_*`（本次清理）。
 > **环境**：ComfyUI `0.30.x`；前端 `comfyui_frontend_package`（Vue / Node 2.0，addDOMWidget）。
 > venv python：`<ComfyUI>\.venv\Scripts\python.exe`。
 > 插件目录：`D:\software\AI_software\Comfy-Desktop\ComfyUI-Installs\Comfyui0.30.1\ComfyUI\custom_nodes\Comfyui-EzFlex-Presets`
-> **最新稳定版行为见文末「最新稳定版（V1.01 定稿）」**（历史“Blender g/r/s + 坐标球”方案已整体回退）。
+> **最新稳定版行为见文末「最新稳定版（V1.02 定稿）」**（历史“Blender g/r/s + 坐标球”方案已整体回退）。
 
 ---
 
@@ -19,7 +17,7 @@
 节点（类别均 `EzFlex`，Add-Node 菜单顺序）：
 `EzFlex-MainControl → EzFlex-ModelsCombo → EzFlex-FreeLatent → EzFlex-NodeSwitchMaster → EzFlex-NodeSwitchGroup → EzFlex-ParamPresetControl → EzFlex-ParamPresetOutput → EzFlex-PreviewAny`
 
-- 版本：`__init__.py` `__version__="1.0.1"`；`pyproject.toml` `version="1.0.1"`。
+- 版本：`__init__.py` `__version__="1.0.2"`；`pyproject.toml` `version="1.0.2"`。
 - 控制链：`MainControl → Master → Group → node.mode(0/2/4)`；`ParamPresetControl →(连线)→ ParamPresetOutput`。
 - `EzFlex-PreviewAny`：白板放置多个可拖拽排序的预览卡片，每卡一个 `input_N`(ANY) + `output_N`(STRING)，
   接收任意输入自动解析为文本/图像预览并逐个输出字符串；参考 AUNPassthroughAnyMulti。
@@ -52,8 +50,8 @@ Comfyui-EzFlex-Presets/
     ├── param_preset_control.js    # ParamPresetControl 面板 + 动态端口
     ├── param_preset_output.js     # ParamPresetOutput 面板 + 动态端口
     ├── preview_any.js             # PreviewAny 白板 + 拖拽卡片 + 动态 socket + 预览
-    └── modelscombo.html/js / FreeLatent.HTML   # 全屏编辑器(可选) / 设计参考；freeswitch_node.js 已删
 ```
+> 注：`web/modelscombo.html`、`web/FreeLatent.HTML`（用户已删）、`web/modelscombo.js`（孤儿入口，已删）、`freeswitch_node.js`（已删）均不再存在。
 > 注：NodeSwitchGroup 的命名预设已改为**按实例存 config**（不再写服务器），故 `user_data` 里没有
 > `EzFlex-NodeSwitchGroup.json`。
 
@@ -189,8 +187,7 @@ Comfyui-EzFlex-Presets/
 - [ ] modelscombo/freelatent 自身边缘 overlay 若挡住输出 socket 拖线，需单独让位（本次只修了 5 个 EzFlex 面板手柄）。
 - [ ] MainControl 目标是 Combo/Latent/Master/ParamCtrl 的**预设**；Group/ParamOut 仅由「加载全部」创建，不直接控制。
 - [ ] FreeLatent `seedPresets` 首启会写默认预设；`customRatios` 比例预设独立。
-- [ ] `web/freeswitch_node.js` 已删除（旧 FreeSwitch 拆分占位）。
-- [ ] `web/modelscombo.js`/`.html` 是**可选**全屏编辑器（非死代码），若确认不用可删（需同时从 `__init__.py` `_serve_no_store` 元组里移除这两项）。
+- [x] `web/freeswitch_node.js`、`web/modelscombo.html`、`web/FreeLatent.HTML`、`web/modelscombo.js`、`web/*.js.bak_20260902_021003`、`__init__.py.bak_20260902_021003` 均已删除（V1.02 清理）；`__init__.py` `_serve_no_store` 已同步移除 `modelscombo.html` 与 `modelscombo.js` 条目。
 - [ ] 修改 Python（新节点/路由/类）需完整重启 ComfyUI；前端 JS no-store，刷新页面即生效。
 
 ---
@@ -332,15 +329,16 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 
 ---
 
-# 最新稳定版（V1.01 定稿）
+# 最新稳定版（V1.02 定稿）
 
-> 当前定为**最新稳定版 V1.0.1**。`__version__="1.0.1"`、`pyproject.toml version="1.0.1"`。
+> 当前定为**最新稳定版 V1.0.2**。`__version__="1.0.2"`、`pyproject.toml version="1.0.2"`。
 > 此前的“Blender 风格 g/r/s + 坐标球 + 选中框 + 变换原点”已**整体回退**（无法真机验证且多处抖动/失效），
 > 改为下面这套稳定、简洁的预览版。以下均为当前真机确认过的行为。
 > **V1.0 关键新增**：socket 触发区/面板布局重做 + 普通模式 / Nodes 2.0（Vue）双模式兼容（见 H 节）；
 > ModelsCombo 新增「⧉ 浏览」批量添加弹窗（LoraManager 元数据/卡片布局）；PreviewAny 图片/视频/3D/音频「生成信息」读取链。
 > **V1.01 新增修复**：NodeSwitchGroup（多 Group 定时器按节点、同名分组 `groupKey` 状态键）、
 > ParamPresetControl 换预设不断连（位置复用旧 socket 保连接）。
+> **V1.02 变更**：ModelsCombo 浏览弹窗顶部搜索增强（见 I.1 节）——新增「搜索范围」下拉，可按 标题/作者/模型类别/基础模型/标签/触发词/描述/版本/文件名·路径/全部 过滤；移除 `web/modelscombo.html`、`web/FreeLatent.HTML`；删除孤儿 `web/modelscombo.js`（侧边栏「模型组合」入口，无节点引用）与 `.bak_*` 备份残留；`_serve_no_store` 同步移除 `modelscombo.html`/`modelscombo.js`。
 
 ## A. 3D 查看器（稳定版）
 - **纯预览**：左键拖空白=环绕、右键/Shift 拖=平移、滚轮=缩放、⛶/ESC=全屏/退出。
@@ -483,6 +481,7 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 - 卡片：左上角「类型+架构缩写」（`_baseAbbr`，`_BB_ABBR` 映射：Anima→ANI、Illustrious→IL、SDXL→XL、NoobAI→NAI…，不认识取首字母）；右上角**半透明圆形按钮**「+ / −」→ `toggleLoaderFromMeta`（内部 `addLoaderFromMeta` / `removeLoaderFromMeta`，按 `type+file` 匹配）；底部**毛玻璃**信息条只显示标题+版本（`.mc-b-info`）。
 - 侧栏文件夹树：由已过滤（按 tab 类型）的 `item.file` 目录段 `_buildTree` 生成；**点文件夹行任意处=展开/收起并选中**；`_bbRecursive` 开启时 `_expandAllFolders()` 展开全部；四个按钮=树/列表切换、递归、全部折叠、隐藏侧栏（收缩成 34px 窄轨，展开/收缩同一行原位切换箭头）。
 - 关键：`item.file` 必须是 ComfyUI 相对路径；`_isLoaded(node,type,file)` 防重复；`renderLoraBrowserGrid` 每次重建卡片并调 `renderFolderSidebar`。
+- **头部搜索（`.mc-bb-search`）+ 搜索范围下拉（`.mc-bb-searchfield`，位于搜索框后）**：`input`/`change` 事件写入 `_bbQuery`/`_bbSearchField` 并即时 `renderLoraBrowserGrid`。搜索范围选项：全部字段 / 标题·名称 / 作者 / 模型类别 / 基础模型 / 标签 / 触发词 / 描述 / 版本 / 文件名·路径；字段提取自 `model_name/file_name/file/base_model/author` + `tags/trainedWords/modelDescription/description/usage_tips/notes` + `civitai`（name/modelName/baseModel/description/tags/creator/modelType）；数组元素归一化为字符串（兼容字符串、`{name}`/`{tag}`/`{label}`/`{text}` 对象及嵌套数组）。`author` 由后端 `_lora_meta_summary` 补充（优先 `meta.author`，再取 `meta.creator.username`）。
 - 入口按钮在 `buildRoot` 的 `.mc-bar`：`addSel`（添加）之后插入 `browseBtn`，点击 `openLoraBrowser(node)`。
 
 ### I.2 PreviewAny「生成信息」读取链
@@ -500,6 +499,6 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 - 前端：`entry.gen_meta` 出现即显示「生成信息」按钮（`openKeyValueModal`）；MODEL/CLIP/VAE 用自己的 `entry.meta`（模型元数据信息卡），不叠加 gen_meta。
 
 ### I.3 依赖 / 环境
-- `pyproject.toml`：`version="1.0.1"`；`dependencies=["mutagen>=1.46.0"]`（音频/视频标签读取）；`ffprobe` 为外部可选（`shutil.which` 探测，不装则只走 sidecar JSON 兜底）。
+- `pyproject.toml`：`version="1.0.2"`；`dependencies=["mutagen>=1.46.0"]`（音频/视频标签读取）；`ffprobe` 为外部可选（`shutil.which` 探测，不装则只走 sidecar JSON 兜底）。
 - 前端 JS no-store；**Python 改动（新版路由/解析）需重启 ComfyUI**，前端 Ctrl+F5。
 - 模型元数据读取只需 `safetensors`/`gguf`/`onnx`（ComfyUI 自带 `comfy.utils.load_torch_file`，缺失依赖时降级为「无元数据」）。

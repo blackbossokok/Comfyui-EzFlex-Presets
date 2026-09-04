@@ -60,7 +60,7 @@ import comfy.sd
 
 from comfy_api.latest import io
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 WEB_DIRECTORY = "./web"
 
@@ -81,7 +81,7 @@ try:
         return _handler
 
     _routes = PromptServer.instance.routes
-    for _fname in ("modelscombo.html", "modelscombo.js", "modelscombo_node.js", "freelatent_node.js",
+    for _fname in ("modelscombo_node.js", "freelatent_node.js",
                    "ezflex_service.js", "node_switch_group.js", "node_switch_master.js",
                    "main_control.js", "param_preset_control.js", "param_preset_output.js",
                    "preview_any.js"):
@@ -227,12 +227,19 @@ def _civitai_summary(c):
 def _lora_meta_summary(type_, rel, meta):
     tags = meta.get("tags")
     trained = meta.get("trainedWords")
+    creator_meta = meta.get("creator")
+    author = meta.get("author")
+    if not author and isinstance(creator_meta, dict):
+        author = creator_meta.get("username") or creator_meta.get("name")
+    if not author and isinstance(creator_meta, str):
+        author = creator_meta
     return {
         "type": type_,
         "file": rel,
         "file_name": meta.get("file_name"),
         "model_name": meta.get("model_name"),
         "base_model": meta.get("base_model"),
+        "author": author,
         "size": meta.get("size"),
         "modified": meta.get("modified"),
         "sha256": meta.get("sha256"),

@@ -5,7 +5,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { makeDomWidgetHitThrough } from "./ezflex_service.js";
 
-// ===== 现代乳白风样式（与 modelscombo.html 配置页同一套观感）=====
+// ===== 现代乳白风样式（ModelsCombo 内嵌面板同套观感）=====
 const MC_CSS = `
 .mc-socket-strip{position:absolute;top:0;bottom:0;width:30px;pointer-events:none;z-index:5;}
 .mc-socket-strip-l{left:0;}
@@ -83,6 +83,8 @@ const MC_CSS = `
 .mc-bb-badge{font-size:11px;color:#6b7a8e;font-weight:500;}
 .mc-bb-search{flex:1 1 auto;max-width:360px;min-width:120px;padding:6px 10px;font-size:12px;border:1px solid #dce3ec;border-radius:7px;background:#fff;outline:none;font-family:inherit;}
 .mc-bb-search:focus{border-color:#64748b;box-shadow:0 0 0 3px rgba(43,58,74,.06);}
+.mc-bb-searchfield{flex:0 0 auto;min-width:100px;max-width:150px;height:32px;padding:4px 8px;font-size:12px;border:1px solid #dce3ec;border-radius:7px;background:#fff;outline:none;font-family:inherit;cursor:pointer;box-sizing:border-box;}
+.mc-bb-searchfield:focus{border-color:#64748b;box-shadow:0 0 0 3px rgba(43,58,74,.06);}
 .mc-bb-count{font-size:12px;color:#6b7a8e;white-space:nowrap;}
 .mc-bb-close{position:absolute;top:10px;right:12px;z-index:5;width:30px;height:30px;border-radius:50%;border:1px solid #e6e9ef;background:#fff;color:#6b7a8e;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.06);}
 .mc-bb-close:hover{background:#eef1f6;color:#1a1f2b;}
@@ -1148,7 +1150,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   }
 
   // ===== 浏览弹窗（读取 LoraManager 生成的 metadata.json + 预览图）=====
-  let _bbOverlay = null, _bbNode = null, _bbItems = [], _bbTabType = '', _bbQuery = '', _bbEscBound = false;
+  let _bbOverlay = null, _bbNode = null, _bbItems = [], _bbTabType = '', _bbQuery = '', _bbSearchField = 'all', _bbEscBound = false;
   let _bbSelFolder = '', _bbRecursive = true, _bbSidebarMode = 'tree', _bbSidebarHidden = false;
   let _bbTree = {}, _bbExpanded = new Set();
   let _bdOverlay = null, _bdItem = null, _bdNode = null;
@@ -1317,9 +1319,16 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const title = el('div', 'mc-bb-title'); title.textContent = '模型浏览器';
     const badge = el('div', 'mc-bb-badge'); badge.textContent = 'LoraManager';
     const search = el('input', 'mc-bb-search'); search.type = 'text'; search.placeholder = '搜索名称 / 标签…';
+    const searchField = el('select', 'mc-bb-searchfield');
+    [['all','全部字段'],['title','标题/名称'],['author','作者'],['category','模型类别'],['base','基础模型'],['tags','标签'],['trained','触发词'],['desc','描述'],['version','版本'],['file','文件名/路径']].forEach(([v,label]) => {
+      const o = el('option', null, { value: v });
+      o.textContent = label;
+      searchField.appendChild(o);
+    });
+    searchField.value = 'all';
     const count = el('div', 'mc-bb-count'); count.textContent = '0';
     const close = el('button', 'mc-bb-close'); close.textContent = '✕'; close.title = '关闭'; close.setAttribute('aria-label', '关闭');
-    header.appendChild(title); header.appendChild(badge); header.appendChild(search); header.appendChild(count); header.appendChild(close);
+    header.appendChild(title); header.appendChild(badge); header.appendChild(search); header.appendChild(searchField); header.appendChild(count); header.appendChild(close);
     const tabs = el('div', 'mc-bb-tabs');
     const body = el('div', 'mc-bb-body');
     const side = el('div', 'mc-bb-side');
@@ -1343,12 +1352,13 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     document.body.appendChild(ov);
     close.addEventListener('click', closeLoraBrowser);
     search.addEventListener('input', () => { _bbQuery = search.value.toLowerCase(); renderLoraBrowserGrid(); });
+    searchField.addEventListener('change', () => { _bbSearchField = searchField.value; renderLoraBrowserGrid(); });
     b1.addEventListener('click', () => { _bbSidebarMode = _bbSidebarMode === 'tree' ? 'list' : 'tree'; b1.classList.toggle('active', _bbSidebarMode === 'list'); renderFolderSidebar(); });
     b2.addEventListener('click', () => { _bbRecursive = !_bbRecursive; b2.classList.toggle('active', _bbRecursive); if (_bbRecursive) _expandAllFolders(); renderLoraBrowserGrid(); });
     b3.addEventListener('click', () => { _bbExpanded.clear(); renderFolderSidebar(); });
     b4.addEventListener('click', () => toggleSidebarHidden());
     _bbOverlay = ov;
-    _bbOverlay._grid = grid; _bbOverlay._count = count; _bbOverlay._search = search;
+    _bbOverlay._grid = grid; _bbOverlay._count = count; _bbOverlay._search = search; _bbOverlay._searchField = searchField;
     _bbOverlay._tabs = tabs; _bbOverlay._side = side; _bbOverlay._tree = tree; _bbOverlay._main = main;
     return _bbOverlay;
   }
@@ -1379,8 +1389,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   function openLoraBrowser(node) {
     const ov = browserEl();
     _bbNode = node;
-    _bbQuery = ''; _bbTabType = ''; _bbSelFolder = ''; _bbExpanded.clear();
+    _bbQuery = ''; _bbTabType = ''; _bbSelFolder = ''; _bbExpanded.clear(); _bbSearchField = 'all';
     ov._search.value = '';
+    if (ov._searchField) ov._searchField.value = 'all';
     ov._side.classList.remove('collapsed'); _bbSidebarHidden = false;
     const b4 = ov._side.querySelector('.mc-bb-sbtn-hide');
     if (b4) { b4.innerHTML = _SVG.chevLeft; b4.title = '隐藏侧栏'; }
@@ -1442,9 +1453,53 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     let items = _bbItems;
     if (_bbTabType) items = items.filter((x) => x.type === _bbTabType);
     if (_bbQuery) {
-      const q = _bbQuery;
+      const q = (_bbQuery || '').trim().toLowerCase();
+      const words = (v) => {
+        if (!v) return [];
+        const arr = Array.isArray(v) ? v : [v];
+        const out = [];
+        arr.forEach((w) => {
+          if (w == null) return;
+          if (Array.isArray(w)) { out.push(...words(w)); return; }
+          if (typeof w === 'string') { out.push(w); return; }
+          if (typeof w === 'number' || typeof w === 'boolean') { out.push(String(w)); return; }
+          if (typeof w === 'object') {
+            if (typeof w.name === 'string') out.push(w.name);
+            else if (typeof w.tag === 'string') out.push(w.tag);
+            else if (typeof w.label === 'string') out.push(w.label);
+            else if (typeof w.text === 'string') out.push(w.text);
+            else out.push(JSON.stringify(w));
+            return;
+          }
+          out.push(String(w));
+        });
+        return out;
+      };
+      const field = _bbSearchField || 'all';
+      const pick = (x) => {
+        const civ = x.civitai || {};
+        switch (field) {
+          case 'title': return words([x.model_name, civ.modelName]);
+          case 'file': return words([x.file_name, x.file]);
+          case 'author': return words([x.author, x.creator, civ.creator]);
+          case 'category': return words([(LABEL[x.type] || x.type || ''), civ.modelType]);
+          case 'base': return words([x.base_model, civ.baseModel]);
+          case 'tags': return words([x.tags, civ.tags]);
+          case 'trained': return words(x.trainedWords);
+          case 'desc': return words([x.modelDescription, x.description, x.usage_tips, civ.description]);
+          case 'version': return words(civ.name);
+          default: return words([
+            x.model_name, x.file_name, x.file, x.base_model,
+            x.author, x.creator, civ.creator,
+            x.modelDescription, x.description, x.usage_tips, x.notes,
+            x.tags, x.trainedWords,
+            civ.tags, civ.name, civ.baseModel, civ.description, civ.modelName, civ.modelType,
+            (LABEL[x.type] || x.type || '')
+          ]);
+        }
+      };
       items = items.filter((x) => {
-        const blob = [x.model_name, x.file_name, x.file, x.base_model, (x.tags || []).join(' ')].join(' ').toLowerCase();
+        const blob = pick(x).flat().filter(Boolean).join(' ').toLowerCase();
         return blob.indexOf(q) >= 0;
       });
     }

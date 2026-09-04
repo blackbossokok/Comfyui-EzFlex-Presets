@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.01 稳定版）
+# Comfyui-EzFlex-Presets（V1.02 稳定版）
 
 用于comfyui的灵活组合插件，使用ai构建完成，包括这个ReadMe，目前插件还在更新完善中。
 
@@ -6,7 +6,7 @@ EzFlex 插件套件：模型组合加载器（`EzFlex-ModelsCombo`）+ 分辨率
 + 控制/参数预设节点（`NodeSwitchGroup` / `NodeSwitchMaster` / `MainControl` / `ParamPresetControl` / `ParamPresetOutput`）
 + 任意预览（`EzFlex-PreviewAny`），共 **8 个节点**，都在 ComfyUI 前端里用可视化面板配置，再通过节点真实加载/生成/控制。
 
-> 版本：`__version__="1.0.1"`、`pyproject.toml version="1.0.1"`。此前 1.4/1.6/1.0 等均为测试版/RC，现定为一个稳定维护分支 V1.01。
+> 版本：`__version__="1.0.2"`、`pyproject.toml version="1.0.2"`。此前 1.4/1.6/1.0 等均为测试版/RC，现定为一个稳定维护分支 V1.02。
 > 依赖：`mutagen>=1.46.0`（音频/视频标签读取）；`ffprobe`（外部可选，装则读视频容器标签）。
 
 ## 安装
@@ -25,11 +25,10 @@ EzFlex 插件套件：模型组合加载器（`EzFlex-ModelsCombo`）+ 分辨率
 改动会**实时写入节点的 `config` 输入框**（该输入进 prompt、驱动 Python 加载），
 所以无需手动粘贴、无需刷新，也**不存在页面缓存旧版的问题**（控件由前端 JS 运行时生成）。
 
-**全屏编辑器（可选）**
+**全屏编辑器（已移除）**
 
-左侧边栏的「模型组合」按钮会打开一个独立的全屏配置页（支持拖拽排序、预设保存/加载），
-改动同样写回同一份 `config` JSON，两处互通。
-（页面通过 `modelscombo.html` 托管，已加 `no-store`，但更推荐直接用节点内嵌控件。）
+> `web/modelscombo.html` 与入口 `web/modelscombo.js` 均已删除（侧边栏「模型组合」配置器不再提供）。
+> 请直接使用**节点内嵌控件**（改动实时写入节点 `config`，无缓存问题）。
 
 ## 节点
 
@@ -85,8 +84,6 @@ Comfyui-EzFlex-Presets/
 │                        #   EzFlex-ParamPresetControl.json（NodeSwitchGroup 预设按实例存 config）
 └── web/
     ├── modelscombo_node.js  # ModelsCombo 内嵌控件（addDOMWidget）
-    ├── modelscombo.js       # 全屏编辑器（可选）侧边栏按钮 + 命令
-    ├── modelscombo.html     # 全屏配置器页面（可选）
     ├── freelatent_node.js   # FreeLatent 内嵌 canvas 分辨率选择器
     ├── ezflex_service.js    # 共享：节点注册表 / 分组匹配 / node.mode / 预设库 API / 命名弹窗
     ├── node_switch_group.js # NodeSwitchGroup 面板
