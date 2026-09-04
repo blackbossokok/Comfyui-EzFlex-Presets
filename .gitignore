@@ -18,3 +18,4 @@ Thumbs.db
 
 # Local release helper (not published)
 release.ps1
+release.bat

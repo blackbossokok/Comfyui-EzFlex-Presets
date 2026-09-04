@@ -1,10 +1,8 @@
-# Comfyui-EzFlex-Presets — ComfyUI custom node package manifest.
-# 说明：ComfyUI-Manager 通过本文件的 [project] 元数据读取版本/描述/依赖；仓库安装走 git clone（custom_nodes）。
-# 若你希望在 PyPI 上发布（可选），再补一个 LICENSE 文件并在这里加上 license 字段。
-[project]
+﻿# Comfyui-EzFlex-Presets 鈥?ComfyUI custom node package manifest.
+# 璇存槑锛欳omfyUI-Manager 閫氳繃鏈枃浠剁殑 [project] 鍏冩暟鎹鍙栫増鏈?鎻忚堪/渚濊禆锛涗粨搴撳畨瑁呰蛋 git clone锛坈ustom_nodes锛夈€?# 鑻ヤ綘甯屾湜鍦?PyPI 涓婂彂甯冿紙鍙€夛級锛屽啀琛ヤ竴涓?LICENSE 鏂囦欢骞跺湪杩欓噷鍔犱笂 license 瀛楁銆?[project]
 name = "Comfyui-EzFlex-Presets"
 version = "1.0.2"
-description = "EzFlex 预设套件：模型组合加载器、分辨率选择器、节点控制总预设/分组预设/总控制、参数预设控制/输出、任意预览。"
+description = "EzFlex 棰勮濂椾欢锛氭ā鍨嬬粍鍚堝姞杞藉櫒銆佸垎杈ㄧ巼閫夋嫨鍣ㄣ€佽妭鐐规帶鍒舵€婚璁?鍒嗙粍棰勮/鎬绘帶鍒躲€佸弬鏁伴璁炬帶鍒?杈撳嚭銆佷换鎰忛瑙堛€?
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "blackbossokok" }]
