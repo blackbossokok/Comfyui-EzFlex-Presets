@@ -1,0 +1,104 @@
+[
+  {
+    "name": "anima",
+    "loaders": [
+      {
+        "id": 2,
+        "type": "unet",
+        "name": "animaM",
+        "file": "ANIMA\\anima-base-v1.0-fp8mixed.safetensors",
+        "extra": {
+          "device": "default",
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 3,
+        "type": "clip",
+        "name": "anima",
+        "file": "qwen\\qwen_3_06b_base.safetensors",
+        "extra": {
+          "type": "stable_diffusion",
+          "device": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 4,
+        "type": "vae",
+        "name": "anima",
+        "file": "qwen\\qwen_image_vae.safetensors",
+        "extra": {
+          "device": "default",
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 5,
+        "type": "lora",
+        "name": "LoRA_0",
+        "file": "加速lora\\animaTurbo\\anima-turbo-lora-circlestone-labs-v0.2.safetensors",
+        "extra": {
+          "strength_model": 1,
+          "strength_clip": 1
+        },
+        "targetId": 2
+      }
+    ]
+  },
+  {
+    "name": "krea2",
+    "loaders": [
+      {
+        "id": 2,
+        "type": "unet",
+        "name": "UNET_0",
+        "file": "krea2\\krea2_turbo_int8_convrot.safetensors",
+        "extra": {
+          "device": "default",
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 3,
+        "type": "clip",
+        "name": "CLIP_0",
+        "file": "qwen\\qwen3vl_4b_fp8_scaled.safetensors",
+        "extra": {
+          "type": "krea2",
+          "device": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 4,
+        "type": "vae",
+        "name": "VAE_0",
+        "file": "qwen\\qwen_image_vae.safetensors",
+        "extra": {
+          "device": "default",
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      }
+    ]
+  },
+  {
+    "name": "illustrious",
+    "loaders": [
+      {
+        "id": 1,
+        "type": "checkpoint",
+        "name": "Checkpoint_0",
+        "file": "Illustrious\\waiIllustriousSDXL_v170.safetensors",
+        "extra": {
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      }
+    ]
+  }
+]

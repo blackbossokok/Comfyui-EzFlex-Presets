@@ -1,0 +1,205 @@
+{
+  "presets": [
+    {
+      "name": "竖2:3 - 1024x1536 - (2:3)",
+      "config": {
+        "width": 1024,
+        "height": 1536,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "横3:2 - 1536x1024 - (3:2)",
+      "config": {
+        "width": 1536,
+        "height": 1024,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "宽屏 - 1368x768 - (16:9)",
+      "config": {
+        "width": 1368,
+        "height": 768,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "竖屏 - 768x1368 - (9:16)",
+      "config": {
+        "width": 768,
+        "height": 1368,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "超宽 - 1536x656 - (21:9)",
+      "config": {
+        "width": 1536,
+        "height": 656,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "720p HD - 1280x720 - (16:9)",
+      "config": {
+        "width": 1280,
+        "height": 720,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "1080p Full HD - 1920x1080 - (16:9)",
+      "config": {
+        "width": 1920,
+        "height": 1080,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "1440p 2K - 2560x1440 - (16:9)",
+      "config": {
+        "width": 2560,
+        "height": 1440,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "4K UHD - 3840x2160 - (16:9)",
+      "config": {
+        "width": 3840,
+        "height": 2160,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "8K UHD - 7680x4320 - (16:9)",
+      "config": {
+        "width": 7680,
+        "height": 4320,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "Cinema 2.35:1 - 1920x817 - (2.35:1)",
+      "config": {
+        "width": 1920,
+        "height": 817,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "Cinema 4K - 4096x1744 - (2.35:1)",
+      "config": {
+        "width": 4096,
+        "height": 1744,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "Portrait 9:16 - 1080x1920 - (9:16)",
+      "config": {
+        "width": 1080,
+        "height": 1920,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "方形 - 1024x1024 - (1:1)",
+      "config": {
+        "width": 1024,
+        "height": 1024,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "竖2:3 - 840x1256 - (2:3)",
+      "config": {
+        "width": 840,
+        "height": 1256,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "横3:2 - 1256x840 - (3:2)",
+      "config": {
+        "width": 1256,
+        "height": 840,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "竖3:4 - 888x1184 - (3:4)",
+      "config": {
+        "width": 888,
+        "height": 1184,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "横4:3 - 1184x888 - (4:3)",
+      "config": {
+        "width": 1184,
+        "height": 888,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "竖4:5 - 912x1144 - (4:5)",
+      "config": {
+        "width": 912,
+        "height": 1144,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "横5:4 - 1144x912 - (5:4)",
+      "config": {
+        "width": 1144,
+        "height": 912,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "竖9:21 - 672x1568 - (9:21)",
+      "config": {
+        "width": 672,
+        "height": 1568,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "竖10:16 - 808x1296 - (10:16)",
+      "config": {
+        "width": 808,
+        "height": 1296,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "宽屏10 - 1296x808 - (16:10)",
+      "config": {
+        "width": 1296,
+        "height": 808,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "超宽 - 1568x672 - (21:9)",
+      "config": {
+        "width": 1568,
+        "height": 672,
+        "batch_size": 1
+      }
+    },
+    {
+      "name": "电影宽银幕 - 1568x664 - (2.35:1)",
+      "config": {
+        "width": 1568,
+        "height": 664,
+        "batch_size": 1
+      }
+    }
+  ],
+  "customRatios": []
+}

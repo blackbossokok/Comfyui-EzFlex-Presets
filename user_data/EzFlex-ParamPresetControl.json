@@ -1,0 +1,90 @@
+[
+  {
+    "name": "default",
+    "label": "default",
+    "groups": []
+  },
+  {
+    "name": "测试数据",
+    "label": "EzFlex-调试用-对错嵌套",
+    "groups": [
+      {
+        "id": "g_test",
+        "name": "测试组",
+        "out": "all",
+        "params": [
+          {
+            "id": "p1",
+            "name": "有效list",
+            "type": "list",
+            "value": "[1, 2, 3]",
+            "enabled": true
+          },
+          {
+            "id": "p2",
+            "name": "有效tuple",
+            "type": "tuple",
+            "value": "(1, 2, 3)",
+            "enabled": true
+          },
+          {
+            "id": "p3",
+            "name": "有效set",
+            "type": "set",
+            "value": "{121, 15, (123, 24, 21), {213, 4, 2}, [23]}",
+            "enabled": true
+          },
+          {
+            "id": "p4",
+            "name": "有效dict(单引号)",
+            "type": "dictionary",
+            "value": "{'123': 1244, \"你好\": 123}",
+            "enabled": true
+          },
+          {
+            "id": "p5",
+            "name": "嵌套list(含tuple/set/dict)",
+            "type": "list",
+            "value": "[1, (2, 3), {4, 5}, {'a': 1}, [6]]",
+            "enabled": true
+          },
+          {
+            "id": "p6",
+            "name": "无效list(写成tuple)",
+            "type": "list",
+            "value": "(1, 2, 3)",
+            "enabled": true
+          },
+          {
+            "id": "p7",
+            "name": "无效int",
+            "type": "int",
+            "value": "abc",
+            "enabled": true
+          },
+          {
+            "id": "p8",
+            "name": "有效bool",
+            "type": "bool",
+            "value": "True",
+            "enabled": true
+          },
+          {
+            "id": "p9",
+            "name": "有效float",
+            "type": "float",
+            "value": "3.14",
+            "enabled": true
+          },
+          {
+            "id": "p10",
+            "name": "无效dict(没写冒号)",
+            "type": "dictionary",
+            "value": "{1, 2, 3}",
+            "enabled": true
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,10 @@
+[
+  {
+    "name": "新预设",
+    "label": "新预设",
+    "states": {
+      "Group": "off",
+      "Group2": "on"
+    }
+  }
+]

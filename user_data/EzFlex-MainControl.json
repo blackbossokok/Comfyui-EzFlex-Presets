@@ -1,0 +1,16 @@
+[
+  {
+    "name": "新总控制预设",
+    "label": "新总控制预设",
+    "targets": {
+      "184": {
+        "type": "EzFlex-NodeSwitchMaster",
+        "preset": "全部开启"
+      },
+      "186": {
+        "type": "EzFlex-ParamPresetControl",
+        "preset": "新预设"
+      }
+    }
+  }
+]
