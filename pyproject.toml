@@ -14,9 +14,10 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
     "Topic :: Multimedia :: Graphics",
 ]
-# license = { text = "MIT" }   # 添加 LICENSE 文件后取消注释并改成实际许可证
+license = { text = "MIT" }
 dependencies = ["mutagen>=1.46.0"]
 
 [project.urls]
