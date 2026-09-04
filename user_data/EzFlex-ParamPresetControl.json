@@ -86,5 +86,156 @@
         ]
       }
     ]
+  },
+  {
+    "name": "加速stepcfg设置",
+    "label": "加速stepcfg设置",
+    "groups": [
+      {
+        "id": "x_mtmyhj1r_zq3yd",
+        "name": "加速控制",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtmyhklo_l6kv1",
+            "name": "step",
+            "type": "int",
+            "value": 8,
+            "enabled": true,
+            "_raw": "8"
+          },
+          {
+            "id": "x_mtmyhr3m_os9lg",
+            "name": "cfg",
+            "type": "float",
+            "value": 1,
+            "enabled": true,
+            "_raw": "1"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "不加速",
+    "label": "不加速",
+    "groups": [
+      {
+        "id": "x_mtmyiofa_qgd8x",
+        "name": "参数组 1",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtmyipsz_lfi4f",
+            "name": "参数1",
+            "type": "int",
+            "value": 20,
+            "enabled": true,
+            "_raw": "20"
+          },
+          {
+            "id": "x_mtmyir4x_xdhnu",
+            "name": "参数2",
+            "type": "float",
+            "value": 6,
+            "enabled": true,
+            "_raw": "6"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "不加速333",
+    "label": "不加速333",
+    "groups": [
+      {
+        "id": "x_mtmyiofa_qgd8x",
+        "name": "参数组 1",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtmyipsz_lfi4f",
+            "name": "参数1",
+            "type": "int",
+            "value": 20,
+            "enabled": true,
+            "_raw": "20"
+          },
+          {
+            "id": "x_mtmyir4x_xdhnu",
+            "name": "参数2",
+            "type": "float",
+            "value": 6,
+            "enabled": true,
+            "_raw": "6"
+          }
+        ]
+      },
+      {
+        "id": "x_mtmz6b49_l7zzs",
+        "name": "参数组 2",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtmz6fj1_agobo",
+            "name": "参数1",
+            "type": "int",
+            "value": "0",
+            "enabled": true
+          },
+          {
+            "id": "x_mtmz6fnc_k1alv",
+            "name": "参数2",
+            "type": "int",
+            "value": "0",
+            "enabled": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "不加速111",
+    "label": "不加速111",
+    "groups": [
+      {
+        "id": "x_mtmyiofa_qgd8x",
+        "name": "参数组 1",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtmyipsz_lfi4f",
+            "name": "参数1",
+            "type": "int",
+            "value": 20,
+            "enabled": true,
+            "_raw": "20"
+          },
+          {
+            "id": "x_mtmyir4x_xdhnu",
+            "name": "参数2",
+            "type": "float",
+            "value": 6,
+            "enabled": true,
+            "_raw": "6"
+          }
+        ]
+      },
+      {
+        "id": "x_mtmz6rb1_chiv4",
+        "name": "参数组 2",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtmz6tvl_fzd40",
+            "name": "参数1",
+            "type": "int",
+            "value": "0",
+            "enabled": true
+          }
+        ]
+      }
+    ]
   }
 ]

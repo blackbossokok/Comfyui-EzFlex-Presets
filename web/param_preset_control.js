@@ -551,16 +551,24 @@ function updatePorts(node, noRedraw) {
   (stateFor(node).groups || []).forEach((g) => { grpById[String(g.id)] = g; });
   want.forEach((w, wi) => {
     let sock = null;
+    // 1) 优先按 _ezGroupId 精确复用（同组在预设切换/拖动排序后仍在时，id 不变）
     for (let i = 0; i < old.length; i++) {
       if (!used.has(i) && old[i]._ezGroupId != null && String(old[i]._ezGroupId) === String(w.id)) { sock = old[i]; used.add(i); break; }
     }
-    if (!sock && old[wi] && !used.has(wi) && old[wi]._ezGroupId == null) { sock = old[wi]; used.add(wi); }
+    // 2) 换预设/重排时组 id 可能变了：只要“输出端口还在”（仍有旧 socket 可顶替该槽位）就**按位置复用旧 socket**，
+    //    保留 Control→Output 的连线（类型 EZFLEX_PARAM_GROUP 恒同，不与下游起冲突），只在 _ezGroupId/name 上改写。
+    if (!sock) {
+      for (let i = 0; i < old.length; i++) {
+        if (!used.has(i)) { sock = old[i]; used.add(i); break; }
+      }
+    }
+    // 3) 无旧 socket 可复用 → 新建（无连接）
     if (!sock) {
       node.addOutput(w.name, w.type, {});
       sock = node.outputs[node.outputs.length - 1];
-      sock._ezGroupId = w.id;
       changed = true;
     }
+    // 注意：位置复用会覆盖 _ezGroupId，Output 侧 connectedGroup 读到的就是新组 id，经 notifyOutputs 后自行重算参数端口。
     if (sock._ezGroupId !== w.id) { sock._ezGroupId = w.id; changed = true; }
     if (sock.name !== w.name) { sock.name = w.name; changed = true; }
     if (sock.type !== w.type) { try { sock.type = w.type; } catch (_) {} changed = true; }

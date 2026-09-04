@@ -125,6 +125,25 @@ function discoverGroups(node) {
 }
 function sigOf(groups) { return groups.map((g) => ((g.title || '') + '/' + (g.color || '') + '/' + (g.graph ? g.graph.id : 0))).join('|'); }
 
+// ===== 分组状态键 =====
+// 同一节点里可能出现**同名分组**（如两个都叫 “Group”）。states 若只用 title 作 key，保存/应用时后者覆盖前者，
+// 导致“双绕过/双禁用/双开启”。这里给同名分组加一个在该节点内唯一的序号后缀（title + '##' + idx），
+// 并保留旧 title-key 兜底（之前保存的预设、或非同名分组仍兼容）。
+function groupKey(st, g) {
+  const title = (g && g.title) || '';
+  const same = (st && st._groups || []).filter((x) => (x && x.title) === title);
+  if (same.length <= 1) return title;
+  const idx = same.indexOf(g);
+  return title + '##' + idx;
+}
+function groupState(st, g) {
+  const k = groupKey(st, g);
+  if (st && st.states && st.states[k] != null) return st.states[k];
+  const t = g && g.title;
+  if (st && st.states && t && st.states[t] != null) return st.states[t];
+  return 'on';
+}
+
 // ===== 应用（把状态写到画布分组内节点 mode）=====
 function applyGroupMode(node, group, mode) {
   const m = MODE_NUM[mode] != null ? MODE_NUM[mode] : 0;
@@ -132,7 +151,7 @@ function applyGroupMode(node, group, mode) {
 }
 function applyAll(node) {
   const st = stateFor(node);
-  st._groups.forEach((g) => applyGroupMode(node, g, st.states[g.title] || 'on'));
+  st._groups.forEach((g) => applyGroupMode(node, g, groupState(st, g)));
 }
 
 // ===== 实例 API（供 NodeSwitchMaster 调用）=====
@@ -147,17 +166,25 @@ function ensureAPI(node) {
   };
 }
 
-// ===== 预设操作（按实例存 config，避免多节点同名互串）=====
+// ===== 预设操作（按实例存 config，避免多节点同名互串；同节点内同名分组用 groupKey 区分）=====
 async function setCurrentPreset(node, name) {
   const st = stateFor(node);
   if (BASE_PRESETS.indexOf(name) >= 0) {
     const mode = name === '全部开启' ? 'on' : (name === '全部禁用' ? 'off' : 'bypass');
-    st._groups.forEach((g) => { st.states[g.title] = mode; });
+    st._groups.forEach((g) => { st.states[groupKey(st, g)] = mode; });
     st.current = name;
   } else {
     const p = st.presets[name];
     if (!p) { refreshUI(node); return; }
-    st._groups.forEach((g) => { st.states[g.title] = (p.states && p.states[g.title]) || 'on'; });
+    st._groups.forEach((g) => {
+      const k = groupKey(st, g);
+      let v = 'on';
+      if (p.states) {
+        if (p.states[k] != null) v = p.states[k];
+        else if (p.states[g.title] != null) v = p.states[g.title];
+      }
+      st.states[k] = v;
+    });
     st.current = name;
   }
   syncToConfig(node);
@@ -169,7 +196,7 @@ async function savePresetToLib(node) {
   if (!name || !name.trim()) return;
   const st = stateFor(node);
   const states = {};
-  st._groups.forEach((g) => { states[g.title] = st.states[g.title] || 'on'; });
+  st._groups.forEach((g) => { states[groupKey(st, g)] = groupState(st, g); });
   const key = name.trim();
   st.presets[key] = { label: key, states };
   st.current = key;
@@ -353,12 +380,12 @@ function renderRow(node, group, refresh) {
   const row = el('div', 'ezg-row');
   const name = el('span', 'gname'); name.textContent = group.title || '未命名分组'; name.title = group.title || '';
   const mode = el('div', 'ezg-mode');
-  const cur = st.states[group.title] || 'on';
+  const cur = groupState(st, group);
   const mk = (v, label) => {
     const b = el('button', 'mode-' + v); b.textContent = label;
     if (cur === v) b.classList.add('active');
     b.addEventListener('click', () => {
-      st.states[group.title] = v;
+      st.states[groupKey(st, group)] = v;
       applyGroupMode(node, group, v);
       syncToConfig(node);
       const btns = mode.querySelectorAll('button');
@@ -409,10 +436,11 @@ function fitNode(node) {
 }
 
 // 定时重扫：分组被移动/改色/改名时自动更新列表（rgthree 服务轮询思路，防抖）
-let _scanTimer = null;
+// ⚠️ 定时器必须**按节点**存放（node._ezScanTimer），不能共用全局变量——否则多个 NodeSwitchGroup
+//    同屏时彼此的 scheduleScan 会互相 clearTimeout，导致只有最后一个节点在刷新分组列表（表现成分组/预设串）。
 function scheduleScan(node) {
-  clearTimeout(_scanTimer);
-  _scanTimer = setTimeout(() => {
+  clearTimeout(node._ezScanTimer);
+  node._ezScanTimer = setTimeout(() => {
     const st = stateFor(node);
     const groups = discoverGroups(node);
     const sig = sigOf(groups);
@@ -459,7 +487,7 @@ function hookPrototype(nt) {
   if (!nt || nt.__ezGroupHooked) return; nt.__ezGroupHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
   const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezScanIv); unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezGroupSetup = false; return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezScanIv); clearTimeout(this._ezScanTimer); unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezGroupSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }
 app.registerExtension({

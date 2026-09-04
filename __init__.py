@@ -60,7 +60,7 @@ import comfy.sd
 
 from comfy_api.latest import io
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 WEB_DIRECTORY = "./web"
 

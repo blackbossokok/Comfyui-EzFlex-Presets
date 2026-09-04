@@ -1,12 +1,12 @@
-# Comfyui-EzFlex-Presets（V1.0 稳定版）
+# Comfyui-EzFlex-Presets（V1.01 稳定版）
+
 用于comfyui的灵活组合插件，使用ai构建完成，包括这个ReadMe，目前插件还在更新完善中。
 
 EzFlex 插件套件：模型组合加载器（`EzFlex-ModelsCombo`）+ 分辨率/Latent 选择器（`EzFlex-FreeLatent`）
 + 控制/参数预设节点（`NodeSwitchGroup` / `NodeSwitchMaster` / `MainControl` / `ParamPresetControl` / `ParamPresetOutput`）
 + 任意预览（`EzFlex-PreviewAny`），共 **8 个节点**，都在 ComfyUI 前端里用可视化面板配置，再通过节点真实加载/生成/控制。
-下一步即将构建多媒体加载器、提示词助手、代码编辑器。
 
-> 版本：`__version__="1.0.0"`、`pyproject.toml version="1.0.0"`。此前 1.4/1.6 等均为测试版/RC，现终定为 V1.0。
+> 版本：`__version__="1.0.1"`、`pyproject.toml version="1.0.1"`。此前 1.4/1.6/1.0 等均为测试版/RC，现定为一个稳定维护分支 V1.01。
 > 依赖：`mutagen>=1.46.0`（音频/视频标签读取）；`ffprobe`（外部可选，装则读视频容器标签）。
 
 ## 安装
@@ -154,7 +154,7 @@ Comfyui-EzFlex-Presets/
 - 输入任意类型自动解析：文本/数字/信息类正常显示、过长点开弹文本框；IMAGE 走 base64 内联预览放大；VIDEO 取首帧 + 帧数；AUDIO 转 WAV 可播放；MODEL/CLIP/VAE 显示文件名并尽量读取元数据（safetensors/gguf/onnx，缺失依赖降级）。
 - 3D 模型旋转/缩放等大媒体侧栏播放为后续扩展。
 
-## V1.0 稳定版新增
+## V1.01 稳定版新增
 
 ### ModelsCombo「⧉ 浏览」批量添加
 - 工具栏「添加加载器」与「预设名」之间新增「⧉ 浏览」按钮，打开**全屏模型浏览器**，读取 LoraManager 生成的 `<模型名>.metadata.json` + 同目录预览图。

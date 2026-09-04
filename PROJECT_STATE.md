@@ -1,7 +1,8 @@
-# EzFlex 插件套件 项目交接文档（V1.0 稳定版）
+# EzFlex 插件套件 项目交接文档（V1.01 稳定版）
 
 > 供新窗口继续开发使用。硬数据，无闲聊。
-> **本版为 V1.0 稳定版**（`__version__="1.0.0"`，`pyproject.toml` 同步 1.0.0）。此前 1.4/1.6 等均为**测试版/RC**，现终定为 `1.0.0`。
+> **本版为 V1.01 稳定版**（`__version__="1.0.1"`，`pyproject.toml` 同步 1.0.1）。此前 1.4/1.6/1.0 等均为**测试版/RC**，现定为一个稳定维护分支 `1.0.1`。
+> **V1.01 新增修复**：NodeSwitchGroup 多节点/同名分组状态键 + 定时器按节点、ParamPresetControl 换预设不断连。
 > **依赖**：新增 `mutagen>=1.46.0`（音频/视频标签读取，可选增强）；`ffprobe` 为外部可选（`shutil.which` 探测），不装则只走 sidecar JSON 兜底。
 > **已清理**：删除废弃的 `web/freeswitch_node.js`（旧 EzFlex-FreeSwitch 拆分的占位，未 serve/未引用）。
 > 保留：`web/modelscombo.js` + `web/modelscombo.html`（全屏编辑器，可选功能，非死代码，谨慎起见未删）；
@@ -9,7 +10,7 @@
 > **环境**：ComfyUI `0.30.x`；前端 `comfyui_frontend_package`（Vue / Node 2.0，addDOMWidget）。
 > venv python：`<ComfyUI>\.venv\Scripts\python.exe`。
 > 插件目录：`D:\software\AI_software\Comfy-Desktop\ComfyUI-Installs\Comfyui0.30.1\ComfyUI\custom_nodes\Comfyui-EzFlex-Presets`
-> **最新稳定版行为见文末「最新稳定版（V1.0 定稿）」**（历史“Blender g/r/s + 坐标球”方案已整体回退）。
+> **最新稳定版行为见文末「最新稳定版（V1.01 定稿）」**（历史“Blender g/r/s + 坐标球”方案已整体回退）。
 
 ---
 
@@ -18,7 +19,7 @@
 节点（类别均 `EzFlex`，Add-Node 菜单顺序）：
 `EzFlex-MainControl → EzFlex-ModelsCombo → EzFlex-FreeLatent → EzFlex-NodeSwitchMaster → EzFlex-NodeSwitchGroup → EzFlex-ParamPresetControl → EzFlex-ParamPresetOutput → EzFlex-PreviewAny`
 
-- 版本：`__init__.py` `__version__="1.0.0"`；`pyproject.toml` `version="1.0.0"`。
+- 版本：`__init__.py` `__version__="1.0.1"`；`pyproject.toml` `version="1.0.1"`。
 - 控制链：`MainControl → Master → Group → node.mode(0/2/4)`；`ParamPresetControl →(连线)→ ParamPresetOutput`。
 - `EzFlex-PreviewAny`：白板放置多个可拖拽排序的预览卡片，每卡一个 `input_N`(ANY) + `output_N`(STRING)，
   接收任意输入自动解析为文本/图像预览并逐个输出字符串；参考 AUNPassthroughAnyMulti。
@@ -86,6 +87,12 @@ Comfyui-EzFlex-Presets/
 - 颜色模式：色点调色盘（ComfyUI 精确 groupcolor：red=#A88/brown=#b06634/green=#8A8/blue=#88A/
   pale_blue=#3f789e/cyan=#8AA/purple=#a1309b/yellow=#b58b2a/black=#444）+ 原生取色圆盘 + 保存/删除颜色预设（localStorage）。
 - **命名预设按实例存 config**（`presets` 键），同名/不同匹配条件的多个 Group 节点互不影响。
+- ⚠️ **多 Group 同屏修复（V1.0）**：自动重扫的分组发现定时器**必须按节点放**（`node._ezScanTimer`），
+  不能共用模块级 `_scanTimer`——否则多个 NodeSwitchGroup 会互相 `clearTimeout`，只剩最后一个在刷新分组列表，
+  表现成“分组/预设串线”。节点删除时清 `clearInterval(_ezScanIv)` + `clearTimeout(_ezScanTimer)`。
+- ⚠️ **同名分组状态键（V1.0 修复）**：同一节点内可能有两个**同名分组**（如都叫 `Group`）。若 `states` 只按
+  `g.title` 作 key，保存/应用时后者覆盖前者 → 出现“双绕过/双禁用/双开启”。现在用 `groupKey(st, g)` =
+  `title + '##' + idx`（同一节点内同名分组的出现序号）作键，并保留旧 `title`-key 兜底；非同名分组键=title（向后兼容旧预设）。
 - 实例 API：`node._ezGroupAPI = { presetNames(), states(), current(), setCurrent(name), refresh() }`。
 - 匹配用 `allGraphGroups`/`groupNodes`/`normalizeColor`；面板标题由节点标题栏编辑（轮询联动 Master/Main）。
 
@@ -116,6 +123,10 @@ Comfyui-EzFlex-Presets/
   （后端按 STRING 原样输出，不解析 Python 字面量）。
 - 动态输出端口 = 参数组数 1:1（`EZFLEX_PARAM_GROUP`）；`updatePorts` 复用 socket（`_ezGroupId`）、重排、
   更新 `o.links`(∪`o.link`) `origin_slot`、POST `/param_preset_control/outputs` 同步类属性。
+- **换预设不断连（V1.0 修复）**：`updatePorts` 复用顺序 = ①按 `_ezGroupId` 精确复用（同组仍在）→ ②**按位置复用
+  第一个未使用旧 socket**（预设切换/重排时组 id 变化但端口“还在”，直接用旧 socket 顶替，保留 Control→Output 连线；
+  类型恒为 `EZFLEX_PARAM_GROUP` 不与下游冲突）→ ③不足才新建。复用后覆盖 `_ezGroupId` 并 `notifyOutputs`，
+  Output 侧 `connectedGroup` 读到新组 id 自己重算参数端口。刷新/重启的 `linkObjMissing`/`deferUnresolved` 守卫不变。
 - 删除参数组用自绘 `uiConfirm`。
 
 ### EzFlex-ParamPresetOutput（参数预设输出，经典 API，动态输出）
@@ -321,13 +332,15 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 
 ---
 
-# 最新稳定版（V1.0 定稿）
+# 最新稳定版（V1.01 定稿）
 
-> 当前定为**最新稳定版 V1.0.0**。`__version__="1.0.0"`、`pyproject.toml version="1.0.0"`。
+> 当前定为**最新稳定版 V1.0.1**。`__version__="1.0.1"`、`pyproject.toml version="1.0.1"`。
 > 此前的“Blender 风格 g/r/s + 坐标球 + 选中框 + 变换原点”已**整体回退**（无法真机验证且多处抖动/失效），
 > 改为下面这套稳定、简洁的预览版。以下均为当前真机确认过的行为。
 > **V1.0 关键新增**：socket 触发区/面板布局重做 + 普通模式 / Nodes 2.0（Vue）双模式兼容（见 H 节）；
 > ModelsCombo 新增「⧉ 浏览」批量添加弹窗（LoraManager 元数据/卡片布局）；PreviewAny 图片/视频/3D/音频「生成信息」读取链。
+> **V1.01 新增修复**：NodeSwitchGroup（多 Group 定时器按节点、同名分组 `groupKey` 状态键）、
+> ParamPresetControl 换预设不断连（位置复用旧 socket 保连接）。
 
 ## A. 3D 查看器（稳定版）
 - **纯预览**：左键拖空白=环绕、右键/Shift 拖=平移、滚轮=缩放、⛶/ESC=全屏/退出。
@@ -381,7 +394,7 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 - 重启 ComfyUI + Ctrl+F5（前端 no-store）。Python 改动需完整重启。
 - `node --check`（各 `web/*.js`）+ `python -c "import ast; ast.parse(...)"` 均通过。
 
-## H. socket 触发区 / 面板布局重做 + 普通模式 & Nodes 2.0 双模式兼容（V1.0 稳定版定稿）
+## H. socket 触发区 / 面板布局重做 + 普通模式 & Nodes 2.0 双模式兼容（V1.01 稳定版定稿）
 
 ### 目标
 修复「socket 触发范围小」，让面板控件居中、只露圆点、可拖线，并**同时兼容普通（LiteGraph）模式与 Nodes 2.0（Vue）模式**。
@@ -430,7 +443,7 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 - ModelsCombo / FreeLatent 的 `_vueH()`（默认 `30`）：Vue 下节点高度 = `内容高 + _vueH()`（标题偏移）。
   - 节点高度跟随加载器数量（`panelH()`），凸出/留白由 `_vueH` 控制：凸出→调大，留白太多→调小。
 
-### 已知限制（V1.0 接受）
+### 已知限制（V1.01 接受）
 - **Vue 模式**下，内容较重的 `EzFlex-ModelsCombo` 与 `EzFlex-FreeLatent` 白色面板**底部仍会略凸出一点点**（白色面板底边略超节点卡片）。
   已在普通模式完美（内容包住、不凸出）；Vue 模式为可接受的轻微瑕疵，**不回退白框**。
 - 其它面板节点两模式均完美。
@@ -444,7 +457,7 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 6. Vue 下无法右键/DOM 拾取 socket 元素，定位问题主要靠 `getBoundingClientRect()` + `.lg-node` 相对坐标 + `getComputedStyle`。
 
 ### 说明
-- 曾用于验证的测试节点 `EzFlex-SocketTest`（`web/socket_test.js` + `SocketTestNode`）已**删除**（V1.0 移除），不再出现在 Add-Node 菜单。
+- 曾用于验证的测试节点 `EzFlex-SocketTest`（`web/socket_test.js` + `SocketTestNode`）已**删除**（V1.01 移除），不再出现在 Add-Node 菜单。
 - 相关 `SOCKET_TEST` 类型、`_serve_no_store` 条目、`NODE_CLASS_MAPPINGS/NODE_DISPLAY_NAME_MAPPINGS` 条目均已同步清理；无残留引用。
 
 ### 验证
@@ -453,9 +466,9 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 
 ---
 
-## I. V1.0 关键经验 / 参数（ModelsCombo 浏览弹窗 + PreviewAny 元数据读取链）
+## I. V1.01 关键经验 / 参数（ModelsCombo 浏览弹窗 + PreviewAny 元数据读取链 + 连接修复）
 
-> 本节为 V1.0 稳定版的两块新增核心机制，供后续开发直接参考。
+> 本节为 V1.01 稳定版新增/修复的核心机制，供后续开发直接参考。
 
 ### I.1 ModelsCombo「⧉ 浏览」弹窗（LoraManager 风格批量添加）
 
@@ -487,6 +500,6 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 - 前端：`entry.gen_meta` 出现即显示「生成信息」按钮（`openKeyValueModal`）；MODEL/CLIP/VAE 用自己的 `entry.meta`（模型元数据信息卡），不叠加 gen_meta。
 
 ### I.3 依赖 / 环境
-- `pyproject.toml`：`version="1.0.0"`；`dependencies=["mutagen>=1.46.0"]`（音频/视频标签读取）；`ffprobe` 为外部可选（`shutil.which` 探测，不装则只走 sidecar JSON 兜底）。
+- `pyproject.toml`：`version="1.0.1"`；`dependencies=["mutagen>=1.46.0"]`（音频/视频标签读取）；`ffprobe` 为外部可选（`shutil.which` 探测，不装则只走 sidecar JSON 兜底）。
 - 前端 JS no-store；**Python 改动（新版路由/解析）需重启 ComfyUI**，前端 Ctrl+F5。
 - 模型元数据读取只需 `safetensors`/`gguf`/`onnx`（ComfyUI 自带 `comfy.utils.load_torch_file`，缺失依赖时降级为「无元数据」）。
