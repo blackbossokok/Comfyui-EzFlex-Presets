@@ -3,6 +3,7 @@
 用于comfyui的灵活组合插件，使用ai构建完成，目前插件还在更新完善中。
 
 ![整体预览](./images/overview.png)
+B站演示视频：[点击观看](https://www.bilibili.com/video/BV116tz6xE5V)
 
 ## EzFlex 节点列表：
 - 总控制节点( `MainControl`）
