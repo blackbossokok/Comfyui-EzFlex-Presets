@@ -15,7 +15,3 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
-
-# Local release helper (not published)
-release.ps1
-release.bat

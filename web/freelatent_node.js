@@ -40,6 +40,9 @@ const FL_CSS = `
 .fl-top .fl-alg:hover{background:#6b6bff;color:#fff;border-color:#6b6bff;}
 .fl-top .fl-alg.opt{background:#34a853;border-color:#34a853;color:#fff;}
 .fl-top .fl-alg.opt:hover{background:#2d9248;}
+.fl-force{flex:0 0 30px;min-width:28px;height:26px;font-weight:700;}
+.fl-force.on{background:#34a853;border-color:#34a853;color:#fff;}
+.fl-force.on:hover{background:#2d9248;border-color:#2d9248;}
 .fl-top .fl-swap{flex:0 0 34px;min-width:30px;display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:0;font-size:9px;line-height:1;letter-spacing:0;font-weight:700;text-align:center;padding:2px 5px;height:26px;}
 .fl-top .fl-swap span{display:block;line-height:1;pointer-events:none;}
 .fl-canvas-wrap{position:relative;flex:1 1 auto;min-height:150px;background:#f7f8fc;border:1px solid #d0d5dd;border-radius:10px;overflow:visible;box-shadow:inset 0 2px 4px rgba(0,0,0,.02);}
@@ -130,7 +133,8 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       width: 1024, height: 1024, batchSize: 1, align: 8,
       limit: DEFAULT_LIMIT, useOptimized: true,
       selectedRatioLabel: '1:1', customRatios: [],
-      loading: false, externalWH: false, wLinked: false, hLinked: false, bLinked: false
+      loading: false, externalWH: false, wLinked: false, hLinked: false, bLinked: false,
+      force: false
     };
     return node._fl;
   }
@@ -256,6 +260,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     st.useOptimized = cfg.algorithm !== 'standard';
     st.selectedRatioLabel = cfg.aspect || calcAspect(st.width, st.height);
     st.customRatios = Array.isArray(cfg.customRatios) ? cfg.customRatios.filter((r) => r && FIXED_RATIOS.indexOf(r) < 0) : [];
+    st.force = !!cfg.force;
   }
 
   function syncToConfig(node) {
@@ -265,7 +270,8 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     const json = JSON.stringify({
       width: st.width, height: st.height, batch_size: st.batchSize,
       align: st.align, algorithm: st.useOptimized ? 'optimized' : 'standard',
-      limit: st.limit, aspect: st.selectedRatioLabel, customRatios: st.customRatios
+      limit: st.limit, aspect: st.selectedRatioLabel, customRatios: st.customRatios,
+      force: !!st.force
     });
     w.value = json;
     if (typeof w.callback === 'function') w.callback(json);
@@ -513,10 +519,11 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     const swapBtn = el('button', 'fl-btn fl-swap'); swapBtn.title = '交换宽高';
     swapBtn.innerHTML = '<span>→</span><span>←</span>';
     const batchInput = el('input', 'fl-batch'); batchInput.type = 'number'; batchInput.value = '1'; batchInput.min = '1'; batchInput.title = '批次数量';
+    const forceBtn = el('button', 'fl-btn fl-force'); forceBtn.textContent = '强'; forceBtn.title = '强制生效：忽略外部宽高/批次输入，强制面板值生效（仅任一输入有值时可用）';
     const algBtn = el('button', 'fl-btn fl-alg opt'); algBtn.textContent = '优'; algBtn.title = '算法：优=比例优先，标=标准四舍五入';
 
     top.appendChild(limitSel); top.appendChild(limitCustom); top.appendChild(swapBtn);
-    top.appendChild(batchInput); top.appendChild(algBtn);
+    top.appendChild(batchInput); top.appendChild(forceBtn); top.appendChild(algBtn);
 
     // canvas + 可拖拽选区（右下角/右缘/下缘手柄，仿 Aaalice）
     const cw = el('div', 'fl-canvas-wrap');
@@ -575,7 +582,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
 
     // 状态绑定
     const st = stateFor(node);
-    st._els = { limitSel, limitCustom, swapBtn, batchInput, algBtn, canvas, info, selection, handleBoth, handleWidth, handleHeight, wInput, hInput, alignInput, mpInput, aspectSel, presetSel, saveBtn, delBtn, ratioW, ratioH, saveRatioBtn, delRatioBtn };
+    st._els = { limitSel, limitCustom, swapBtn, batchInput, forceBtn, algBtn, canvas, info, selection, handleBoth, handleWidth, handleHeight, wInput, hInput, alignInput, mpInput, aspectSel, presetSel, saveBtn, delBtn, ratioW, ratioH, saveRatioBtn, delRatioBtn };
 
     // 初始化比例下拉
     buildAspectSel(aspectSel, st);
@@ -653,6 +660,9 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     st.hLinked = isInputLinked(node, 'height');
     st.bLinked = isInputLinked(node, 'batch_size');
     st.externalWH = st.wLinked || st.hLinked;
+    // 没有任何输入端口有输入时，「强」失效并回落（否则控件禁用无从谈起）
+    if (!(st.wLinked || st.hLinked || st.bLinked)) st.force = false;
+    refreshForceUI(node);
     applyExternalDisable(node);
   }
   function applyExternalDisable(node) {
@@ -660,31 +670,46 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     const els = st._els;
     if (!els) return;
     const toggle = (el, on) => { if (on) el.setAttribute('disabled', ''); else el.removeAttribute('disabled'); };
-    toggle(els.wInput, st.wLinked);
-    toggle(els.hInput, st.hLinked);
-    toggle(els.batchInput, st.bLinked);
+    // 「强」激活时解除所有禁用，让面板值生效
+    const forced = !!st.force && (st.wLinked || st.hLinked || st.bLinked);
+    toggle(els.wInput, st.wLinked && !forced);
+    toggle(els.hInput, st.hLinked && !forced);
+    toggle(els.batchInput, st.bLinked && !forced);
     // 接入任一宽/高才禁预设/比例/自定义比例；只接 batch 不禁用
-    toggle(els.presetSel, st.externalWH);
-    toggle(els.aspectSel, st.externalWH);
-    toggle(els.ratioW, st.externalWH);
-    toggle(els.ratioH, st.externalWH);
-    toggle(els.saveRatioBtn, st.externalWH);
-    toggle(els.delRatioBtn, st.externalWH);
-    if (st.wLinked || st.hLinked || st.bLinked) syncExternalDims(node);
+    toggle(els.presetSel, st.externalWH && !forced);
+    toggle(els.aspectSel, st.externalWH && !forced);
+    toggle(els.ratioW, st.externalWH && !forced);
+    toggle(els.ratioH, st.externalWH && !forced);
+    toggle(els.saveRatioBtn, st.externalWH && !forced);
+    toggle(els.delRatioBtn, st.externalWH && !forced);
+    refreshForceUI(node);
+    if (st.wLinked || st.hLinked || st.bLinked) syncExternalDims(node, forced);
   }
-  function syncExternalDims(node) {
+  function syncExternalDims(node, forced) {
     const st = stateFor(node);
     const els = st._els;
     if (!els) return;
     const w = externalIntValue(node, 'width');
     const h = externalIntValue(node, 'height');
     const b = externalIntValue(node, 'batch_size');
-    if (w != null) st.width = w;
-    if (h != null) st.height = h;
-    if (b != null) st.batchSize = b;
+    // 「强」开启时忽略外部宽高/批次，保留面板值（不覆盖）
+    if (!forced) {
+      if (w != null) st.width = w;
+      if (h != null) st.height = h;
+      if (b != null) st.batchSize = b;
+    }
     updateInfo(st); drawCanvas(node);
-    if (els.batchInput && st.bLinked) els.batchInput.value = String(st.batchSize);
+    if (els.batchInput && st.bLinked && !forced && b != null) els.batchInput.value = String(st.batchSize);
     if (node.graph) node.graph.setDirtyCanvas(true, true);
+  }
+  function refreshForceUI(node) {
+    const st = stateFor(node);
+    const els = st._els;
+    if (!els || !els.forceBtn) return;
+    const active = !!st.force && (st.wLinked || st.hLinked || st.bLinked);
+    els.forceBtn.classList.toggle('on', active);
+    els.forceBtn.textContent = '强';
+    els.forceBtn.title = active ? '强制生效中（忽略外部宽高/批次，使用面板值）' : '强制生效（仅任一输入有值时可用）';
   }
 
   function drawCanvas(node) {
@@ -800,6 +825,18 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     if (!els || st._bound) return;
     st._bound = true;
 
+    // 「强」：强制生效（仅任一输入端口有输入时切换），忽略外部宽高/批次并解除控件禁用
+    els.forceBtn.addEventListener('click', () => {
+      if (!(st.wLinked || st.hLinked || st.bLinked)) return; // 无输入不做改变
+      st.force = !st.force;
+      // 先写 config（force=true），再恢复面板值；避免 loadFromConfig 读旧 config 把 force 覆盖回 false
+      syncToConfig(node);
+      if (st.force) { loadFromConfig(node); }
+      applyExternalDisable(node);
+      refreshForceUI(node);
+      refresh(node);
+    });
+
     // 算法切换
     els.algBtn.addEventListener('click', () => {
       st.useOptimized = !st.useOptimized;
@@ -883,7 +920,8 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     // 预设：选中即自动生效；保存 / 删除
     els.presetSel.addEventListener('change', () => {
       if (!els.presetSel.value) return;
-      if (st.externalWH) return;
+      // 外部宽高接入时预览/预设常规禁用，但「强」生效时需解除该限制（否则预设无法应用）
+      if (st.externalWH && !st.force) return;
       applyPresetByName(node, els.presetSel.value).then(() => {});
     });
     els.saveBtn.addEventListener('click', () => {

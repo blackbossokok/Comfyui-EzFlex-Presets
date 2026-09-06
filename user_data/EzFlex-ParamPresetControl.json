@@ -86,5 +86,63 @@
         ]
       }
     ]
+  },
+  {
+    "name": "新预设",
+    "label": "新预设",
+    "groups": [
+      {
+        "id": "x_mtnb4qio_q114w",
+        "name": "参数组 1",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtnb4v8y_hlnl6",
+            "name": "参数1",
+            "type": "int",
+            "value": 8,
+            "enabled": true,
+            "_raw": "8"
+          },
+          {
+            "id": "x_mtnb4vde_37qj4",
+            "name": "参数2",
+            "type": "float",
+            "value": 1,
+            "enabled": true,
+            "_raw": "1"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "新预设2",
+    "label": "新预设2",
+    "groups": [
+      {
+        "id": "x_mtnb4qio_q114w",
+        "name": "参数组 1",
+        "out": "all",
+        "params": [
+          {
+            "id": "x_mtnb4v8y_hlnl6",
+            "name": "参数1",
+            "type": "int",
+            "value": 20,
+            "enabled": true,
+            "_raw": "20"
+          },
+          {
+            "id": "x_mtnb4vde_37qj4",
+            "name": "参数2",
+            "type": "float",
+            "value": 6,
+            "enabled": true,
+            "_raw": "6"
+          }
+        ]
+      }
+    ]
   }
 ]

@@ -1,16 +1,16 @@
-﻿"""EzFlex 鎻掍欢濂椾欢锛氭ā鍨?鍒嗚鲸鐜?鎺у埗/鍙傛暟棰勮鑺傜偣
+"""EzFlex 插件套件：模型/分辨率/控制/参数预设节点
 
-- EzFlex-ModelsCombo          妯″瀷缁勫悎鍔犺浇鍣紙checkpoint/unet/clip/vae + lora 涓茶仈锛?
-- EzFlex-FreeLatent           鍒嗚鲸鐜?Latent 閫夋嫨鍣紙鎷栨嫿鐢诲竷 + 棰勮锛?
-- EzFlex-NodeSwitchGroup      鍒嗙粍棰勮锛氫竴缁勫紑鍏筹紝鎸夌敾甯冨垎缁?棰滆壊/鏍囬姝ｅ垯 鍖归厤骞惰鑺傜偣 mode
-- EzFlex-NodeSwitchMaster     鑺傜偣鎺у埗鎬婚璁撅細鎶婃瘡涓?NodeSwitchGroup 瀹炰緥鏄犲皠鍒版煇鍒嗙粍棰勮
-- EzFlex-MainControl          鎬绘帶鍒惰妭鐐癸細鎶?NodeSwitchMaster / ParamPresetControl 瀹炰緥鏄犲皠鍒板叾棰勮
-- EzFlex-ParamPresetControl   鍙傛暟棰勮鎺у埗锛氬垎缁勫崱鐗囬┍鍔紝鍔ㄦ€佽緭鍑虹鍙?= 鍒嗙粍鏁?1:1
-- EzFlex-ParamPresetOutput    鍙傛暟棰勮杈撳嚭锛氳繛鎺ユ煇鍒嗙粍绔彛锛屽姩鎬佽緭鍑虹鍙?= 鍙傛暟鏁?1:1锛堟寜绫诲瀷鏄犲皠锛?
-- EzFlex-PreviewAny           浠绘剰棰勮锛氱櫧鏉挎斁缃涓彲鎷栨嫿鎺掑簭棰勮鍗＄墖锛屾瘡鍗′竴涓换鎰忚緭鍏?+ 涓€涓瓧绗︿覆杈撳嚭
+- EzFlex-ModelsCombo          模型组合加载器（checkpoint/unet/clip/vae + lora 串联）
+- EzFlex-FreeLatent           分辨率/Latent 选择器（拖拽画布 + 预设）
+- EzFlex-NodeSwitchGroup      分组预设：一组开关，按画布分组 颜色/标题正则 匹配并设节点 mode
+- EzFlex-NodeSwitchMaster     节点控制总预设：把每个 NodeSwitchGroup 实例映射到某分组预设
+- EzFlex-MainControl          总控制节点：把 NodeSwitchMaster / ParamPresetControl 实例映射到其预设
+- EzFlex-ParamPresetControl   参数预设控制：分组卡片驱动，动态输出端口 = 分组数 1:1
+- EzFlex-ParamPresetOutput    参数预设输出：连接某分组端口，动态输出端口 = 参数数 1:1（按类型映射）
+- EzFlex-PreviewAny           任意预览：白板放置多个可拖拽排序预览卡片，每卡一个任意输入 + 一个字符串输出
 
-鎺у埗绫昏妭鐐癸紙NodeSwitchGroup/Master/MainControl锛夋槸绾墠绔敓鏁堢殑閰嶇疆瀹瑰櫒锛堝弬鑰?rgthree
-Fast Groups Muter/Bypasser锛歯ode.mode 0/2/4 鐢辨祻瑙堝櫒绔缃級锛孭ython 鍙壙杞介殣钘?config銆?
+控制类节点（NodeSwitchGroup/Master/MainControl）是纯前端生效的配置容器（参考 rgthree
+Fast Groups Muter/Bypasser：node.mode 0/2/4 由浏览器端设置），Python 只承载隐藏 config。
 """
 
 import base64
@@ -60,12 +60,12 @@ import comfy.sd
 
 from comfy_api.latest import io
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 WEB_DIRECTORY = "./web"
 
-# 缁?web 鐩綍閲岀殑椤甸潰/鑴氭湰璁剧疆 no-store锛屾潨缁?Comfy-Desktop / 娴忚鍣ㄦ妸瀹冧滑缂撳瓨鎴愭棫鐗堛€?
-# 鍦ㄨ嚜瀹氫箟鑺傜偣鍔犺浇闃舵娉ㄥ唽璺敱锛屾棭浜?server.py 娣诲姞 /extensions 闈欐€佽矾鐢憋紝鍥犳浼樺厛鐢熸晥銆?
+# 给 web 目录里的页面/脚本设置 no-store，杜绝 Comfy-Desktop / 浏览器把它们缓存成旧版。
+# 在自定义节点加载阶段注册路由，早于 server.py 添加 /extensions 静态路由，因此优先生效。
 try:
     from server import PromptServer
     from aiohttp import web as _web
@@ -84,7 +84,7 @@ try:
     for _fname in ("modelscombo_node.js", "freelatent_node.js",
                    "ezflex_service.js", "node_switch_group.js", "node_switch_master.js",
                    "main_control.js", "param_preset_control.js", "param_preset_output.js",
-                   "preview_any.js"):
+                   "preview_any.js", "prompt_helper.js"):
         _routes.get("/extensions/Comfyui-EzFlex-Presets/" + _fname)(_serve_no_store(_fname))
 except Exception:
     pass
@@ -109,7 +109,7 @@ WEIGHT_DTYPES = {
     "fp8_e5m2": torch.float8_e5m2,
 }
 
-# 涓庡唴缃?CLIPLoader 鐨?type 閫夐」淇濇寔涓€鑷?
+# 与内置 CLIPLoader 的 type 选项保持一致
 CLIP_TYPES = [
     "stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv",
     "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2",
@@ -117,13 +117,13 @@ CLIP_TYPES = [
     "lens", "pixeldit", "ideogram4", "boogu", "krea2", "joyimage", "mage", "minimax",
 ]
 
-# 椤甸潰 device 涓嬫媺鎻愪緵鐨勯€夐」
+# 页面 device 下拉提供的选项
 DEVICES = ("default", "cpu", "cuda", "cuda:0", "cuda:1")
 
-# VAE 鍙帴鍙楄繖浜?dtype锛坒p8 涓嶉€傜敤锛?
+# VAE 只接受这些 dtype（fp8 不适用）
 VAE_DTYPES = ("default", "fp16", "bf16", "fp32")
 
-# 鎮仠棰勮锛氭寜銆屾ā鍨嬫枃浠跺悓鍚嶃€嶇殑鍥剧墖/瑙嗛杩斿洖锛屼緵鍓嶇 hover 灞曠ず
+# 悬停预览：按「模型文件同名」的图片/视频返回，供前端 hover 展示
 _MEDIA_EXTS = (
     ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
     ".mp4", ".webm", ".mov", ".m4v",
@@ -152,9 +152,9 @@ try:
 except Exception:
     pass
 
-# ===== LoraManager 鍏冩暟鎹祻瑙堬紙ModelsCombo銆屾祻瑙堛€嶅脊绐楋級=====
-# 璇诲彇 LoraManager 鍦ㄦā鍨嬬洰褰曠敓鎴愮殑 <妯″瀷鍚?.metadata.json锛堜互鍙婂悓鐩綍棰勮鍥撅級锛?
-# 杩斿洖缁欏墠绔仛銆屾壒閲忔坊鍔犲姞杞藉櫒銆嶇殑妯″瀷娴忚鍣ㄣ€傚彧鍒楄兘鏄犲皠鎴愮粍鍚堝姞杞藉櫒绫诲瀷鐨勭洰褰曘€?
+# ===== LoraManager 元数据浏览（ModelsCombo「浏览」弹窗）=====
+# 读取 LoraManager 在模型目录生成的 <模型名>.metadata.json（以及同目录预览图），
+# 返回给前端做「批量添加加载器」的模型浏览器。只列能映射成组合加载器类型的目录。
 _META_LOADER_FOLDERS = {
     "checkpoint": "checkpoints",
     "unet": "diffusion_models",
@@ -163,7 +163,7 @@ _META_LOADER_FOLDERS = {
 
 
 def _meta_relative_file(folder, meta, meta_path):
-    """鎶?LoraManager 鍏冩暟鎹搴旂殑妯″瀷鏂囦欢锛屾崲绠楁垚 ComfyUI /models/<folder> 鐨勭浉瀵硅矾寰勩€?""
+    """把 LoraManager 元数据对应的模型文件，换算成 ComfyUI /models/<folder> 的相对路径。"""
     fp = (meta.get("file_path") or "").strip()
     fp_n = os.path.normpath(fp) if fp else None
     roots = [os.path.normpath(r) for r in folder_paths.get_folder_paths(folder) if r]
@@ -174,7 +174,7 @@ def _meta_relative_file(folder, meta, meta_path):
                     return os.path.relpath(fp_n, root).replace("\\", "/")
             except Exception:
                 pass
-    # 鍏滃簳锛氭寜 metadata 鏂囦欢浣嶇疆鎺ㄧ畻锛堟ā鍨嬫枃浠朵笌鍏冩暟鎹悓 basename锛屽彧宸悗缂€锛?
+    # 兜底：按 metadata 文件位置推算（模型文件与元数据同 basename，只差后缀）
     base = meta_path[:-len(".metadata.json")] if meta_path.endswith(".metadata.json") else os.path.splitext(meta_path)[0]
     base_n = os.path.normpath(base)
     for root in roots:
@@ -316,8 +316,8 @@ try:
 except Exception:
     pass
 
-# ===== 棰勮瀛樺偍锛氭彃浠剁洰褰?user_data锛堟瘡涓妭鐐逛竴涓瓨妗ｆ枃浠讹紝瀛樿鑺傜偣鍏ㄩ儴棰勮锛?====
-# 鏂囦欢鍙兘琚紪杈戝櫒鍔犱笂 UTF-8 BOM锛岃鍙栫敤 utf-8-sig 鍏煎锛堝惁鍒?json.load 鎶?BOM 閿欙紝琚?except 鍚炴垚 []锛夈€?
+# ===== 预设存储：插件目录 user_data（每个节点一个存档文件，存该节点全部预设）=====
+# 文件可能被编辑器加上 UTF-8 BOM，读取用 utf-8-sig 兼容（否则 json.load 抛 BOM 错，被 except 吞成 []）。
 _USER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data")
 try:
     os.makedirs(_USER_DIR, exist_ok=True)
@@ -330,8 +330,8 @@ def _preset_file(node_name):
 
 
 def _read_doc(node_name):
-    """璇诲彇瀛樻。锛岃繑鍥?(doc_dict, presets_list)銆傚吋瀹逛袱绉嶅舰鐘讹細
-    绾垪琛紙ModelsCombo 鏃ф牸寮忥級鈫?鍖呰鎴?{'presets': list}锛涘璞?鈫?鍙?presets 閿€?""
+    """读取存档，返回 (doc_dict, presets_list)。兼容两种形状：
+    纯列表（ModelsCombo 旧格式）→ 包装成 {'presets': list}；对象 → 取 presets 键。"""
     try:
         with open(_preset_file(node_name), "r", encoding="utf-8-sig") as fh:
             data = json.load(fh)
@@ -352,7 +352,7 @@ def _read_all(node_name):
 def _write_all(node_name, items):
     doc, _ = _read_doc(node_name)
     doc["presets"] = items
-    # 浠呭綋杩樻湁棰濆閿紙濡?customRatios锛夋椂鍐欏璞★紝鍚﹀垯缁存寔绾垪琛紙ModelsCombo 鏃ф牸寮忎笉鍙橈級
+    # 仅当还有额外键（如 customRatios）时写对象，否则维持纯列表（ModelsCombo 旧格式不变）
     extra = {k: v for k, v in doc.items() if k != "presets"}
     out = doc if extra else items
     try:
@@ -379,8 +379,8 @@ def _write_ratios(node_name, ratios):
         pass
 
 
-# 鍚屼竴濂楅璁捐矾鐢辨寜 node_name 鍙傛暟鍖栵細GET 鍒楄〃 / POST 淇濆瓨 / DELETE {name}銆?
-# 淇濆瓨鏃朵繚鐣欏鎴风闄?name 澶栫殑鍏ㄩ儴瀛楁锛坢odelscombo 瀛?loaders锛宖reelatent 瀛?config锛夈€?
+# 同一套预设路由按 node_name 参数化：GET 列表 / POST 保存 / DELETE {name}。
+# 保存时保留客户端除 name 外的全部字段（modelscombo 存 loaders，freelatent 存 config）。
 def _register_preset_routes(node_name, api_path, with_ratios=False):
     async def _list(req):
         return _web.json_response(_read_all(node_name))
@@ -464,10 +464,10 @@ _register_preset_routes("EzFlex-ModelsCombo", "/models_combo/presets")
 _register_preset_routes("EzFlex-FreeLatent", "/freelatent/presets", with_ratios=True)
 
 
-# ComfyUI 鏍￠獙鑺傜偣杈撳嚭绫诲瀷鏃惰鐨勬槸銆岀被 RETURN_TYPES銆嶏紙execution.py validate锛夛紝
-# 鑰?ModelsCombo 鐨勮緭鍑洪殢 config 鍙樺寲锛岃繍琛屾湡 load_combo 鏀圭被灞炴€ц刀涓嶄笂鏍￠獙銆?
-# 鍥犳鍓嶇鍦ㄦ瘡娆¤緭鍑虹粨鏋勫彉鍖栨椂 POST 鍒拌繖閲岋紝鎶婄被 RETURN_TYPES/RETURN_NAMES 鍚屾鎴愬綋鍓嶆帓鍒楋紝
-# 杩欐牱鏍￠獙锛圴AE鈫扸AE 瑙ｇ爜銆丆LIP鈫扖LIP 鏂囨湰缂栫爜銆丮ODEL鈫掗噰鏍峰櫒锛夌被鍨嬫墠瀵瑰緱涓娿€?
+# ComfyUI 校验节点输出类型时读的是「类 RETURN_TYPES」（execution.py validate），
+# 而 ModelsCombo 的输出随 config 变化，运行期 load_combo 改类属性赶不上校验。
+# 因此前端在每次输出结构变化时 POST 到这里，把类 RETURN_TYPES/RETURN_NAMES 同步成当前排列，
+# 这样校验（VAE→VAE 解码、CLIP→CLIP 文本编码、MODEL→采样器）类型才对得上。
 def _mc_output_types(loaders):
     mains = [l for l in (loaders or []) if l.get("type") != "lora"]
     out_types, out_names = [], []
@@ -508,13 +508,13 @@ def parse_config(config):
         try:
             data = json.loads(config)
         except json.JSONDecodeError as e:
-            raise ValueError(f"config 涓嶆槸鍚堟硶鐨?JSON锛歿e}") from e
+            raise ValueError(f"config 不是合法的 JSON：{e}") from e
     else:
         data = config
     if isinstance(data, dict):
         data = data.get("loaders", [])
     if not isinstance(data, list):
-        raise ValueError("config 蹇呴』鏄姞杞藉櫒鏁扮粍锛屾垨鍖呭惈 loaders 鏁扮粍鐨勫璞?)
+        raise ValueError("config 必须是加载器数组，或包含 loaders 数组的对象")
 
     loaders = []
     for i, item in enumerate(data):
@@ -522,10 +522,10 @@ def parse_config(config):
             continue
         ltype = item.get("type")
         if ltype not in LOADER_FOLDERS:
-            raise ValueError(f"鏈煡鍔犺浇鍣ㄧ被鍨嬶細{ltype!r}锛堝彲閫夛細{', '.join(LOADER_FOLDERS)}锛?)
+            raise ValueError(f"未知加载器类型：{ltype!r}（可选：{', '.join(LOADER_FOLDERS)}）")
         extra = item.get("extra") or {}
         if not isinstance(extra, dict):
-            raise ValueError(f"鍔犺浇鍣?{ltype!r} 鐨?extra 蹇呴』鏄璞?)
+            raise ValueError(f"加载器 {ltype!r} 的 extra 必须是对象")
         loaders.append({
             "id": item.get("id", f"idx{i}"),
             "type": ltype,
@@ -540,7 +540,7 @@ def parse_config(config):
 def device_options(extra):
     device = extra.get("device", "default")
     if device not in DEVICES:
-        raise ValueError(f"涓嶆敮鎸佺殑 device锛歿device!r}锛堝彲閫夛細{', '.join(DEVICES)}锛?)
+        raise ValueError(f"不支持的 device：{device!r}（可选：{', '.join(DEVICES)}）")
     if device == "default":
         return {}
     dev = torch.device(device)
@@ -553,7 +553,7 @@ def device_options(extra):
 def dtype_options(extra, allowed=WEIGHT_DTYPES):
     weight_dtype = extra.get("weight_dtype", "default")
     if weight_dtype not in allowed:
-        raise ValueError(f"涓嶆敮鎸佺殑 weight_dtype锛歿weight_dtype!r}锛堝彲閫夛細{', '.join(allowed)}锛?)
+        raise ValueError(f"不支持的 weight_dtype：{weight_dtype!r}（可选：{', '.join(allowed)}）")
     dtype = allowed[weight_dtype]
     opts = {}
     if dtype is not None:
@@ -589,7 +589,7 @@ def load_clip(loader):
     path = folder_paths.get_full_path_or_raise("text_encoders", loader["file"])
     clip_type_name = loader["extra"].get("type", "stable_diffusion")
     if clip_type_name not in CLIP_TYPES:
-        raise ValueError(f"涓嶆敮鎸佺殑 CLIP type锛歿clip_type_name!r}锛堝彲閫夛細{', '.join(CLIP_TYPES)}锛?)
+        raise ValueError(f"不支持的 CLIP type：{clip_type_name!r}（可选：{', '.join(CLIP_TYPES)}）")
     clip_type = getattr(comfy.sd.CLIPType, clip_type_name.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
     return comfy.sd.load_clip(
         ckpt_paths=[path],
@@ -605,7 +605,7 @@ def load_vae(loader):
     extra = loader["extra"]
     device = extra.get("device", "default")
     if device not in DEVICES:
-        raise ValueError(f"涓嶆敮鎸佺殑 device锛歿device!r}锛堝彲閫夛細{', '.join(DEVICES)}锛?)
+        raise ValueError(f"不支持的 device：{device!r}（可选：{', '.join(DEVICES)}）")
     vae_device = None if device == "default" else torch.device(device)
     dtype = dtype_options(extra, allowed=dict((k, v) for k, v in WEIGHT_DTYPES.items() if k in VAE_DTYPES)).get("dtype")
     vae = comfy.sd.VAE(sd=sd, metadata=metadata, device=vae_device, dtype=dtype)
@@ -621,7 +621,7 @@ class ModelsComboLoader:
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "[]",
-                    "tooltip": "浠庛€屾ā鍨嬬粍鍚堥厤缃櫒銆嶉〉闈㈠鍒剁殑 JSON 閰嶇疆锛堝姞杞藉櫒鏁扮粍锛夈€?,
+                    "tooltip": "从「模型组合配置器」页面复制的 JSON 配置（加载器数组）。",
                 }),
             },
         }
@@ -634,7 +634,7 @@ class ModelsComboLoader:
     )
     FUNCTION = "load_combo"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "鎸夈€屾ā鍨嬬粍鍚堥厤缃櫒銆嶉〉闈㈢殑 JSON 閰嶇疆鍔犺浇澶氫釜 Checkpoint/UNET/CLIP/VAE 骞跺彔鍔?LoRA锛岃緭鍑哄搴旂鍙ｃ€?
+    DESCRIPTION = "按「模型组合配置器」页面的 JSON 配置加载多个 Checkpoint/UNET/CLIP/VAE 并叠加 LoRA，输出对应端口。"
 
     def load_combo(self, config, **kwargs):
         loaders = parse_config(config)
@@ -646,8 +646,8 @@ class ModelsComboLoader:
         vae_count = sum(1 for l in mains if l["type"] in ("checkpoint", "vae"))
         if max(model_count, clip_count, vae_count) > MAX_PORTS_PER_TYPE:
             raise ValueError(
-                f"绔彛鏁拌秴鍑轰笂闄愶細姣忕绫诲瀷鏈€澶?{MAX_PORTS_PER_TYPE} 涓?"
-                f"锛堝綋鍓?models={model_count}, clips={clip_count}, vaes={vae_count}锛夛紝璇锋媶鍒嗛厤缃€?
+                f"端口数超出上限：每种类型最多 {MAX_PORTS_PER_TYPE} 个 "
+                f"（当前 models={model_count}, clips={clip_count}, vaes={vae_count}），请拆分配置。"
             )
 
         by_id = {}
@@ -662,7 +662,7 @@ class ModelsComboLoader:
             elif loader["type"] == "vae":
                 by_id[loader["id"]] = {"model": None, "clip": None, "vae": load_vae(loader)}
 
-        # 澶?LoRA 涓茶仈锛氭寜搴忓彿锛坕d锛夐『搴忎緷娆℃墦琛ヤ竵锛屽悗涓€涓湪鍓嶄竴涓粨鏋滀笂缁х画锛屾渶缁堣緭鍑哄埌 MODEL/CLIP 妲戒綅
+        # 多 LoRA 串联：按序号（id）顺序依次打补丁，后一个在前一个结果上继续，最终输出到 MODEL/CLIP 槽位
         ordered_loras = sorted(
             loras,
             key=lambda x: (x["id"] if isinstance(x["id"], (int, float)) else 0),
@@ -670,18 +670,18 @@ class ModelsComboLoader:
         for lora in ordered_loras:
             target = by_id.get(lora["target_id"])
             if target is None:
-                print(f"[ModelsCombo] LoRA '{lora['name']}'锛氱洰鏍囧姞杞藉櫒涓嶅瓨鍦紝宸茶烦杩?)
+                print(f"[ModelsCombo] LoRA '{lora['name']}'：目标加载器不存在，已跳过")
                 continue
             model, clip = target["model"], target["clip"]
             if model is None and clip is None:
-                print(f"[ModelsCombo] LoRA '{lora['name']}'锛氱洰鏍囨病鏈?MODEL/CLIP锛屽凡璺宠繃")
+                print(f"[ModelsCombo] LoRA '{lora['name']}'：目标没有 MODEL/CLIP，已跳过")
                 continue
             lora_path = folder_paths.get_full_path_or_raise("loras", lora["file"])
             lora_sd = comfy.utils.load_torch_file(lora_path)
             strength_model = float(lora["extra"].get("strength_model", 1.0))
             strength_clip = float(lora["extra"].get("strength_clip", 1.0))
             new_model, new_clip = comfy.sd.load_lora_for_models(model, clip, lora_sd, strength_model, strength_clip)
-            # 鏃犺杩斿洖浠€涔堬紝閮芥妸銆屽綋鍓嶆ā鍨?CLIP銆嶄繚鐣欑粰涓嬩竴涓?lora 缁х画涓茶仈
+            # 无论返回什么，都把「当前模型/CLIP」保留给下一个 lora 继续串联
             if new_model is not None:
                 target["model"] = new_model
             elif model is not None:
@@ -691,8 +691,8 @@ class ModelsComboLoader:
             elif clip is not None:
                 target["clip"] = clip
 
-        # 鍔ㄦ€佽緭鍑猴細鎸夈€屽姞杞藉櫒椤哄簭銆嶉€愪釜浜у嚭鍏舵嫢鏈夌殑绔彛锛坈heckpoint=model/clip/vae 鐩搁偦銆乽net=model銆乧lip=clip銆乿ae=vae锛?
-        # lora 涓嶅崰杈撳嚭绔彛锛夈€備繚璇佷笌鍓嶇 updatePorts 鐨勯『搴忎竴鑷达紝鍏跺畠鑺傜偣鎺ョ嚎鏃剁被鍨嬫墠瀵瑰緱涓娿€?
+        # 动态输出：按「加载器顺序」逐个产出其拥有的端口（checkpoint=model/clip/vae 相邻、unet=model、clip=clip、vae=vae，
+        # lora 不占输出端口）。保证与前端 updatePorts 的顺序一致，其它节点接线时类型才对得上。
         out_types, out_names, outputs = [], [], []
         for loader in mains:
             entry = by_id[loader["id"]]
@@ -709,7 +709,7 @@ class ModelsComboLoader:
         return tuple(outputs)
 
 
-# ===== EzFlex-FreeLatent锛氭寜銆屽垎杈ㄧ巼閫夋嫨鍣ㄣ€嶉潰鏉块厤缃敓鎴愮┖ Latent =====
+# ===== EzFlex-FreeLatent：按「分辨率选择器」面板配置生成空 Latent =====
 def parse_freelatent_config(config):
     if isinstance(config, str):
         if not config.strip():
@@ -733,16 +733,52 @@ def parse_freelatent_config(config):
     h = to_int(data.get("height"), 1024)
     b = to_int(data.get("batch_size", data.get("batch")), 1)
 
-    # latent 涓嬮噰鏍峰洜瀛愪负 8锛氭妸鍍忕礌灏哄瀵归綈鍒?8 鐨勫€嶆暟锛屽苟淇濊瘉鏈€灏忎笅闄?
-    def mult8(v, lo=64):
-        return max(lo, int(round(v / 8) * 8))
+    # 严格按面板「对齐」值对齐（.5 向上，与前端一致；是否 8 的倍数在 execute 校验）
+    mult = _freelatent_align(config)
+    return _fl_round_step(w, mult), _fl_round_step(h, mult), max(1, b)
 
-    return mult8(w), mult8(h), max(1, b)
+
+def _freelatent_force(config):
+    """读取「强(force)」标志：为真时忽略外部 width/height/batch，强制用面板值。"""
+    if isinstance(config, str):
+        if not config.strip():
+            return False
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError:
+            return False
+    else:
+        data = config
+    if isinstance(data, dict):
+        return bool(data.get("force"))
+    return False
+
+
+def _freelatent_align(config):
+    """读取面板「对齐」值（原样返回，不做 8 约束）；最终 generate 时若结果非 8 的倍数会报错提示。"""
+    if isinstance(config, str):
+        if not config.strip():
+            return 8
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError:
+            return 8
+    else:
+        data = config
+    if isinstance(data, dict):
+        a = int(data.get("align") or 8)
+        return a if a >= 1 else 8
+    return 8
+
+
+def _fl_round_step(v, mult, lo=64):
+    """按 mult 四舍五入（.5 向上取整），与前端 JS Math.round 一致；并保底 lo。"""
+    return max(lo, int(v / mult + 0.5) * mult)
 
 
 class FreeLatentNode(io.ComfyNode):
-    """V3 鑺傜偣锛歰utput 涓?Latent/Width/Height/Batch锛泈idth/height/batch_size 鐢?force_input 淇濊瘉鏄?
-    鍙繛鎺?socket锛堜笉鍐嶈蛋 widget鈫抯ocket 杞崲 hack锛岄伩鍏?socket 鍦嗙偣鎮仠婕傜Щ锛夛紝鏈繛鎺ユ椂鐢ㄩ潰鏉?config 鍊笺€?""
+    """V3 节点：output 为 Latent/Width/Height/Batch；width/height/batch_size 用 force_input 保证是
+    可连接 socket（不再走 widget→socket 转换 hack，避免 socket 圆点悬停漂移），未连接时用面板 config 值。"""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -750,47 +786,54 @@ class FreeLatentNode(io.ComfyNode):
             node_id="EzFlex-FreeLatent",
             display_name="EzFlex-FreeLatent",
             category="EzFlex",
-            description="鎸夈€屽垎杈ㄧ巼閫夋嫨鍣ㄣ€嶅彲瑙嗗寲闈㈡澘閰嶇疆鍒涘缓涓€涓┖ Latent锛氳嚜鐢辨嫋鎷藉昂瀵?/ 姣斾緥 / MP 绠楁硶锛屾柟鍧楁槧灏勫埌 (b,4,h,w)銆傚楂?鎵规鎺ュ叆澶栭儴 INT socket 鏃朵紭鍏堜娇鐢ㄥ閮ㄥ€笺€?,
+            description="按「分辨率选择器」可视化面板配置创建一个空 Latent：自由拖拽尺寸 / 比例 / MP 算法，方块映射到 (b,4,h,w)。宽高/批次接入外部 INT socket 时优先使用外部值。",
             inputs=[
                 io.String.Input("config", socketless=True, default="{}",
-                                tooltip="銆屽垎杈ㄧ巼閫夋嫨鍣ㄣ€嶉潰鏉跨敓鎴愮殑閰嶇疆 JSON锛堝搴?楂樺害/鎵规/绠楁硶/姣斾緥绛夛級銆?),
+                                tooltip="「分辨率选择器」面板生成的配置 JSON（宽度/高度/批次/算法/比例等）。"),
                 io.Int.Input("width", display_name="Width", optional=True, default=0,
                              min=0, max=32768, step=8, force_input=True,
-                             tooltip="澶栭儴瀹藉害锛?0 鏃惰鐩栭潰鏉垮楂橈紙涓嶅～/涓?0 鏃剁敤闈㈡澘鍊硷級銆?),
+                             tooltip="外部宽度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。"),
                 io.Int.Input("height", display_name="Height", optional=True, default=0,
                              min=0, max=32768, step=8, force_input=True,
-                             tooltip="澶栭儴楂樺害锛?0 鏃惰鐩栭潰鏉垮楂橈紙涓嶅～/涓?0 鏃剁敤闈㈡澘鍊硷級銆?),
+                             tooltip="外部高度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。"),
                 io.Int.Input("batch_size", display_name="Batch", optional=True, default=0,
                              min=0, max=4096, force_input=True,
-                             tooltip="澶栭儴鎵规锛?0 鏃惰鐩栭潰鏉挎壒娆★紙涓嶅～/涓?0 鏃剁敤闈㈡澘鍊硷級銆?),
+                             tooltip="外部批次：>0 时覆盖面板批次（不填/为 0 时用面板值）。"),
             ],
             outputs=[
-                io.Latent.Output("Latent", tooltip="绌?latent (batch,4,height/8,width/8)"),
-                io.Int.Output("Width", tooltip="鍍忕礌瀹藉害"),
-                io.Int.Output("Height", tooltip="鍍忕礌楂樺害"),
-                io.Int.Output("Batch", tooltip="鎵规鏁伴噺"),
+                io.Latent.Output("Latent", tooltip="空 latent (batch,4,height/8,width/8)"),
+                io.Int.Output("Width", tooltip="像素宽度"),
+                io.Int.Output("Height", tooltip="像素高度"),
+                io.Int.Output("Batch", tooltip="批次数量"),
             ],
         )
 
     @classmethod
     def execute(cls, config="{}", width=0, height=0, batch_size=0):
         w, h, batch = parse_freelatent_config(config)
-        if width and width > 0:
-            w = width
-        if height and height > 0:
-            h = height
-        if batch_size and batch_size > 0:
-            batch = batch_size
-        # latent 涓嬮噰鏍峰洜瀛愪负 8锛氬閮ㄦ帴鍏ュ€间篃瀵归綈鍒?8 鐨勫€嶆暟锛屼繚璇?latent 灏哄涓庢姤鍛婂€间竴鑷?
-        def mult8(v, lo=64):
-            return max(lo, int(round(v / 8) * 8))
-        w, h = mult8(w), mult8(h)
+        # 「强(force)」生效时忽略外部 width/height/batch，强制用面板值
+        if not _freelatent_force(config):
+            if width and width > 0:
+                w = width
+            if height and height > 0:
+                h = height
+            if batch_size and batch_size > 0:
+                batch = batch_size
+        # 严格按面板「对齐」值对齐（.5 向上，与前端一致）；最终宽高必须是 8 的倍数，否则报错提示用户调整
+        mult = _freelatent_align(config)
+        w, h = _fl_round_step(w, mult), _fl_round_step(h, mult)
+        if (w % 8) != 0 or (h % 8) != 0:
+            raise ValueError(
+                f"[EzFlex-FreeLatent] 对齐分辨率（align={mult}）计算出的尺寸 {w}x{h} 不是 8 的倍数，"
+                f"latent 尺寸需能被 8 整除（latent = 像素/8）。请把「对齐」调成 8 的倍数，或调整宽高。"
+            )
+        batch = max(1, int(batch))
         latent = torch.zeros([batch, 4, h // 8, w // 8], dtype=torch.float32)
         return io.NodeOutput({"samples": latent}, w, h, batch)
 
 
 def _control_input_types(tooltip):
-    """鎺у埗绫昏妭鐐圭殑鏍囧噯杈撳叆锛氶殣钘?config STRING 鎵胯浇闈㈡澘鐘舵€併€?""
+    """控制类节点的标准输入：隐藏 config STRING 承载面板状态。"""
     return {
         "required": {
             "config": ("STRING", {
@@ -803,83 +846,83 @@ def _control_input_types(tooltip):
 
 
 class NodeSwitchGroupNode:
-    """鍒嗙粍棰勮锛堟柟妗圓锛屽弬鑰?rgthree Fast Groups Muter/Bypasser锛夛細鍓嶇鍐呭祵闈㈡澘绠＄悊
-    銆屽紑鍏?鈫?鍖归厤锛堢敾甯冨垎缁?棰滆壊/鏍囬姝ｅ垯锛夆啋 node.mode 0/2/4銆嶃€?
-    寮€鍏冲垪琛ㄤ笌褰撳墠棰勮鍚嶅瓨 config锛涘懡鍚嶅垎缁勯璁惧瓨鏈嶅姟鍣?user_data 棰勮搴擄紙鎸夎妭鐐瑰悕鍏变韩锛夈€?""
+    """分组预设（方案A，参考 rgthree Fast Groups Muter/Bypasser）：前端内嵌面板管理
+    「开关 → 匹配（画布分组 颜色/标题正则）→ node.mode 0/2/4」。
+    开关列表与当前预设名存 config；命名分组预设存服务器 user_data 预设库（按节点名共享）。"""
 
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "銆屽垎缁勯璁俱€嶉潰鏉跨敓鎴愮殑閰嶇疆 JSON锛堝紑鍏冲垪琛?鍖归厤瑙勫垯/褰撳墠棰勮锛夈€?,
+            "「分组预设」面板生成的配置 JSON（开关列表/匹配规则/当前预设）。",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "EzFlex-NodeSwitchGroup锛氫竴缁勫紑鍏筹紝姣忎釜寮€鍏虫寜 ComfyUI 鍒嗙粍 棰滆壊/鏍囬姝ｅ垯 鍖归厤鐩爣鑺傜偣锛屼竴閿 ALWAYS/NEVER/BYPASS mode銆傛帶鍒剁敱鍓嶇鐢熸晥锛屾湰鑺傜偣鎵胯浇 config 鐘舵€併€?
+    DESCRIPTION = "EzFlex-NodeSwitchGroup：一组开关，每个开关按 ComfyUI 分组 颜色/标题正则 匹配目标节点，一键设 ALWAYS/NEVER/BYPASS mode。控制由前端生效，本节点承载 config 状态。"
 
     def run(self, config="{}", **kwargs):
         return ()
 
 
 class NodeSwitchMasterNode:
-    """鑺傜偣鎺у埗鎬婚璁撅細鎬婚璁?= {NodeSwitchGroup 鑺傜偣 id -> 璇ュ垎缁勯璁惧悕} 鐨勬槧灏勩€?
-    琛岋紙鐩爣鍒嗙粍鑺傜偣锛夌敱鍓嶇浠庣敾甯冨彂鐜帮紱搴旂敤鏃跺墠绔妸鏄犲皠鍐欒繘鍚勫垎缁勮妭鐐圭殑 config.current 骞惰Е鍙戝叾搴旂敤銆?""
+    """节点控制总预设：总预设 = {NodeSwitchGroup 节点 id -> 该分组预设名} 的映射。
+    行（目标分组节点）由前端从画布发现；应用时前端把映射写进各分组节点的 config.current 并触发其应用。"""
 
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "銆岃妭鐐规帶鍒舵€婚璁俱€嶉潰鏉跨敓鎴愮殑閰嶇疆 JSON锛堝綋鍓嶆€婚璁惧悕锛夈€?,
+            "「节点控制总预设」面板生成的配置 JSON（当前总预设名）。",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "EzFlex-NodeSwitchMaster锛氭妸姣忎釜 EzFlex-NodeSwitchGroup 瀹炰緥鏄犲皠鍒板叾鏌愪釜鍒嗙粍棰勮锛涘垏鎹?搴旂敤鎬婚璁炬椂绾ц仈鍐欏叆鍒嗙粍鑺傜偣骞跺簲鐢ㄥ紑鍏炽€?
+    DESCRIPTION = "EzFlex-NodeSwitchMaster：把每个 EzFlex-NodeSwitchGroup 实例映射到其某个分组预设；切换/应用总预设时级联写入分组节点并应用开关。"
 
     def run(self, config="{}", **kwargs):
         return ()
 
 
 class MainControlNode:
-    """鎬绘帶鍒惰妭鐐癸細鎬婚璁?= {鐩爣鑺傜偣 id -> 璇ヨ妭鐐归璁惧悕} 鐨勬槧灏勶紝鐩爣鏄敾甯冧笂鐨?
+    """总控制节点：总预设 = {目标节点 id -> 该节点预设名} 的映射，目标是画布上的
     EzFlex-NodeSwitchMaster / EzFlex-ParamPresetControl / EzFlex-ModelsCombo / EzFlex-FreeLatent
-    瀹炰緥銆傚簲鐢ㄦ椂绾ц仈涓嬫帹銆?""
+    实例。应用时级联下推。"""
 
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "銆屾€绘帶鍒躲€嶉潰鏉跨敓鎴愮殑閰嶇疆 JSON锛堝綋鍓嶆€婚璁惧悕锛夈€?,
+            "「总控制」面板生成的配置 JSON（当前总预设名）。",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "EzFlex-MainControl锛氭妸鐢诲竷涓婄殑 EzFlex-NodeSwitchMaster / EzFlex-ParamPresetControl / EzFlex-ModelsCombo / EzFlex-FreeLatent 瀹炰緥鏄犲皠鍒板叾棰勮锛屼竴閿骇鑱斿簲鐢紙鍐欑洰鏍?config.current 骞惰Е鍙戝叾搴旂敤閫昏緫锛夈€?
+    DESCRIPTION = "EzFlex-MainControl：把画布上的 EzFlex-NodeSwitchMaster / EzFlex-ParamPresetControl / EzFlex-ModelsCombo / EzFlex-FreeLatent 实例映射到其预设，一键级联应用（写目标 config.current 并触发其应用逻辑）。"
 
     def run(self, config="{}", **kwargs):
         return ()
 
 
 class ParamPresetControlNode:
-    """鍙傛暟棰勮鎺у埗锛氬墠绔潰鏉跨鐞嗗弬鏁扮粍锛堢粍/鍙傛暟鍙嫋鎷芥帓搴忥級锛屽姩鎬佽緭鍑虹鍙ｄ笌鍙傛暟缁勫崱鐗囦竴涓€瀵瑰簲
-    锛堜竴涓垎缁勪竴涓?EZFLEX_PARAM_GROUP 绔彛锛屾惡甯﹁缁勫弬鏁版暟鎹級銆傚垎缁勫鍒?鎺掑簭鍚庣敱鍓嶇 POST
-    /param_preset_control/outputs 鍚屾绫?RETURN_TYPES/RETURN_NAMES锛堟牎楠岀敤锛夛紝execute 鍐嶆寜瀹為檯鏁版嵁璁剧疆銆?""
+    """参数预设控制：前端面板管理参数组（组/参数可拖拽排序），动态输出端口与参数组卡片一一对应
+    （一个分组一个 EZFLEX_PARAM_GROUP 端口，携带该组参数数据）。分组增删/排序后由前端 POST
+    /param_preset_control/outputs 同步类 RETURN_TYPES/RETURN_NAMES（校验用），execute 再按实际数据设置。"""
 
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "銆屽弬鏁伴璁炬帶鍒躲€嶉潰鏉跨敓鎴愮殑閰嶇疆 JSON锛堝弬鏁扮粍鍒楄〃 + 褰撳墠棰勮鍚嶏級銆?,
+            "「参数预设控制」面板生成的配置 JSON（参数组列表 + 当前预设名）。",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "EzFlex-ParamPresetControl锛氬彲瑙嗗寲缂栬緫鍙傛暟缁勶紙姣忕粍鍚弬鏁板悕/绫诲瀷/鍊?鍚敤锛夛紝鍔ㄦ€佽緭鍑虹鍙ｄ笌鍒嗙粍涓€涓€瀵瑰簲锛屾嫋鎷芥帓搴忓悗绔彛璺熼殢锛堝悓 ModelsCombo 鏈哄埗锛夈€?
+    DESCRIPTION = "EzFlex-ParamPresetControl：可视化编辑参数组（每组含参数名/类型/值/启用），动态输出端口与分组一一对应，拖拽排序后端口跟随（同 ModelsCombo 机制）。"
 
     def run(self, config="{}", **kwargs):
         groups = parse_param_groups(config)
@@ -890,23 +933,23 @@ class ParamPresetControlNode:
 
 
 class ParamPresetOutputNode:
-    """鍙傛暟棰勮杈撳嚭锛氳緭鍏ヤ竴涓?EZFLEX_PARAM_GROUP 鍒嗙粍绔彛锛堜粠 ParamPresetControl 瀵瑰簲鍒嗙粍绔彛杩炵嚎锛夈€?
-    杈撳嚭绔彛 = 鍥哄畾鐨勬暣缁勬暟鎹孩鑹插渾鐐癸紙閫忎紶 EZFLEX_PARAM_GROUP 鏁寸粍鏁版嵁锛? 姣忎釜婵€娲诲弬鏁颁竴涓鍙?
-    锛坕nt->INT / float->FLOAT / string->STRING / bool->BOOLEAN锛屽鏉傜被鍨?-> STRING(JSON)锛?
-    绾㈣壊/鏈€変腑鐨勫弬鏁颁笉鍗犵鍙ｏ紱Output 闈㈡澘灞€閮ㄧ鐢ㄧ殑鍙傛暟杈撳嚭璇ョ被鍨嬩腑鎬ч粯璁ゅ€硷級銆?
-    鍙傛暟澧炲垹/鎺掑簭/杩炴帴鍙樺寲鍚庣敱鍓嶇 POST /param_preset_output/outputs 鍚屾绫?RETURN_TYPES/RETURN_NAMES銆?""
+    """参数预设输出：输入一个 EZFLEX_PARAM_GROUP 分组端口（从 ParamPresetControl 对应分组端口连线）。
+    输出端口 = 固定的整组数据红色圆点（透传 EZFLEX_PARAM_GROUP 整组数据）+ 每个激活参数一个端口
+    （int->INT / float->FLOAT / string->STRING / bool->BOOLEAN，复杂类型 -> STRING(JSON)；
+    红色/未选中的参数不占端口；Output 面板局部禁用的参数输出该类型中性默认值）。
+    参数增删/排序/连接变化后由前端 POST /param_preset_output/outputs 同步类 RETURN_TYPES/RETURN_NAMES。"""
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "group": ("EZFLEX_PARAM_GROUP", {
-                    "tooltip": "鏉ヨ嚜 EzFlex-ParamPresetControl 鐨勬煇涓弬鏁扮粍绔彛銆?,
+                    "tooltip": "来自 EzFlex-ParamPresetControl 的某个参数组端口。",
                 }),
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "{}",
-                    "tooltip": "銆屽弬鏁伴璁捐緭鍑恒€嶉潰鏉跨敓鎴愮殑閰嶇疆 JSON锛堝眬閮ㄥ惎鐢?绂佺敤鍙傛暟 id 闆嗗悎锛夈€?,
+                    "tooltip": "「参数预设输出」面板生成的配置 JSON（局部启用/禁用参数 id 集合）。",
                 }),
             },
         }
@@ -915,12 +958,12 @@ class ParamPresetOutputNode:
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "EzFlex-ParamPresetOutput锛氬浐瀹氱殑鏁寸粍鏁版嵁绾㈣壊杈撳嚭 + 鎸夊弬鏁扮被鍨嬮€愪釜杈撳嚭婵€娲诲弬鏁帮紝涓嬫媺鍒囨崲鏃跺鐢?socket 淇濇寔鎺ョ嚎銆?
+    DESCRIPTION = "EzFlex-ParamPresetOutput：固定的整组数据红色输出 + 按参数类型逐个输出激活参数，下拉切换时复用 socket 保持接线。"
 
     def run(self, group=None, config="{}", **kwargs):
         group = group or {}
         off = _parse_local_off(config)
-        # 鎸夊疄闄呬慨姝ｅ弬鏁扮粍绫诲瀷锛氬€艰嫢鏄?string锛堟棤鏁堣緭鍏ワ級鍒欑被鍨嬫敼 string
+        # 按实际修正参数组类型：值若是 string（无效输入）则类型改 string
         group = dict(group)
         params = []
         for p in (group.get("params") or []):
@@ -932,11 +975,11 @@ class ParamPresetOutputNode:
             params.append(p)
         group["params"] = params
         active = _ppo_effective_params(group)
-        types, names, outputs = ["EZFLEX_PARAM_GROUP"], ["鏁版嵁缁勫悎"], [group]
+        types, names, outputs = ["EZFLEX_PARAM_GROUP"], ["数据组合"], [group]
         for i, p in enumerate(active):
             ptype = (p.get("type") or "string").lower()
             types.append(PARAM_TYPE_MAP.get(ptype, "STRING"))
-            names.append((p.get("name") or "").strip() or f"鍙傛暟 {i + 1}")
+            names.append((p.get("name") or "").strip() or f"参数 {i + 1}")
             if str(p.get("id")) in off:
                 outputs.append(_ppo_disabled_value(ptype))
             else:
@@ -946,9 +989,9 @@ class ParamPresetOutputNode:
         return tuple(outputs)
 
 
-# ===== EzFlex-PreviewAny锛氫换鎰忛瑙?=====
-# 鍙傝€?AUNPassthroughAnyMulti 鐨勫仛娉曪細鍥哄畾 input_1..N ANY 杈撳叆妲?+ STRING 杈撳嚭锛?
-# 鍓嶇鐧芥澘绠＄悊鍗＄墖锛堟嫋鎷芥帓搴?澧炲垹锛夛紝鍗＄墖椤哄簭閫氳繃 workflow 閲岀殑 input 椤哄簭璇诲彇銆?
+# ===== EzFlex-PreviewAny：任意预览 =====
+# 参考 AUNPassthroughAnyMulti 的做法：固定 input_1..N ANY 输入槽 + STRING 输出；
+# 前端白板管理卡片（拖拽排序/增删），卡片顺序通过 workflow 里的 input 顺序读取。
 class _AlwaysEqualProxy(str):
     def __eq__(self, _): return True
     def __ne__(self, _): return False
@@ -973,7 +1016,7 @@ def _pv_str(value):
 
 
 def _pv_sanitize(obj):
-    """閫掑綊纭繚瀵硅薄鏍戝彲 JSON 搴忓垪鍖栥€?""
+    """递归确保对象树可 JSON 序列化。"""
     if isinstance(obj, dict):
         return {k: _pv_sanitize(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -984,8 +1027,8 @@ def _pv_sanitize(obj):
 
 
 class PreviewAnyNode:
-    """EzFlex-PreviewAny锛氫竴鍧楃櫧鏉匡紝鍐呭惈澶氫釜鍙嫋鎷芥帓搴忕殑棰勮鍗＄墖锛涙瘡涓崱鐗囧搴斾竴涓换鎰忚緭鍏ョ鍙?+
-    涓€涓瓧绗︿覆杈撳嚭绔彛锛堝悓 AUNPassthroughAnyMulti 鐨勬€濊矾锛氳緭鍑鸿鍗¤В鏋愬悗鐨勫瓧绗︿覆锛夈€?""
+    """EzFlex-PreviewAny：一块白板，内含多个可拖拽排序的预览卡片；每个卡片对应一个任意输入端口 +
+    一个字符串输出端口（同 AUNPassthroughAnyMulti 的思路：输出该卡解析后的字符串）。"""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -994,14 +1037,14 @@ class PreviewAnyNode:
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "{\"save\":false,\"savePath\":\"\"}",
-                    "tooltip": "銆屼换鎰忛瑙堛€嶉厤缃紙鏄惁瀛樻。 + 瀛樻。鐩稿鐩綍锛夈€?,
+                    "tooltip": "「任意预览」配置（是否存档 + 存档相对目录）。",
                 }),
             },
             "optional": {},
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
         for i in range(1, _PREVIEW_MAX + 1):
-            inputs["optional"][f"input_{i}"] = (_ANY, {"forceInput": True, "tooltip": f"浠绘剰杈撳叆 {i}銆?})
+            inputs["optional"][f"input_{i}"] = (_ANY, {"forceInput": True, "tooltip": f"任意输入 {i}。"})
         return inputs
 
     RETURN_TYPES = ()
@@ -1009,7 +1052,7 @@ class PreviewAnyNode:
     OUTPUT_NODE = True
     FUNCTION = "preview"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "EzFlex-PreviewAny锛氱櫧鏉挎斁缃涓彲鎷栨嫿鎺掑簭鐨勯瑙堝崱鐗囷紝鎺ユ敹浠绘剰杈撳叆骞惰嚜鍔ㄨВ鏋愶紝鎸夌被鍨嬫樉绀?棰勮锛涘彲瀛樻。鍒?ComfyUI 杈撳嚭鐩綍銆傛瘡鍗′竴涓瓧绗︿覆杈撳嚭銆?
+    DESCRIPTION = "EzFlex-PreviewAny：白板放置多个可拖拽排序的预览卡片，接收任意输入并自动解析，按类型显示/预览；可存档到 ComfyUI 输出目录。每卡一个字符串输出。"
 
     def preview(self, config="{}", unique_id=None, extra_pnginfo=None, **kwargs):
         cfg = self._parse_config(config)
@@ -1017,16 +1060,16 @@ class PreviewAnyNode:
         wf_meta = PreviewAnyNode._workflow_gen_meta((extra_pnginfo or {}).get("workflow", {}))
         entries, outputs = [], []
         for i, (name, label, upstream) in enumerate(connected):
-            entry = self._entry(label or f"杈撳叆 {i + 1}", kwargs.get(name), upstream, wf_meta)
+            entry = self._entry(label or f"输入 {i + 1}", kwargs.get(name), upstream, wf_meta)
             entry = self._maybe_save(entry, cfg, label or f"card_{i + 1}")
             entries.append(entry)
-            outputs.append(kwargs.get(name))   # 閫忎紶鍘熷鍊硷紙涓嶆槸鍗℃枃瀛楋級锛屼緵宸ヤ綔娴佷腑闂磋繛鎺ョ户缁紶閫?
-        # 鐢?"*" 閫氶厤绫诲瀷锛岃杈撳嚭鑳借繛鍒颁换鎰忕被鍨嬬殑杈撳叆绔彛锛堥€忎紶鍘熷鍊硷級
+            outputs.append(kwargs.get(name))   # 透传原始值（不是卡文字），供工作流中间连接继续传递
+        # 用 "*" 通配类型，让输出能连到任意类型的输入端口（透传原始值）
         self.__class__.RETURN_TYPES = tuple("*" for _ in range(len(outputs)))
         self.__class__.RETURN_NAMES = tuple(f"output_{i + 1}" for i in range(len(outputs)))
         return {"ui": {"entries": _pv_sanitize(entries)}, "result": tuple(outputs)}
 
-    # 鈹€鈹€ 閰嶇疆 / 宸茶繛鎺ヨ緭鍏?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # ── 配置 / 已连接输入 ──────────────────────────────────────────
     def _parse_config(self, config):
         if isinstance(config, str):
             if not config.strip():
@@ -1043,7 +1086,7 @@ class PreviewAnyNode:
                 "saveFormats": data.get("saveFormats") if isinstance(data.get("saveFormats"), dict) else {}}
 
     def _connected_inputs(self, unique_id, extra_pnginfo):
-        """杩斿洖宸茶繛鎺ヨ緭鍏?(name, label)锛屾寜 workflow 閲?input 椤哄簭銆俵abel 鍙栦笂娓歌緭鍑烘爣绛俱€?""
+        """返回已连接输入 (name, label)，按 workflow 里 input 顺序。label 取上游输出标签。"""
         names = []
         if unique_id is None or extra_pnginfo is None:
             return names
@@ -1054,7 +1097,7 @@ class PreviewAnyNode:
             return names
         inputs_data = my_node.get("inputs", [])
         input_list = inputs_data.values() if isinstance(inputs_data, dict) else inputs_data if isinstance(inputs_data, list) else []
-        # ComfyUI 宸ヤ綔娴佺殑 links 鍙兘鏄?dict锛屼篃鍙兘鏄暟缁?[id, origin_id, origin_slot, ...]锛屼袱绉嶉兘鍏煎
+        # ComfyUI 工作流的 links 可能是 dict，也可能是数组 [id, origin_id, origin_slot, ...]，两种都兼容
         links = {}
         for l in (workflow.get("links") or []):
             if isinstance(l, dict):
@@ -1088,13 +1131,13 @@ class PreviewAnyNode:
             names.append((nm, label or nm, upstream))
         return names
 
-    # 鈹€鈹€ 鍗曞崱瑙ｆ瀽 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    # ── 单卡解析 ────────────────────────────────────────────────────
     def _entry(self, caption, value, upstream=None, wf_meta=None):
         entry = {"caption": caption or "", "type": "", "value": "", "full_value": None, "preview": None,
                  "audio": None, "frames": 0, "meta": None}
         if value is None:
             entry["type"] = "EMPTY"
-            entry["value"] = "(鏈繛鎺?"
+            entry["value"] = "(未连接)"
             return entry
         try:
             type_name = self._infer_type(value)
@@ -1140,7 +1183,7 @@ class PreviewAnyNode:
                     entry["audio"] = self._audio_to_data_uri(value)
             elif type_name == "VIDEO":
                 if not isinstance(value, (dict, list, tuple)) and hasattr(value, "get_stream_source"):
-                    # 鏂囦欢鍨嬭棰戯紙VideoFromFile锛夛細鎸傛簮鏂囦欢 URL + 瑙ｉ甯у皝闈?+ 鍏冩暟鎹紝涓嶆暣娈佃В鐮侊紙閬垮厤鍗★級
+                    # 文件型视频（VideoFromFile）：挂源文件 URL + 解首帧封面 + 元数据，不整段解码（避免卡）
                     src = value.get_stream_source() if hasattr(value, "get_stream_source") else None
                     if isinstance(src, str) and src and os.path.exists(src):
                         from urllib.parse import quote
@@ -1154,7 +1197,7 @@ class PreviewAnyNode:
                         if gm:
                             entry["gen_meta"] = json.dumps(gm, ensure_ascii=False, default=str)
                     else:
-                        # BytesIO/鏃犺矾寰勶細璇诲抚缂栫爜锛堝浘鐗囧簭鍒楋級
+                        # BytesIO/无路径：读帧编码（图片序列）
                         nps, vfps = self._video_from_file_np(value)
                         if nps:
                             entry["preview"] = self._image_np_to_base64(nps[0])
@@ -1165,7 +1208,7 @@ class PreviewAnyNode:
                             if wm:
                                 entry["video"] = wm
                         else:
-                            entry["value"] = "瑙嗛"
+                            entry["value"] = "视频"
                 else:
                     first, count = self._video_first_frame(value)
                     entry["preview"] = first
@@ -1193,9 +1236,9 @@ class PreviewAnyNode:
             elif type_name == "LATENT":
                 val, full = self._latent_summary(value)
                 entry["value"] = val
-                entry["meta"] = ("Latent 鏄墿鏁ｆā鍨嬬殑闅愯棌娼滃湪绌洪棿锛堝帇缂╁悗鐨勭壒寰侊級锛宻hape=[B,C,H,W] 鍚箟锛?
-                                 "B=鎵规(batch)銆丆=閫氶亾(channel锛岄€氬父涓?4)銆丠=楂樺害銆乄=瀹藉害銆傚畠涓嶆槸鏈€缁堝浘鍍忥紝"
-                                 "闇€缁?VAE 瑙ｇ爜鎴愬浘鍍忋€傝繖閲岀粰鍑虹殑鏄畠鐨?shape/dtype 缁熻銆?)
+                entry["meta"] = ("Latent 是扩散模型的隐藏潜在空间（压缩后的特征），shape=[B,C,H,W] 含义："
+                                 "B=批次(batch)、C=通道(channel，通常为 4)、H=高度、W=宽度。它不是最终图像，"
+                                 "需经 VAE 解码成图像。这里给出的是它的 shape/dtype 统计。")
                 if full:
                     entry["full_value"] = full
             elif type_name == "MODEL_3D":
@@ -1236,7 +1279,7 @@ class PreviewAnyNode:
                 if full:
                     entry["full_value"] = full
             else:
-                # 鍏滃簳锛氭ā鍨嬬被瀵硅薄锛堢被鍚?妯″潡/灞炴€ф帰娴嬶級鑻ユ湭琚瘑鍒紝缁欏嚭鎽樿鑰岄潪瑁?repr
+                # 兜底：模型类对象（类名/模块/属性探测）若未被识别，给出摘要而非裸 repr
                 _mod = type(value).__module__ or ""
                 _nm = type(value).__name__
                 is_model = ("model_patcher" in _mod) or ("ModelPatcher" in _nm) or getattr(value, "cached_patcher_init", None) is not None
@@ -1256,7 +1299,7 @@ class PreviewAnyNode:
                         entry["full_value"] = full
         except Exception:
             try:
-                # 鍏滃簳锛氭ā鍨?CLIP/VAE 瀵硅薄鍗充娇鍓嶉潰鏌愭寮傚父锛屼篃灏介噺缁欐憳瑕佽€岄潪瑁?repr
+                # 兜底：模型/CLIP/VAE 对象即使前面某步异常，也尽量给摘要而非裸 repr
                 _mod = type(value).__module__ or ""
                 _nm = type(value).__name__
                 if "model_patcher" in _mod or "ModelPatcher" in _nm:
@@ -1282,10 +1325,10 @@ class PreviewAnyNode:
             except Exception:
                 entry["value"] = _pv_str(value)
                 entry["type"] = type(value).__name__.upper()
-        # 瑙嗛/3D/闊抽绛夈€屾枃浠朵笉鍚敓鎴愬厓鏁版嵁銆嶇殑绫诲瀷锛岃嫢褰撳墠宸ヤ綔娴佸浘鑳芥彁鍙栧埌浣跨敤鐨勬ā鍨?鎻愮ず璇?閲囨牱鍙傛暟锛?
-        # 鍒欎篃鎸備笂銆岀敓鎴愪俊鎭€嶏紝璁╃敤鎴风湅鍒版湰娆＄敓鎴愮敤浜嗗摢浜涙ā鍨嬶紙MODEL/CLIP/VAE 鍗＄墖宸叉湁鑷韩鍏冩暟鎹紝涓嶅啀瑕嗙洊锛夈€?
-        # 浣嗚嫢涓婃父鏄€屼粠鏂囦欢鍔犺浇銆嶏紙LoadImage/LoadVideo/VideoFromFile/Load3D 绛夛級锛岃鏄庤鍊间笉鏄湰娆＄敓鎴愮殑锛?
-        # 涓嶈兘鐢ㄥ綋鍓嶅伐浣滄祦鍙傛暟鍐掑厖锛岄伩鍏嶈瀵笺€?
+        # 视频/3D/音频等「文件不含生成元数据」的类型，若当前工作流图能提取到使用的模型/提示词/采样参数，
+        # 则也挂上「生成信息」，让用户看到本次生成用了哪些模型（MODEL/CLIP/VAE 卡片已有自身元数据，不再覆盖）。
+        # 但若上游是「从文件加载」（LoadImage/LoadVideo/VideoFromFile/Load3D 等），说明该值不是本次生成的，
+        # 不能用当前工作流参数冒充，避免误导。
         _up_type = (upstream.get("type") or "") if isinstance(upstream, dict) else ""
         _is_file_src = ("Load" in _up_type or "FromFile" in _up_type) and "Save" not in _up_type and "Sampler" not in _up_type
         if not entry.get("gen_meta") and not entry.get("meta") and wf_meta and not _is_file_src:
@@ -1311,7 +1354,7 @@ class PreviewAnyNode:
                 return "AUDIO"
             return "DICT"
         if isinstance(value, (list, tuple)):
-            # 涓€鍒楀浘鍍忓抚 -> 瑙嗛
+            # 一列图像帧 -> 视频
             if len(value) > 1 and all(isinstance(x, torch.Tensor) and x.ndim in (3, 4) for x in value):
                 return "VIDEO"
             if len(value) == 1 and isinstance(value[0], torch.Tensor) and value[0].ndim == 4:
@@ -1336,12 +1379,12 @@ class PreviewAnyNode:
             return "INT"
         if isinstance(value, float):
             return "FLOAT"
-        # ComfyUI 瀵硅薄绫诲瀷锛堟寜绫诲悕璇嗗埆锛?
+        # ComfyUI 对象类型（按类名识别）
         cls = type(value).__name__
         if cls.startswith("VideoFrom") or "Video" in cls or cls in ("VideoFile", "VideoFrame"):
             return "VIDEO"
         mod = type(value).__module__ or ""
-        # 妯″瀷/CLIP/VAE锛氭寜绫诲悕 + 妯″潡鍒ゅ畾锛堟ā鍧楀垽瀹氭瘮灞炴€ф帰娴嬫洿绋筹紝瑕嗙洊 ModelPatcher 绯诲垪瀛愮被锛?
+        # 模型/CLIP/VAE：按类名 + 模块判定（模块判定比属性探测更稳，覆盖 ModelPatcher 系列子类）
         if ("ModelPatcher" in cls or cls in ("CLIPModel", "ModelPatcher", "ModelPatcherDynamic")) or ("model_patcher" in mod):
             return "MODEL"
         if cls in ("CLIP",) or (mod.startswith("comfy.sd") and cls == "CLIP"):
@@ -1411,7 +1454,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _export_image_url(tensor):
-        """淇濆瓨鍘熷浘鍒颁复鏃舵枃浠跺苟杩斿洖鍙闂?URL锛堝叏灞忕敤鍘熷浘锛夈€?""
+        """保存原图到临时文件并返回可访问 URL（全屏用原图）。"""
         try:
             if isinstance(tensor, torch.Tensor):
                 t = tensor
@@ -1449,7 +1492,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _audio_file_src(data):
-        """闊抽锛氭枃浠跺瀷鐢ㄥ師 URL锛涘惁鍒欐妸娉㈠舰鍐欎复鏃?WAV 骞惰繑鍥?serve URL锛堟祦寮忥紝閬垮厤 base64 鍗￠】锛夈€?""
+        """音频：文件型用原 URL；否则把波形写临时 WAV 并返回 serve URL（流式，避免 base64 卡顿）。"""
         try:
             from urllib.parse import quote
             def _url(p):
@@ -1472,7 +1515,7 @@ class PreviewAnyNode:
                 u = _url(src)
                 if u:
                     return u
-            # 鏃犳枃浠?鈫?鍐欎复鏃?WAV
+            # 无文件 → 写临时 WAV
             uri = PreviewAnyNode._audio_to_data_uri(data)
             if uri and uri.startswith("data:audio/wav;base64,"):
                 wav = base64.b64decode(uri.split(",", 1)[1])
@@ -1488,7 +1531,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _audio_to_data_uri(data):
-        """鎶?ComfyUI 闊抽锛坉ict 鍚?waveform/sample_rate锛屾垨 (waveform, sample_rate)锛夌紪鐮佷负 WAV data URI銆?""
+        """把 ComfyUI 音频（dict 含 waveform/sample_rate，或 (waveform, sample_rate)）编码为 WAV data URI。"""
         try:
             waveform = None
             sample_rate = 44100
@@ -1523,21 +1566,21 @@ class PreviewAnyNode:
                 sample_rate = data.get("sample_rate")
                 w = data.get("waveform", data.get("audio"))
                 if isinstance(w, torch.Tensor):
-                    return f"闊抽 {w.shape[-1]} 閲囨牱 @ {sample_rate}Hz" if sample_rate else f"闊抽 {w.shape[-1]} 閲囨牱"
-                return "闊抽"
+                    return f"音频 {w.shape[-1]} 采样 @ {sample_rate}Hz" if sample_rate else f"音频 {w.shape[-1]} 采样"
+                return "音频"
             if isinstance(data, (list, tuple)) and len(data) >= 2:
                 sample_rate = data[1]
                 w = data[0]
                 if isinstance(w, torch.Tensor):
-                    return f"闊抽 {w.shape[-1]} 閲囨牱 @ {sample_rate}Hz"
-                return "闊抽"
-            return "闊抽"
+                    return f"音频 {w.shape[-1]} 采样 @ {sample_rate}Hz"
+                return "音频"
+            return "音频"
         except Exception:
-            return "闊抽"
+            return "音频"
 
     @staticmethod
     def _video_extract_frames(value):
-        """浠?dict/list/VideoFromFile 瀵硅薄鎻愬彇 (甯у垪琛? fps)锛屾渶澶?30 甯с€?""
+        """从 dict/list/VideoFromFile 对象提取 (帧列表, fps)，最多 30 帧。"""
         frames = []
         fps = 8
         try:
@@ -1551,7 +1594,7 @@ class PreviewAnyNode:
                 if len(frames) == 1 and frames[0].ndim == 4:
                     frames = [frames[0][i] for i in range(min(frames[0].shape[0], 30))]
             else:
-                # VideoFromFile 涔嬬被鐨勫璞★細璇曞父瑙佸睘鎬?鍙凯浠?to_images
+                # VideoFromFile 之类的对象：试常见属性/可迭代/to_images
                 cand = None
                 for attr in ("frames", "images", "tensors", "data"):
                     cand = getattr(value, attr, None)
@@ -1575,7 +1618,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _video_first_frame(data):
-        """瑙嗛/澶氬抚锛氳繑鍥?(棣栧抚 base64, 甯ф暟)銆?""
+        """视频/多帧：返回 (首帧 base64, 帧数)。"""
         frames, _ = PreviewAnyNode._video_extract_frames(data)
         if frames:
             return (PreviewAnyNode._image_to_base64(frames[0]) if frames[0] is not None else None), len(frames)
@@ -1583,7 +1626,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _video_frames(value):
-        """鎻愬彇瑙嗛甯у垪琛?+ fps锛堟渶澶?30 甯э級锛屽吋瀹?dict/list/VideoFromFile 瀵硅薄銆?""
+        """提取视频帧列表 + fps（最多 30 帧），兼容 dict/list/VideoFromFile 对象。"""
         return PreviewAnyNode._video_extract_frames(value)
 
     @staticmethod
@@ -1591,19 +1634,19 @@ class PreviewAnyNode:
         try:
             n = len(frames)
             if not n:
-                return "瑙嗛"
+                return "视频"
             t = frames[0]
             if t.ndim == 4:
                 t = t[0]
             if t.ndim == 3:
-                return f"{n} 甯?@ {fps}fps  {t.shape[1]}x{t.shape[0]}"
-            return f"{n} 甯?@ {fps}fps"
+                return f"{n} 帧 @ {fps}fps  {t.shape[1]}x{t.shape[0]}"
+            return f"{n} 帧 @ {fps}fps"
         except Exception:
-            return "瑙嗛"
+            return "视频"
 
     @staticmethod
     def _video_to_webm(frames, fps=8):
-        """鐢?av 鎶婂抚搴忓垪缂栫爜鎴?WebM(data URI)锛岀己澶?av/缂栫爜鍣ㄦ椂杩斿洖 None銆?""
+        """用 av 把帧序列编码成 WebM(data URI)，缺失 av/编码器时返回 None。"""
         if not frames or not isinstance(frames[0], torch.Tensor):
             return None
         try:
@@ -1641,7 +1684,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _video_from_file_np(value):
-        """鏂囦欢鍨嬭棰戝璞★紙VideoFromFile锛夛細鐢?av 璇诲叏閮ㄥ抚锛堝畬鏁磋棰戯級锛岃繑鍥?(numpy RGB 甯у垪琛? fps)銆?""
+        """文件型视频对象（VideoFromFile）：用 av 读全部帧（完整视频），返回 (numpy RGB 帧列表, fps)。"""
         try:
             src = value.get_stream_source() if hasattr(value, "get_stream_source") else None
             if src is None:
@@ -1663,7 +1706,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _video_to_webm_np(frames, fps=8):
-        """鐢?av 鎶?numpy RGB 甯х紪鐮佹垚 WebM(data URI)銆?""
+        """用 av 把 numpy RGB 帧编码成 WebM(data URI)。"""
         if not frames:
             return None
         try:
@@ -1715,14 +1758,14 @@ class PreviewAnyNode:
         try:
             if frames:
                 h, w = frames[0].shape[:2]
-                return f"{len(frames)} 甯?@ {fps:.0f}fps  {w}x{h}"
+                return f"{len(frames)} 帧 @ {fps:.0f}fps  {w}x{h}"
         except Exception:
             pass
-        return "瑙嗛"
+        return "视频"
 
     @staticmethod
     def _video_file_poster(src):
-        """鍙В棣栧抚鍋氬皝闈紝杩斿洖 (base64, fps, (w,h))銆?""
+        """只解首帧做封面，返回 (base64, fps, (w,h))。"""
         try:
             import av
             if not (isinstance(src, str) and src and os.path.exists(src)):
@@ -1745,15 +1788,15 @@ class PreviewAnyNode:
         try:
             if dims:
                 w, h = dims
-                return f"瑙嗛 @ {fps:.0f}fps  {w}x{h}"
+                return f"视频 @ {fps:.0f}fps  {w}x{h}"
         except Exception:
             pass
-        return "瑙嗛"
+        return "视频"
 
     @staticmethod
     @staticmethod
     def _resolve_model_path(path):
-        """鎶婄浉瀵规ā鍨嬭矾寰勮В鏋愪负缁濆璺緞锛堥亶鍘?ComfyUI 鍚勬ā鍨嬬洰褰曪紝鏀寔瀛愯矾寰勫 鐢婚\\椋庢牸\\Anima\\xxx.safetensors锛夈€?""
+        """把相对模型路径解析为绝对路径（遍历 ComfyUI 各模型目录，支持子路径如 画风\\风格\\Anima\\xxx.safetensors）。"""
         if not path:
             return path
         if os.path.isabs(path) and os.path.isfile(path):
@@ -1764,15 +1807,15 @@ class PreviewAnyNode:
             rel = path.replace("\\", "/")
             for folder in ("checkpoints", "diffusion_models", "unet", "loras", "controlnet", "vae", "clip", "text_encoders", "embeddings"):
                 try:
-                    # 1) 鐩稿瀛愯矾寰?
+                    # 1) 相对子路径
                     fp = folder_paths.get_full_path(folder, rel)
                     if fp and os.path.isfile(fp):
                         return fp
-                    # 2) 浠呮枃浠跺悕
+                    # 2) 仅文件名
                     fp = folder_paths.get_full_path(folder, base)
                     if fp and os.path.isfile(fp):
                         return fp
-                    # 3) 鐩存帴鎷兼帴鍚勬枃浠跺す鏍圭洰褰?
+                    # 3) 直接拼接各文件夹根目录
                     for root in folder_paths.get_folder_paths(folder):
                         cand = os.path.join(root, rel)
                         if os.path.isfile(cand):
@@ -1786,9 +1829,9 @@ class PreviewAnyNode:
     @staticmethod
     def _model_file_path(value, type_name, upstream=None):
         try:
-            # 浼樺厛涓婃父鍔犺浇鑺傜偣鐨?widgets_values锛氳兘鎷垮埌鐪熸鐨勬ā鍨?LoRA 鏂囦欢鍚?
-            # 锛堝 LoraLoader 鐨?lora_name銆乁NETLoader 鐨?unet_name銆丆heckpointLoader 鐨?ckpt_name锛夈€?
-            # LoRA 鍔犺浇鍣ㄨ繛浜嗘ā鍨嬪悗锛岄瑙堟兂鏄剧ず鐨勬槸 LoRA 鐨勮缁冭瘝/姣旈噸绛夛紝鍥犳浼樺厛璇?LoRA 鏂囦欢銆?
+            # 优先上游加载节点的 widgets_values：能拿到真正的模型/LoRA 文件名
+            # （如 LoraLoader 的 lora_name、UNETLoader 的 unet_name、CheckpointLoader 的 ckpt_name）。
+            # LoRA 加载器连了模型后，预览想显示的是 LoRA 的训练词/比重等，因此优先读 LoRA 文件。
             if isinstance(upstream, dict):
                 node_hint = " ".join(str(upstream.get(k) or "") for k in ("type", "title", "name"))
                 is_lora_node = "lora" in node_hint.lower()
@@ -1806,8 +1849,8 @@ class PreviewAnyNode:
                     if "." in w and " " not in w.strip() and not low.isdigit():
                         return True
                     return False
-                # ModelsCombo锛歸idgets_values 閲屾湁涓€涓?JSON锛屾弿杩?combo 鍐?unet/clip/vae/lora 娓呭崟銆?
-                # MODEL 浼樺厛鍙?lora锛堣璁粌璇?姣旈噸锛夛紝鍚﹀垯鍙?unet锛汣LIP/VAE 鍙栧搴旂被鍨嬨€?
+                # ModelsCombo：widgets_values 里有一串 JSON，描述 combo 内 unet/clip/vae/lora 清单。
+                # MODEL 优先取 lora（读训练词/比重），否则取 unet；CLIP/VAE 取对应类型。
                 for w in wv:
                     if isinstance(w, str) and w.strip().startswith("[") and '"file"' in w:
                         try:
@@ -1831,7 +1874,7 @@ class PreviewAnyNode:
                                 if rp:
                                     return rp
                         break
-                # 鍏堟壘閫氱敤鏂囦欢/璺緞鏍峰紡鐨?widget锛汱oRA 鑺傜偣鍐嶅厹搴曚换浣曞惈 lora 鐨勫瓧绗︿覆
+                # 先找通用文件/路径样式的 widget；LoRA 节点再兜底任何含 lora 的字符串
                 for w in wv:
                     if _looks_like_file(w):
                         rp = PreviewAnyNode._resolve_model_path(w)
@@ -1843,7 +1886,7 @@ class PreviewAnyNode:
                             rp = PreviewAnyNode._resolve_model_path(w)
                             if rp:
                                 return rp
-            # 瀵硅薄鍏滃簳锛氫粠 cached_patcher_init / patcher 鍙栬矾寰?
+            # 对象兜底：从 cached_patcher_init / patcher 取路径
             path = None
             if type_name in ("MODEL", "CONTROL_NET", "STYLE_MODEL", "UPSCALE_MODEL", "LORA_MODEL", "GLIGEN"):
                 init = getattr(value, "cached_patcher_init", None)
@@ -1864,7 +1907,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _model_type_str(value):
-        """浠庢ā鍨嬪璞℃彁鍙栨灦鏋?绫诲瀷瀛楃涓诧紙澶勭悊 callable 鐨?model_type锛岄伩鍏嶈緭鍑?bound method 鐨?repr锛夈€?""
+        """从模型对象提取架构/类型字符串（处理 callable 的 model_type，避免输出 bound method 的 repr）。"""
         def _clean(v):
             if v is None:
                 return None
@@ -1879,8 +1922,8 @@ class PreviewAnyNode:
                     return v
             return None
         try:
-            # 鍙畨鍏ㄦ帰娴嬪凡鐭ュ瓨鍦ㄧ殑 model_type锛岄伩鍏嶈闂?model_config 涓婁笉瀛樺湪鐨?
-            # model_type_name/architecture 瑙﹀彂 ComfyUI 鐨勨€渁ccessed non-existing attr鈥濊鍛娿€?
+            # 只安全探测已知存在的 model_type，避免访问 model_config 上不存在的
+            # model_type_name/architecture 触发 ComfyUI 的“accessed non-existing attr”警告。
             for obj in (value, getattr(value, "model", None)):
                 if obj is None:
                     continue
@@ -1892,7 +1935,7 @@ class PreviewAnyNode:
                 s = _clean(getattr(cfg, "model_type", None))
                 if s:
                     return s
-            # 鍏滃簳锛氬簳灞傛ā鍨嬬被鍚嶏紙comfy.supported_models.Anima -> "anima"锛孠rea -> "krea" 绛夛級
+            # 兜底：底层模型类名（comfy.supported_models.Anima -> "anima"，Krea -> "krea" 等）
             for o in (getattr(value, "model", None), value):
                 if o is None:
                     continue
@@ -1906,7 +1949,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _read_raw_meta(path):
-        """璇诲彇妯″瀷鏂囦欢鐨勫師濮嬪厓鏁版嵁 dict锛堝惈 ss_* / modelspec.* 绛夛級銆?""
+        """读取模型文件的原始元数据 dict（含 ss_* / modelspec.* 等）。"""
         if not path:
             return None
         ext = os.path.splitext(path)[1].lower()
@@ -1930,7 +1973,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _base_model_path(value, type_name):
-        """浠庢ā鍨嬪璞¤嚜韬彇鍩虹妯″瀷璺緞锛堜笉鍚笂娓?lora锛夈€?""
+        """从模型对象自身取基础模型路径（不含上游 lora）。"""
         try:
             path = None
             if type_name in ("MODEL", "CONTROL_NET", "STYLE_MODEL", "UPSCALE_MODEL", "LORA_MODEL", "GLIGEN"):
@@ -1952,14 +1995,14 @@ class PreviewAnyNode:
 
     @staticmethod
     def _lora_file_path(value, type_name, upstream):
-        """浠庝笂娓歌妭鐐瑰彇 LoRA 鏂囦欢璺緞锛圠ora 鑺傜偣鐨?lora_name 鎴?ModelsCombo 鐨?lora file锛夈€?""
+        """从上游节点取 LoRA 文件路径（Lora 节点的 lora_name 或 ModelsCombo 的 lora file）。"""
         if not isinstance(upstream, dict):
             return None
         try:
             node_hint = " ".join(str(upstream.get(k) or "") for k in ("type", "title", "name"))
             is_lora_node = "lora" in node_hint.lower()
             wv = upstream.get("widgets_values") or []
-            # ModelsCombo锛欽SON 娓呭崟閲岀殑 type=lora 椤?
+            # ModelsCombo：JSON 清单里的 type=lora 项
             for w in wv:
                 if isinstance(w, str) and w.strip().startswith("[") and '"file"' in w:
                     try:
@@ -1971,7 +2014,7 @@ class PreviewAnyNode:
                             if isinstance(e, dict) and (e.get("type") or "").lower() == "lora" and e.get("file"):
                                 return PreviewAnyNode._resolve_model_path(e["file"])
                     break
-            # Lora 鑺傜偣锛氱洿鎺ュ彇 lora_name 涔嬬被鐨勬枃浠?
+            # Lora 节点：直接取 lora_name 之类的文件
             if is_lora_node:
                 for w in wv:
                     if isinstance(w, str) and ("lora" in w.lower() or w.lower().endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".lora"))):
@@ -1984,7 +2027,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _build_sub_meta(path, name, type_name, value, kind):
-        """鎶婂崟涓ā鍨嬫枃浠剁殑鍏冩暟鎹暣鐞嗘垚鈥滈噸瑕佸瓧娈靛湪鍓嶃€佷腑鏂囨爣绛锯€濈殑 dict銆俴ind锛氭ā鍨?LoRA/None銆?""
+        """把单个模型文件的元数据整理成“重要字段在前、中文标签”的 dict。kind：模型/LoRA/None。"""
         raw = PreviewAnyNode._read_raw_meta(path)
         rawd = raw or {}
         out = {}
@@ -1995,41 +2038,41 @@ class PreviewAnyNode:
                     return rawd[k]
             return None
 
-        out["鍚嶇О"] = name or (os.path.basename(path) if path else (kind or "妯″瀷"))
-        out["绫诲瀷"] = kind or type_name
+        out["名称"] = name or (os.path.basename(path) if path else (kind or "模型"))
+        out["类型"] = kind or type_name
         arch = pick("modelspec.architecture", "architecture", "model_type", "ss_base_model_version", "ss_model_description", "model_type_name")
         if arch:
-            out["鏋舵瀯"] = str(arch)
+            out["架构"] = str(arch)
         else:
             ts = PreviewAnyNode._model_type_str(value)
             if ts:
-                out["鏋舵瀯"] = ts
+                out["架构"] = ts
         author = pick("modelspec.author", "created_by", "ss_creator", "author")
         if author:
-            out["浣滆€?鏉ユ簮"] = str(author)
+            out["作者/来源"] = str(author)
         org = pick("modelspec.organization", "modelspec.tags", "ss_sd_model_name", "modelspec.civitai_resources")
         if org:
-            out["褰掑睘/缁勭粐"] = str(org)
+            out["归属/组织"] = str(org)
         base = pick("ss_base_model_version", "base_model", "ss_sd_model_name")
         if base and kind == "LoRA":
-            out["鍩虹妯″瀷"] = str(base)
+            out["基础模型"] = str(base)
         dim = pick("ss_network_dim", "ss_network_dims")
         if dim:
-            out["璁粌缁村害 dim"] = str(dim)
+            out["训练维度 dim"] = str(dim)
         alpha = pick("ss_network_alpha")
         if alpha:
-            out["璁粌缁村害 alpha"] = str(alpha)
+            out["训练维度 alpha"] = str(alpha)
         tf = pick("ss_tag_frequency")
         if tf:
             try:
                 tfv = json.loads(tf) if isinstance(tf, str) else tf
                 if isinstance(tfv, dict):
-                    out["璁粌鍏抽敭璇?姣旈噸"] = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in tfv.items()}
+                    out["训练关键词/比重"] = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in tfv.items()}
                 else:
-                    out["璁粌鍏抽敭璇?姣旈噸"] = str(tfv)
+                    out["训练关键词/比重"] = str(tfv)
             except Exception:
-                out["璁粌鍏抽敭璇?姣旈噸"] = str(tf)
-        # 涓昏瑙﹀彂璇嶏細鎸夊嚭鐜版鏁板彇鍓嶈嫢骞诧紙涓庡畬鏁淬€岃缁冨叧閿瘝/姣旈噸銆嶅苟瀛橈紝蹇€熺湅锛?
+                out["训练关键词/比重"] = str(tf)
+        # 主要触发词：按出现次数取前若干（与完整「训练关键词/比重」并存，快速看）
         try:
             tfj = json.loads(tf) if isinstance(tf, str) else tf
             if isinstance(tfj, dict):
@@ -2044,12 +2087,12 @@ class PreviewAnyNode:
                 items.sort(key=lambda x: -x[1])
                 topw = [k for k, _ in items[:8]]
                 if topw:
-                    out["涓昏瑙﹀彂璇?] = ", ".join(topw)
+                    out["主要触发词"] = ", ".join(topw)
         except Exception:
             pass
         ntype = pick("ss_network_module", "ss_module", "ss_network_args", "ss_network_type")
         if ntype:
-            out["缃戠粶绫诲瀷"] = str(ntype)
+            out["网络类型"] = str(ntype)
         contains = pick("modelspec.contains")
         vae_ok = None
         if contains:
@@ -2062,19 +2105,19 @@ class PreviewAnyNode:
         if vae_ok is None:
             vae_ok = bool(rawd.get("ss_vae_hash") or rawd.get("vae_hash"))
         if vae_ok is not None:
-            out["鏄惁鍐呭祵 VAE"] = "鏄紙鍐呯疆 VAE锛? if vae_ok else "鍚︼紙鍙兘闇€澶栨寕 VAE锛?
+            out["是否内嵌 VAE"] = "是（内置 VAE）" if vae_ok else "否（可能需外挂 VAE）"
         desc = pick("modelspec.description", "ss_model_description", "ss_training_comment", "ss_caption")
         if desc:
-            out["鎻忚堪"] = str(desc)
+            out["描述"] = str(desc)
         title = pick("modelspec.title", "ss_model_name")
         if title and title != name:
-            out["妯″瀷鍚?] = str(title)
+            out["模型名"] = str(title)
         ver = pick("modelspec.sd_version", "modelspec.version", "modelspec.schema_version", "ss_version", "modelspec.training_version")
         if ver and str(ver) != str(arch):
-            out["鐗堟湰"] = str(ver)
+            out["版本"] = str(ver)
         use_prompt = pick("modelspec.usage")
         if use_prompt and str(use_prompt) != str(desc):
-            out["浣跨敤鎻愮ず璇?瑙﹀彂璇?] = str(use_prompt)
+            out["使用提示词/触发词"] = str(use_prompt)
         src = None
         for k in ("modelspec.civitai_resources", "civitai_resources", "modelspec.usage"):
             v = rawd.get(k)
@@ -2113,8 +2156,8 @@ class PreviewAnyNode:
                         src = m.group(0)
                         break
         if src:
-            out["鏉ユ簮/閾炬帴"] = str(src)
-        # 甯哥敤璁粌鍙傛暟锛堟斁涓棿锛岃緝娆¤锛?
+            out["来源/链接"] = str(src)
+        # 常用训练参数（放中间，较次要）
         tr = {}
         for k in ("ss_optimizer", "ss_optimizer_args", "ss_learning_rate", "ss_lr", "ss_unet_lr", "ss_text_encoder_lr",
                   "ss_train_batch_size", "ss_batch_size", "ss_num_batches_per_epoch", "ss_training_steps", "ss_epoch",
@@ -2130,37 +2173,37 @@ class PreviewAnyNode:
                 except Exception:
                     tr[k] = rawd[k]
         if tr:
-            out["璁粌鍙傛暟"] = tr
+            out["训练参数"] = tr
         if path:
-            out["鏂囦欢"] = os.path.basename(path)
-            out["瀛樻斁璺緞"] = os.path.abspath(path)
+            out["文件"] = os.path.basename(path)
+            out["存放路径"] = os.path.abspath(path)
             try:
                 sz = os.path.getsize(path)
-                out["澶у皬"] = _fmt_size(sz)
+                out["大小"] = _fmt_size(sz)
                 if sz <= (1 << 30):
-                    out["鍝堝笇鍊?] = _sha256(path)
+                    out["哈希值"] = _sha256(path)
                 else:
-                    out["鍝堝笇鍊?] = "(澶ф枃浠舵湭璁＄畻锛岄伩鍏嶉樆濉?"
+                    out["哈希值"] = "(大文件未计算，避免阻塞)"
             except Exception:
                 pass
             try:
-                out["淇敼鏃堕棿"] = _fmt_mtime(os.path.getmtime(path))
+                out["修改时间"] = _fmt_mtime(os.path.getmtime(path))
             except Exception:
                 pass
         if raw:
-            out["鍏ㄩ儴鍏冩暟鎹?] = raw
+            out["全部元数据"] = raw
         return out
 
     @staticmethod
     def _model_meta(value, type_name, upstream=None):
-        """璇诲彇妯″瀷鍏冩暟鎹紝鎸?妯″瀷/LoRA 鍒嗗弶銆侀噸瑕佸瓧娈靛湪鍓嶃€佷腑鏂囨爣绛炬帓鐗堬紝杩斿洖 JSON 瀛楃涓蹭緵鍓嶇閿€兼爲銆?""
+        """读取模型元数据，按 模型/LoRA 分叉、重要字段在前、中文标签排版，返回 JSON 字符串供前端键值树。"""
         try:
             base_path = PreviewAnyNode._base_model_path(value, type_name)
             lora_path = PreviewAnyNode._lora_file_path(value, type_name, upstream)
             name = PreviewAnyNode._extract_name(value, type_name)
             if lora_path and lora_path != base_path:
                 result = {
-                    "妯″瀷": PreviewAnyNode._build_sub_meta(base_path, name, type_name, value, "妯″瀷"),
+                    "模型": PreviewAnyNode._build_sub_meta(base_path, name, type_name, value, "模型"),
                     "LoRA": PreviewAnyNode._build_sub_meta(lora_path, os.path.splitext(os.path.basename(lora_path))[0] if lora_path else "LoRA", type_name, value, "LoRA")
                 }
             else:
@@ -2171,7 +2214,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _read_image_text_chunks(path):
-        """璇诲彇鍥剧墖鍐呭祵鏂囨湰鍧楋紙ComfyUI 鐨?prompt/workflow锛學ebUI 鐨?parameters 绛夛級銆?""
+        """读取图片内嵌文本块（ComfyUI 的 prompt/workflow，WebUI 的 parameters 等）。"""
         try:
             from PIL import Image
             im = Image.open(path)
@@ -2182,7 +2225,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _parse_img_meta(text):
-        """鎶婂浘鐗囨枃鏈潡瑙ｆ瀽鎴愮粨鏋勫寲 dict锛堟ā鍨?LoRA/CLIP/VAE/鎻愮ず璇?閲囨牱鍙傛暟 + 鍘熷鍧楋級銆?""
+        """把图片文本块解析成结构化 dict（模型/LoRA/CLIP/VAE/提示词/采样参数 + 原始块）。"""
         out = {}
         try:
             prompt = None
@@ -2248,10 +2291,10 @@ class PreviewAnyNode:
                         for k in ("seed", "steps", "cfg", "sampler_name", "scheduler"):
                             if k in i:
                                 sampler[k] = str(i[k])
-                    # 缁勫悎閰嶇疆锛圗zFlex-ModelsCombo 绛夛級锛歩nputs 閲屽彲鑳藉嚭鐜版弿杩?unet/clip/vae/lora 鐨?JSON 鏁扮粍
+                    # 组合配置（EzFlex-ModelsCombo 等）：inputs 里可能出现描述 unet/clip/vae/lora 的 JSON 数组
                     for v in i.values():
                         _try_combo(v, model, lora, clip, vae)
-            # workflow 鍥惧厹搴曪細褰撳彧鏈?workflow 鏂囨湰鍧椼€佹垨澶氫釜鑺傜偣鐢ㄧ被 type 琛ㄧず鏃朵篃鑳芥彁鍙?
+            # workflow 图兜底：当只有 workflow 文本块、或多个节点用类 type 表示时也能提取
             wf = None
             if "workflow" in text:
                 try:
@@ -2286,8 +2329,8 @@ class PreviewAnyNode:
                                 break
                     for w in wv:
                         _try_combo(w, model, lora, clip, vae)
-            # 閫氱敤鍥為€€锛氫笉渚濊禆纭紪鐮佽妭鐐圭被鍚嶏紝鎵弿鎵€鏈夎妭鐐?input锛屾寜銆屽儚妯″瀷鏂囦欢鍚嶇殑瀛楃涓层€嶅綊绫伙紝
-            # 瑕嗙洊 krea2 / flux2 / qwen 绛夋柊鍔犺浇鍣ㄦ垨浣跨敤鑷畾涔夎妭鐐规椂 prompt 鍏冩暟鎹殑鎻愬彇銆?
+            # 通用回退：不依赖硬编码节点类名，扫描所有节点 input，按「像模型文件名的字符串」归类，
+            # 覆盖 krea2 / flux2 / qwen 等新加载器或使用自定义节点时 prompt 元数据的提取。
             if nodes:
                 def _mf(s):
                     s = str(s)
@@ -2331,7 +2374,7 @@ class PreviewAnyNode:
                                 if k == "Model":
                                     model.append(v.strip())
             if model:
-                out["妯″瀷"] = list(dict.fromkeys(model))
+                out["模型"] = list(dict.fromkeys(model))
             if lora:
                 out["LoRA"] = list(dict.fromkeys(lora))
             if clip:
@@ -2339,21 +2382,21 @@ class PreviewAnyNode:
             if vae:
                 out["VAE"] = list(dict.fromkeys(vae))
             if prompts:
-                out["鎻愮ず璇?] = prompts
+                out["提示词"] = prompts
             if neg:
-                out["鍙嶅悜鎻愮ず璇?] = neg
+                out["反向提示词"] = neg
             if sampler:
-                out["閲囨牱鍙傛暟"] = sampler
+                out["采样参数"] = sampler
             rawc = {k: text[k] for k in ("prompt", "workflow", "parameters") if k in text}
             if rawc:
-                out["鍘熷鏂囨湰鍧?] = rawc
+                out["原始文本块"] = rawc
         except Exception:
             pass
         return out
 
     @staticmethod
     def _image_gen_meta(upstream):
-        """浠庝笂娓歌妭鐐圭殑 image 鏂囦欢鍚嶈鍙栫敓鎴愬浘鐗囩殑鍏冧俊鎭紝杩斿洖缁撴瀯鍖?dict锛堟棤鍒?None锛夈€?""
+        """从上游节点的 image 文件名读取生成图片的元信息，返回结构化 dict（无则 None）。"""
         if not isinstance(upstream, dict):
             return None
         try:
@@ -2370,7 +2413,7 @@ class PreviewAnyNode:
                 import folder_paths
                 base = fname.replace("\\", "/")
                 name = os.path.basename(base)
-                # 鐢熸垚鍥鹃€氬父鍦?output/锛屼篃鍏煎 temp/input/锛沠ilename 鍙兘鏄瓙璺緞
+                # 生成图通常在 output/，也兼容 temp/input/；filename 可能是子路径
                 for root in (folder_paths.get_output_directory(), folder_paths.get_temp_directory(), folder_paths.get_input_directory()):
                     if not root:
                         continue
@@ -2393,36 +2436,36 @@ class PreviewAnyNode:
             if not text:
                 return None
             parsed = PreviewAnyNode._parse_img_meta(text)
-            parsed["鏉ユ簮鏂囦欢"] = os.path.basename(path)
+            parsed["来源文件"] = os.path.basename(path)
             return parsed
         except Exception:
             return None
 
     @staticmethod
     def _file_gen_meta(path):
-        """璇诲彇浠绘剰杈撳嚭鏂囦欢鐨勭敓鎴?瀹瑰櫒鍏冧俊鎭€傞『搴忥細PIL 鍐呭祵鏂囨湰鍧楋紙PNG/WEBP/JPEG/鍔ㄧ敾 webp锛夆啋 鍚屽悕 sidecar
-        JSON/txt 鈫?瀹瑰櫒鍐呭祵鍏冩暟鎹紙GLB/glTF asset/extras銆佽棰?ffprobe/闊抽 mutagen 鏍囩锛夈€傛棤鍒?None銆?""
+        """读取任意输出文件的生成/容器元信息。顺序：PIL 内嵌文本块（PNG/WEBP/JPEG/动画 webp）→ 同名 sidecar
+        JSON/txt → 容器内嵌元数据（GLB/glTF asset/extras、视频 ffprobe/音频 mutagen 标签）。无则 None。"""
         if not path or not os.path.isfile(path):
             return None
         text = PreviewAnyNode._read_image_text_chunks(path)
         if text:
             parsed = PreviewAnyNode._parse_img_meta(text)
             if parsed:
-                parsed["鏉ユ簮鏂囦欢"] = os.path.basename(path)
+                parsed["来源文件"] = os.path.basename(path)
                 return parsed
         sc = PreviewAnyNode._read_sidecar_meta(path)
         if sc:
-            sc.setdefault("鏉ユ簮鏂囦欢", os.path.basename(path))
+            sc.setdefault("来源文件", os.path.basename(path))
             return sc
         cont = PreviewAnyNode._container_meta(path)
         if cont:
-            cont.setdefault("鏉ユ簮鏂囦欢", os.path.basename(path))
+            cont.setdefault("来源文件", os.path.basename(path))
             return cont
         return None
 
     @staticmethod
     def _read_sidecar_meta(path):
-        """鏌ユ壘鍚屽悕鐨?<base>.json / <base>.metadata.json / <file>.json / <base>.txt锛岃兘璇诲埌灏辫繑鍥炲叾鍐呭銆?""
+        """查找同名的 <base>.json / <base>.metadata.json / <file>.json / <base>.txt，能读到就返回其内容。"""
         try:
             base = os.path.splitext(path)[0]
             cands = [base + ".json", base + ".metadata.json", path + ".json", base + ".txt"]
@@ -2435,22 +2478,22 @@ class PreviewAnyNode:
                 except Exception:
                     continue
                 if c.lower().endswith(".txt"):
-                    return {"鍘熷鏂囨湰鍧?: raw[:200000]}
+                    return {"原始文本块": raw[:200000]}
                 try:
                     data = json.loads(raw)
                 except Exception:
-                    return {"鍘熷鏂囨湰鍧?: raw[:200000]}
+                    return {"原始文本块": raw[:200000]}
                 if isinstance(data, dict):
                     return data
                 if isinstance(data, list):
-                    return {"鏁版嵁": data}
+                    return {"数据": data}
             return None
         except Exception:
             return None
 
     @staticmethod
     def _container_meta(path):
-        """瀹瑰櫒鍐呭祵鍏冩暟鎹細GLB/glTF 璧勪骇淇℃伅锛坋xtras/generator锛夛紝瑙嗛瀹瑰櫒鏍囩锛坒fprobe锛夛紝闊抽鏍囩锛坢utagen锛夈€?""
+        """容器内嵌元数据：GLB/glTF 资产信息（extras/generator），视频容器标签（ffprobe），音频标签（mutagen）。"""
         try:
             ext = os.path.splitext(path)[1].lower()
             if ext == ".glb":
@@ -2475,15 +2518,15 @@ class PreviewAnyNode:
             data = json.loads(f.read(chunk_len).decode("utf-8", "replace"))
         out = {}
         if isinstance(data.get("asset"), dict):
-            out["璧勪骇"] = data["asset"]
+            out["资产"] = data["asset"]
         if data.get("extras"):
-            out["闄勫姞淇℃伅"] = data["extras"]
+            out["附加信息"] = data["extras"]
         if data.get("meshes"):
-            out["缃戞牸鏁?] = len(data["meshes"])
+            out["网格数"] = len(data["meshes"])
         if data.get("materials"):
-            out["鏉愯川鏁?] = len(data["materials"])
+            out["材质数"] = len(data["materials"])
         if data.get("animations"):
-            out["鍔ㄧ敾鏁?] = len(data["animations"])
+            out["动画数"] = len(data["animations"])
         return out if out else None
 
     @staticmethod
@@ -2492,15 +2535,15 @@ class PreviewAnyNode:
             data = json.load(f)
         out = {}
         if isinstance(data.get("asset"), dict):
-            out["璧勪骇"] = data["asset"]
+            out["资产"] = data["asset"]
         if data.get("extras"):
-            out["闄勫姞淇℃伅"] = data["extras"]
+            out["附加信息"] = data["extras"]
         if data.get("meshes"):
-            out["缃戞牸鏁?] = len(data["meshes"])
+            out["网格数"] = len(data["meshes"])
         if data.get("materials"):
-            out["鏉愯川鏁?] = len(data["materials"])
+            out["材质数"] = len(data["materials"])
         if data.get("animations"):
-            out["鍔ㄧ敾鏁?] = len(data["animations"])
+            out["动画数"] = len(data["animations"])
         return out if out else None
 
     @staticmethod
@@ -2521,15 +2564,15 @@ class PreviewAnyNode:
                     fmt = data.get("format", {}) or {}
                     tags = fmt.get("tags") or {}
                     if isinstance(tags, dict) and tags:
-                        res["瀹瑰櫒鏍囩"] = tags
+                        res["容器标签"] = tags
                     for st in (data.get("streams") or []):
                         codec = st.get("codec_type")
                         if codec:
-                            res.setdefault("娴?, []).append({
+                            res.setdefault("流", []).append({
                                 codec: st.get("codec_name"),
-                                "瀹?: st.get("width"),
-                                "楂?: st.get("height"),
-                                "鏃堕暱": st.get("duration"),
+                                "宽": st.get("width"),
+                                "高": st.get("height"),
+                                "时长": st.get("duration"),
                                 "fps": st.get("avg_frame_rate"),
                             })
                     return res if res else None
@@ -2539,7 +2582,7 @@ class PreviewAnyNode:
                 return None
             m = mutagen.File(path)
             if m and getattr(m, "tags", None):
-                return {"鏍囩": {str(k): str(v) for k, v in m.tags.items() if str(v)}}
+                return {"标签": {str(k): str(v) for k, v in m.tags.items() if str(v)}}
             return None
         except Exception:
             return None
@@ -2553,7 +2596,7 @@ class PreviewAnyNode:
         try:
             m = mutagen.File(path)
             if m and getattr(m, "tags", None):
-                return {"鏍囩": {str(k): str(v) for k, v in m.tags.items() if str(v)}}
+                return {"标签": {str(k): str(v) for k, v in m.tags.items() if str(v)}}
             if m and hasattr(m, "info"):
                 info = {}
                 for attr in ("length", "bitrate", "sample_rate", "channels"):
@@ -2564,15 +2607,15 @@ class PreviewAnyNode:
                     except Exception:
                         pass
                 if info:
-                    return {"闊抽": info}
+                    return {"音频": info}
             return None
         except Exception:
             return None
 
     @staticmethod
     def _workflow_gen_meta(workflow):
-        """浠庡綋鍓嶅伐浣滄祦鍥撅紙extra_pnginfo['workflow'] 鐨?nodes/widgets_values锛夊敖鍔涙彁鍙栦娇鐢ㄧ殑妯″瀷/LoRA/CLIP/VAE銆?
-        鎻愮ず璇嶄笌閲囨牱鍙傛暟锛屼緵瑙嗛/3D/闊抽绛夈€屽鍣ㄤ笉鍐呭祵鍏冩暟鎹€嶇殑绫诲瀷涔熺湅鍒扮敓鎴愮殑妯″瀷鍙傛暟銆傛棤鍒?None銆?""
+        """从当前工作流图（extra_pnginfo['workflow'] 的 nodes/widgets_values）尽力提取使用的模型/LoRA/CLIP/VAE、
+        提示词与采样参数，供视频/3D/音频等「容器不内嵌元数据」的类型也看到生成的模型参数。无则 None。"""
         if not isinstance(workflow, dict):
             return None
         nodes = workflow.get("nodes") or []
@@ -2610,13 +2653,13 @@ class PreviewAnyNode:
                         clip.append(w)
                     elif any(x in cl for x in ("checkpoint", "unet", "diffusion", "loadmodel", "load_model", "model")):
                         model.append(w)
-            # 鎻愮ず璇嶏細CLIPTextEncode / 甯?text 鐨勭紪鐮佽妭鐐癸紝鍙栫涓€涓潪妯″瀷鏂囦欢鍚嶇殑鏂囨湰 widget
+            # 提示词：CLIPTextEncode / 带 text 的编码节点，取第一个非模型文件名的文本 widget
             if ("clip" in cl and "encode" in cl) or "text" in cl or "prompt" in cl:
                 for w in wv:
                     if isinstance(w, str) and w.strip() and not _is_model_ext(w):
                         prompts.append(w)
                         break
-            # 閲囨牱鍙傛暟锛欿/Sampler 甯歌 widget 椤哄簭灏藉姏鎺ㄦ柇锛堝惈 control_after_generate 鍋忕Щ锛?
+            # 采样参数：K/Sampler 常见 widget 顺序尽力推断（含 control_after_generate 偏移）
             if "sampler" in cl and isinstance(wv, (list, tuple)) and len(wv) >= 3:
                 has_ctrl = len(wv) > 1 and isinstance(wv[1], str) and wv[1].lower() in ("randomize", "fixed", "increment", "decrement")
                 off = 1 if has_ctrl else 0
@@ -2635,7 +2678,7 @@ class PreviewAnyNode:
                     sampler["denoise"] = str(wv[steps_i + 4])
         out = {}
         if model:
-            out["妯″瀷"] = list(dict.fromkeys(model))
+            out["模型"] = list(dict.fromkeys(model))
         if lora:
             out["LoRA"] = list(dict.fromkeys(lora))
         if clip:
@@ -2643,14 +2686,14 @@ class PreviewAnyNode:
         if vae:
             out["VAE"] = list(dict.fromkeys(vae))
         if prompts:
-            out["鎻愮ず璇?] = list(dict.fromkeys(prompts))
+            out["提示词"] = list(dict.fromkeys(prompts))
         if sampler:
-            out["閲囨牱鍙傛暟"] = sampler
+            out["采样参数"] = sampler
         return out if out else None
 
     @staticmethod
     def _mask_to_base64(tensor):
-        """鐏板害 mask (H,W)/(B,H,W) -> PNG base64銆?""
+        """灰度 mask (H,W)/(B,H,W) -> PNG base64。"""
         try:
             t = tensor
             if t.dim() == 3 and t.shape[-1] == 1:
@@ -2672,7 +2715,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _export_mask_url(tensor):
-        """淇濆瓨鐏板害 mask 鍘熷浘鍒颁复鏃舵枃浠跺苟杩斿洖 URL锛堝叏灞忕敤鍘熷浘锛夈€?""
+        """保存灰度 mask 原图到临时文件并返回 URL（全屏用原图）。"""
         try:
             t = tensor
             if isinstance(t, torch.Tensor):
@@ -2747,14 +2790,14 @@ class PreviewAnyNode:
             path = getattr(value, "path", None) or ""
             name = os.path.basename(str(path)) if path else ""
             if fmt:
-                return f"3D 妯″瀷 ({fmt})" + (f": {name}" if name else "")
-            return f"3D 妯″瀷 ({type(value).__name__})" + (f": {name}" if name else "")
+                return f"3D 模型 ({fmt})" + (f": {name}" if name else "")
+            return f"3D 模型 ({type(value).__name__})" + (f": {name}" if name else "")
         except Exception:
-            return f"3D 妯″瀷 ({type(value).__name__})"
+            return f"3D 模型 ({type(value).__name__})"
 
     @staticmethod
     def _export_3d_url(value):
-        """杩斿洖 3D 妯″瀷鍙闂?URL銆備紭鍏堢敤 path-based URL锛?preview_any/fs/<abs>锛変互渚垮閮ㄨ创鍥?缂撳啿鐨勭浉瀵硅矾寰勬纭В鏋愶紝鍚﹀垯 save_to 瀵煎嚭銆?""
+        """返回 3D 模型可访问 URL。优先用 path-based URL（/preview_any/fs/<abs>）以便外部贴图/缓冲的相对路径正确解析，否则 save_to 导出。"""
         try:
             path = getattr(value, "path", None) or getattr(value, "file", None)
             if isinstance(path, str) and path and os.path.isfile(path):
@@ -2792,7 +2835,7 @@ class PreviewAnyNode:
         return s[:80]
 
     def _maybe_save(self, entry, cfg, name):
-        """瀛樻。寮€鍚椂鎶婂崱鐗囧唴瀹瑰啓鍒?<output>/<savePath>/锛屽苟鍥炲～ saved_path銆?""
+        """存档开启时把卡片内容写到 <output>/<savePath>/，并回填 saved_path。"""
         if not cfg.get("save"):
             return entry
         data = None
@@ -2921,7 +2964,7 @@ class PreviewAnyNode:
     @staticmethod
     @staticmethod
     def _python_to_json(obj):
-        """閫掑綊鎶?Python 瀛楅潰閲忓瓧绗︿覆锛堝惈鍗曞紩鍙?dict/list/tuple/set锛夎В鏋愭垚鍘熺敓 JSON 缁撴瀯锛屼緵鏍戝睍寮€銆?""
+        """递归把 Python 字面量字符串（含单引号 dict/list/tuple/set）解析成原生 JSON 结构，供树展开。"""
         import ast
         if isinstance(obj, str):
             s = obj.strip()
@@ -2947,7 +2990,7 @@ class PreviewAnyNode:
 
     @staticmethod
     def _format_meta(meta):
-        """鎶婃ā鍨?__metadata__ 鏁寸悊鎴愬彲璇绘憳瑕侊紱宓屽 JSON 瀛楃涓插皾璇曡В鏋愶紝浼樺厛灞曠ず鏋舵瀯/浣滆€呯瓑鍏抽敭椤广€?""
+        """把模型 __metadata__ 整理成可读摘要；嵌套 JSON 字符串尝试解析，优先展示架构/作者等关键项。"""
         if not isinstance(meta, dict):
             return _pv_truncate(str(meta), _PREVIEW_MAX_VALUE_LEN)[0]
         def try_parse(v):
@@ -3008,7 +3051,7 @@ _register_preset_routes("EzFlex-ParamPresetControl", "/param_preset_control/pres
 
 
 
-# 鍙傛暟绫诲瀷 -> ComfyUI 杈撳嚭绫诲瀷锛氬鏉傜被鍨嬶紙complex/tuple/list/set/dictionary锛夋病鏈夊師鐢熺鍙ｏ紝缁熶竴璧?STRING(JSON)銆?
+# 参数类型 -> ComfyUI 输出类型：复杂类型（complex/tuple/list/set/dictionary）没有原生端口，统一走 STRING(JSON)。
 PARAM_TYPE_MAP = {
     "int": "INT",
     "float": "FLOAT",
@@ -3031,7 +3074,7 @@ def _py_literal(s):
 
 
 def _norm_param_value(value, ptype):
-    """鎸夌被鍨嬫妸瀛楃涓插€艰В鏋愭垚鍘熺敓锛堟湁鏁堬級锛涗笉绗﹀悎淇濈暀瀛楃涓层€?""
+    """按类型把字符串值解析成原生（有效）；不符合保留字符串。"""
     if not isinstance(value, str):
         return value
     s = value.strip()
@@ -3074,7 +3117,7 @@ def _bitrate_int(s):
 
 
 def _encode_audio(data_bytes, fmt, bitrate=None, sample_rate=None):
-    """鎶?WAV 瀛楄妭鎸夋墍閫夋牸寮?鐮佺巼/閲囨牱鐜囬噸缂栫爜锛坅v锛夈€?""
+    """把 WAV 字节按所选格式/码率/采样率重编码（av）。"""
     try:
         import av
         from io import BytesIO
@@ -3109,7 +3152,7 @@ def _encode_audio(data_bytes, fmt, bitrate=None, sample_rate=None):
 
 
 def _encode_video(data_bytes, fmt, codec="h264", crf=None, fps=None):
-    """鎶婅棰戝瓧鑺傛寜鎵€閫夊鍣?缂栫爜鍣?CRF/甯х巼閲嶇紪鐮侊紙av锛夈€?""
+    """把视频字节按所选容器/编码器/CRF/帧率重编码（av）。"""
     try:
         import av
         from io import BytesIO
@@ -3142,7 +3185,7 @@ def _encode_video(data_bytes, fmt, codec="h264", crf=None, fps=None):
 
 
 def parse_param_groups(config):
-    """鎶?ParamPresetControl 鐨?config JSON 瑙ｆ瀽鎴愬弬鏁扮粍鍒楄〃锛堜笌鍓嶇闈㈡澘鏁版嵁鍚屾瀯锛夈€?""
+    """把 ParamPresetControl 的 config JSON 解析成参数组列表（与前端面板数据同构）。"""
     if isinstance(config, str):
         if not config.strip():
             return []
@@ -3163,12 +3206,12 @@ def parse_param_groups(config):
         params = item.get("params") or []
         groups.append({
             "id": item.get("id"),
-            "name": item.get("name") or "鍙傛暟缁?,
+            "name": item.get("name") or "参数组",
             "out": item.get("out") or "all",
             "params": [
                 {
                     "id": p.get("id"),
-                    "name": p.get("name") or "鍙傛暟",
+                    "name": p.get("name") or "参数",
                     "type": p.get("type") or "string",
                     "value": _norm_param_value(p.get("value"), p.get("type")),
                     "enabled": p.get("enabled", True),
@@ -3180,18 +3223,18 @@ def parse_param_groups(config):
 
 
 def param_value_to_comfy(value, ptype):
-    """鎶婇潰鏉块噷鐨勫弬鏁板€兼寜绫诲瀷涓ユ牸杞垚 ComfyUI 绔彛鍊硷紱澶嶆潅绫诲瀷 JSON 搴忓垪鍖栦负 STRING銆?
+    """把面板里的参数值按类型严格转成 ComfyUI 端口值；复杂类型 JSON 序列化为 STRING。
 
-    bool锛氭寜銆岄潪绌?闈為浂鍗崇湡銆嶇殑 Python 鐪熷€艰涔夆€斺€?2"/"abcd"鈫扵rue锛涘彧鏈夋槑纭殑鍋囪〃绀?
-    ("", "0", "false", "no", "off", "none", "null") 鎴?0 鎵嶄负 False銆?
-    int/float 瀹芥澗瑙ｆ瀽锛坕nt(val)/float(val)锛夛紝瑙ｆ瀽澶辫触鍥為€€ 0锛岄伩鍏嶄笅娓告姏閿欍€?
+    bool：按「非空/非零即真」的 Python 真值语义——"2"/"abcd"→True；只有明确的假表示
+    ("", "0", "false", "no", "off", "none", "null") 或 0 才为 False。
+    int/float 宽松解析（int(val)/float(val)），解析失败回退 0，避免下游抛错。
     """
     if ptype == "int":
         if isinstance(value, str):
             s = value.strip()
             if re.fullmatch(r"-?\d+", s):
                 return int(s)
-            return value  # 鏃犳晥 -> string
+            return value  # 无效 -> string
         try:
             return int(float(value))
         except (TypeError, ValueError):
@@ -3201,7 +3244,7 @@ def param_value_to_comfy(value, ptype):
             s = value.strip()
             if re.fullmatch(r"-?\d+(\.\d+)?([eE][-+]?\d+)?", s):
                 return float(s)
-            return value  # 鏃犳晥 -> string
+            return value  # 无效 -> string
         try:
             return float(value)
         except (TypeError, ValueError):
@@ -3217,7 +3260,7 @@ def param_value_to_comfy(value, ptype):
                 return False
             if s in ("true", "1", "yes", "on", "y", "t"):
                 return True
-            return value  # 鏃犳晥 -> string
+            return value  # 无效 -> string
         return bool(value)
     if ptype in ("complex", "tuple", "list", "set", "dictionary"):
         if isinstance(value, str):
@@ -3230,17 +3273,17 @@ def param_value_to_comfy(value, ptype):
 
 
 def _ppc_output_types(groups):
-    """鎸夊弬鏁扮粍椤哄簭绠?ParamPresetControl 鐨勮緭鍑虹被鍨?鍚嶇О锛堜竴涓垎缁勪竴涓?EZFLEX_PARAM_GROUP 绔彛锛夈€?""
+    """按参数组顺序算 ParamPresetControl 的输出类型/名称（一个分组一个 EZFLEX_PARAM_GROUP 端口）。"""
     groups = groups or []
     names = []
     for i, g in enumerate(groups):
-        nm = (g.get("name") or "").strip() or f"鍙傛暟缁?{i + 1}"
+        nm = (g.get("name") or "").strip() or f"参数组 {i + 1}"
         names.append(nm)
     return tuple(["EZFLEX_PARAM_GROUP"] * len(groups)), tuple(names)
 
 
 def _ppo_output_types(params):
-    """鎸夎緭鍑洪『搴忕畻 ParamPresetOutput 鐨勭被鍨?鍚嶇О锛氱 0 涓浐瀹氫负鏁寸粍鏁版嵁(绾㈣壊 EZFLEX_PARAM_GROUP)锛屽叾鍚庢瘡涓縺娲诲弬鏁颁竴涓鍙ｃ€?""
+    """按输出顺序算 ParamPresetOutput 的类型/名称：第 0 个固定为整组数据(红色 EZFLEX_PARAM_GROUP)，其后每个激活参数一个端口。"""
     params = params or []
     types, names = [], []
     for i, p in enumerate(params):
@@ -3249,12 +3292,12 @@ def _ppo_output_types(params):
             types.append("EZFLEX_PARAM_GROUP")
         else:
             types.append(PARAM_TYPE_MAP.get(ptype, "STRING"))
-        names.append((p.get("name") or "").strip() or f"鍙傛暟 {i + 1}")
+        names.append((p.get("name") or "").strip() or f"参数 {i + 1}")
     return tuple(types), tuple(names)
 
 
 def _ppo_effective_params(group):
-    """鍙傛暟缁勫疄闄呰緭鍑虹殑鍙傛暟锛氬叏閮ㄧ豢鑹?鍚敤)鍙傛暟锛涜嫢缁勮浜?out锛堝崟涓弬鏁?id锛夊垯鍙繚鐣欒鍙傛暟銆?""
+    """参数组实际输出的参数：全部绿色(启用)参数；若组设了 out（单个参数 id）则只保留该参数。"""
     params = (group or {}).get("params") or []
     active = [p for p in params if p.get("enabled", True) is not False]
     out = group.get("out") or "all"
@@ -3264,7 +3307,7 @@ def _ppo_effective_params(group):
 
 
 def _parse_local_off(config):
-    """瑙ｆ瀽 Output 鑺傜偣 config 閲岀殑灞€閮ㄧ鐢ㄥ弬鏁?id 闆嗗悎锛圤utput 闈㈡澘鑷韩鍚?绂佺敤锛屼笉鍐欏洖鎺у埗鑺傜偣锛夈€?""
+    """解析 Output 节点 config 里的局部禁用参数 id 集合（Output 面板自身启/禁用，不写回控制节点）。"""
     if isinstance(config, str):
         if not config.strip():
             return set()
@@ -3281,16 +3324,16 @@ def _parse_local_off(config):
 
 
 def _ppo_disabled_value(ptype):
-    """绂佺敤/鏈€変腑鍙傛暟杈撳嚭鈥滀腑鎬ч粯璁ゅ€尖€濓紙int鈫?銆乫loat鈫?.0銆乥ool鈫?銆乧omplex鈫?锛屽叾瀹冣啋绌轰覆锛夈€?""
+    """禁用/未选中参数输出“中性默认值”（int→0、float→0.0、bool→0、complex→0，其它→空串）。"""
     if ptype in ("int", "bool", "complex"):
         return 0
     if ptype == "float":
         return 0.0
-    return ""  # string/tuple/list/set/dictionary -> 绌轰覆鍗犱綅
+    return ""  # string/tuple/list/set/dictionary -> 空串占位
 
 
 async def _ppc_outputs(req):
-    """鍓嶇鍦ㄥ垎缁勫鍒?鎺掑簭鍚?POST锛屾妸绫?RETURN_TYPES/RETURN_NAMES 鍚屾鎴愬綋鍓嶇鍙ｆ帓鍒楋紙鏍￠獙鐢級銆?""
+    """前端在分组增删/排序后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前端口排列（校验用）。"""
     try:
         data = await req.json()
         groups = data.get("groups", [])
@@ -3303,7 +3346,7 @@ async def _ppc_outputs(req):
 
 
 async def _ppo_outputs(req):
-    """鍓嶇鍦ㄨ繛鎺ュ彉鍖?鍙傛暟澧炲垹鎺掑簭鍚?POST锛屾妸绫?RETURN_TYPES/RETURN_NAMES 鍚屾鎴愬綋鍓嶅弬鏁版帓鍒楋紙鏍￠獙鐢級銆?""
+    """前端在连接变化/参数增删排序后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前参数排列（校验用）。"""
     try:
         data = await req.json()
         params = data.get("params", [])
@@ -3322,7 +3365,7 @@ except Exception:
     pass
 
 
-# ===== EzFlex-PreviewAny锛氭枃浠剁郴缁熻緟鍔╄矾鐢憋紙瀛樻。浣嶇疆娴忚 / 鎵撳紑鏂囦欢澶归€変腑鏂囦欢锛?====
+# ===== EzFlex-PreviewAny：文件系统辅助路由（存档位置浏览 / 打开文件夹选中文件）=====
 async def _preview_any_folders(req):
     base = PreviewAnyNode._output_dir()
     rel = (req.query.get("path") or "").strip()
@@ -3365,7 +3408,7 @@ async def _preview_any_open(req):
 
 
 async def _preview_any_pick_folder(req):
-    """寮?Windows 鍘熺敓鈥滈€夋嫨鏂囦欢澶光€濆璇濇锛岄粯璁?ComfyUI 杈撳嚭鐩綍銆?""
+    """弹 Windows 原生“选择文件夹”对话框，默认 ComfyUI 输出目录。"""
     base = PreviewAnyNode._output_dir()
     try:
         import tkinter as tk
@@ -3373,7 +3416,7 @@ async def _preview_any_pick_folder(req):
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        path = filedialog.askdirectory(initialdir=base, title="閫夋嫨淇濆瓨浣嶇疆")
+        path = filedialog.askdirectory(initialdir=base, title="选择保存位置")
         root.destroy()
         if path:
             return _web.json_response({"ok": True, "path": os.path.normpath(path), "base": base})
@@ -3383,7 +3426,7 @@ async def _preview_any_pick_folder(req):
 
 
 async def _preview_any_serve_video(req):
-    """娴佸紡杩斿洖鏈湴瑙嗛鏂囦欢锛堝甫 Range 鏀寔锛屽彲鎷栧姩杩涘害/鏈夊０锛夈€備粎闄愭湰鍦拌矾寰勩€?""
+    """流式返回本地视频文件（带 Range 支持，可拖动进度/有声）。仅限本地路径。"""
     path = req.query.get("path", "").strip()
     if not path or not os.path.isfile(path):
         return _web.json_response({"error": "not found"}, status=404)
@@ -3391,7 +3434,7 @@ async def _preview_any_serve_video(req):
 
 
 async def _preview_any_static(req):
-    """serve 鎻掍欢 web/ 鐩綍锛堜緵鍓嶇鏈湴瀵煎叆 three.js 涓庡姞杞藉櫒锛夛紝浠呯櫧鍚嶅崟鐩稿璺緞銆?""
+    """serve 插件 web/ 目录（供前端本地导入 three.js 与加载器），仅白名单相对路径。"""
     rel = req.match_info.get("path", "")
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "web"))
     full = os.path.abspath(os.path.join(root, rel))
@@ -3401,13 +3444,13 @@ async def _preview_any_static(req):
 
 
 async def _preview_any_fs(req):
-    """鎸夌粷瀵硅矾寰?serve 鏂囦欢锛堢敤浜?3D 妯″瀷鍙婂叾澶栭儴璐村浘/缂撳啿锛屼娇鐩稿璺緞鑳芥纭В鏋愶級銆備粎鏈湴璺緞銆?""
+    """按绝对路径 serve 文件（用于 3D 模型及其外部贴图/缓冲，使相对路径能正确解析）。仅本地路径。"""
     from urllib.parse import unquote
     rel = req.match_info.get("path", "")
     full = os.path.abspath(unquote(rel))
     if os.path.isfile(full):
         return _web.FileResponse(full)
-    # 鍏滃簳锛氳创鍥?缂撳啿甯稿湪妯″瀷鍚岀洰褰曠殑瀛愭枃浠跺す锛圱extures/Materials锛夛紝鎸?basename 鍦ㄧ埗鐩綍閫掑綊鎵?
+    # 兜底：贴图/缓冲常在模型同目录的子文件夹（Textures/Materials），按 basename 在父目录递归找
     try:
         base = os.path.basename(full)
         base_dir = os.path.dirname(full)
@@ -3421,7 +3464,7 @@ async def _preview_any_fs(req):
 
 
 async def _preview_any_outputs(req):
-    """鍓嶇鍦?PreviewAny 杩炴帴鏁板彉鍖栧悗 POST锛屾妸绫?RETURN_TYPES/RETURN_NAMES 鍚屾鎴愬綋鍓嶈緭鍑烘暟锛堟牎楠岀敤锛夈€?""
+    """前端在 PreviewAny 连接数变化后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前输出数（校验用）。"""
     try:
         data = await req.json()
         count = int(data.get("count", 0))
@@ -3446,6 +3489,179 @@ except Exception:
     pass
 
 
+# ===== EzFlex-PromptHelper：提示词卡片合并节点 =====
+# 固定输入：clip(单)/image(批)/video(批)/audio(批)/model_3d(批)；
+# 动态输入 = 提示词卡片数 1:1（card_in_1..N，按顺序链接到提示词卡片）；
+# 输出：固定「合并提示词」STRING（按卡片顺序拼接）+ 动态输出 = 卡片数 1:1（每卡一段 STRING）。
+# 复用 ModelsCombo/ParamPreset/PreviewAny 的动态端口经验：前端按卡片数增删/reuse socket、
+# 更新 origin_slot/target_slot，并 POST /prompt_helper/outputs 同步类 RETURN_TYPES/RETURN_NAMES。
+_PH_MAX_CARDS = 32
+
+
+def parse_prompt_cards(config):
+    """把 PromptHelper 的 config JSON 解析成提示词卡片列表（与前端面板数据同构）。"""
+    if isinstance(config, str):
+        if not config.strip():
+            return []
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError:
+            return []
+    else:
+        data = config
+    if isinstance(data, dict):
+        data = data.get("cards", [])
+    if not isinstance(data, list):
+        return []
+    cards = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        cards.append({
+            "id": item.get("id"),
+            "title": (item.get("title") or "").strip() or "提示词",
+            "content": item.get("content") or "",
+            "contentHTML": item.get("contentHTML") or "",
+            "contentOptimized": item.get("contentOptimized") or "",
+            "contentOptimizedHTML": item.get("contentOptimizedHTML") or "",
+            "timelineStart": item.get("timelineStart") or "",
+            "timelineEnd": item.get("timelineEnd") or "",
+            "skill": item.get("skill") or "",
+            "modelType": item.get("modelType") or "text",
+            "model": item.get("model") or "",
+            "provider": item.get("provider") or "",
+        })
+    return cards
+
+
+def _ph_html_to_text(html):
+    """把卡片 contenteditable 的 HTML 转成纯文本（供合并提示词用）。"""
+    if not html:
+        return ""
+    txt = re.sub(r"<[^>]+>", " ", html)
+    txt = re.sub(r"\s+", " ", txt).strip()
+    return txt
+
+
+def _ph_media_count(value):
+    """媒体输入的批量计数：tensor 取 batch 维，list/tuple 取长度，其它有值记 1。"""
+    if value is None:
+        return 0
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    if isinstance(value, torch.Tensor):
+        if value.ndim >= 4:
+            return value.shape[0]
+        if value.ndim >= 3:
+            return value.shape[0]
+        return 1
+    return 1
+
+
+def _ph_output_types(count):
+    """按卡片数算出类 RETURN_TYPES/RETURN_NAMES：第 0 个固定「合并提示词」，其后每卡一个 STRING。"""
+    names = tuple([f"卡片 {i + 1}" for i in range(count)])
+    return tuple(["STRING"] * (count + 1)), tuple(["合并提示词"] + list(names))
+
+
+async def _ph_outputs(req):
+    """前端在卡片增删/排序后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前排列（校验用）。"""
+    try:
+        data = await req.json()
+        count = int(data.get("count", 0))
+        count = max(0, min(count, _PH_MAX_CARDS))
+        types, names = _ph_output_types(count)
+        PromptHelperNode.RETURN_TYPES = types
+        PromptHelperNode.RETURN_NAMES = names
+        return _web.json_response({"ok": True, "types": list(types), "names": list(names)})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+try:
+    PromptServer.instance.routes.post("/prompt_helper/outputs")(_ph_outputs)
+except Exception:
+    pass
+
+
+class PromptHelperNode:
+    """EzFlex-PromptHelper：可视化编辑提示词卡片（完整富文本编辑器），
+    固定接收 clip/图像/视频/音频/3D 模型（图像/视频/音频/3D 可批量），
+    动态输入端口 = 卡片数 1:1（按顺序链接到卡片），
+    输出：固定「合并提示词」+ 动态卡片输出端口 = 卡片数 1:1。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        inputs = {
+            "required": {
+                "config": ("STRING", {
+                    "multiline": True,
+                    "default": "{}",
+                    "tooltip": "「提示词卡片」面板生成的配置 JSON（卡片列表）。",
+                }),
+            },
+            "optional": {
+                "clip": ("CLIP", {"forceInput": True, "tooltip": "CLIP（固定单个）。"}),
+                "image": ("IMAGE", {"forceInput": True, "tooltip": "图像（可批量，[B,H,W,C]）。"}),
+                "video": ("VIDEO", {"forceInput": True, "tooltip": "视频（可批量）。"}),
+                "audio": ("AUDIO", {"forceInput": True, "tooltip": "音频（可批量）。"}),
+                "model_3d": ("MODEL_3D", {"forceInput": True, "tooltip": "3D 模型（可批量）。"}),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+        for i in range(1, _PH_MAX_CARDS + 1):
+            inputs["optional"][f"card_in_{i}"] = ("STRING", {
+                "forceInput": True,
+                "tooltip": f"提示词卡片 {i} 的文本（接入后覆盖该卡片面板内容）。",
+            })
+        return inputs
+
+    RETURN_TYPES = ("STRING",) * (_PH_MAX_CARDS + 1)
+    RETURN_NAMES = tuple(["合并提示词"] + [f"卡片 {i + 1}" for i in range(_PH_MAX_CARDS)])
+    FUNCTION = "run"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "EzFlex-PromptHelper：可视化编辑提示词卡片（完整富文本编辑器）；固定媒体输入 + 每卡一个文本输入；按卡片顺序合并为提示词，并逐卡输出。"
+
+    def run(self, config="{}", clip=None, image=None, video=None, audio=None,
+            model_3d=None, unique_id=None, extra_pnginfo=None, **kwargs):
+        cards = parse_prompt_cards(config)
+        count = len(cards)
+
+        card_texts = []
+        for i in range(count):
+            raw = kwargs.get(f"card_in_{i + 1}")
+            text = None
+            if raw is not None and str(raw).strip() != "":
+                text = str(raw)  # 已连接的外部文本输入：覆盖该卡片
+            elif i < len(cards):
+                card = cards[i]
+                text = card.get("content") or _ph_html_to_text(card.get("contentHTML"))
+            card_texts.append(text if text is not None else "")
+
+        merged = "\n".join(card_texts)
+        # 媒体批量计数（供前端显示可引用数量，不入合并文本）
+        counts = {
+            "image": _ph_media_count(image),
+            "video": _ph_media_count(video),
+            "audio": _ph_media_count(audio),
+            "model_3d": _ph_media_count(model_3d),
+        }
+
+        self.__class__.RETURN_TYPES = ("STRING",) * (count + 1)
+        self.__class__.RETURN_NAMES = tuple(["合并提示词"] + [f"卡片 {i + 1}" for i in range(count)])
+
+        return {
+            "ui": {
+                "cards": cards,
+                "counts": counts,
+                "merged": merged,
+                "card_inputs": [kwargs.get(f"card_in_{i + 1}") for i in range(count)],
+            },
+            "result": tuple([merged] + card_texts),
+        }
+
+
 NODE_CLASS_MAPPINGS = {
     "EzFlex-MainControl": MainControlNode,
     "EzFlex-ModelsCombo": ModelsComboLoader,
@@ -3455,6 +3671,7 @@ NODE_CLASS_MAPPINGS = {
     "EzFlex-ParamPresetControl": ParamPresetControlNode,
     "EzFlex-ParamPresetOutput": ParamPresetOutputNode,
     "EzFlex-PreviewAny": PreviewAnyNode,
+    "EzFlex-PromptHelper": PromptHelperNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3466,4 +3683,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EzFlex-ParamPresetControl": "EzFlex-ParamPresetControl",
     "EzFlex-ParamPresetOutput": "EzFlex-ParamPresetOutput",
     "EzFlex-PreviewAny": "EzFlex-PreviewAny",
+    "EzFlex-PromptHelper": "EzFlex-PromptHelper",
 }

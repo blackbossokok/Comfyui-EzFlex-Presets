@@ -1,87 +1,136 @@
-# Comfyui-EzFlex-Presets（V1.02 稳定版）
+# Comfyui-EzFlex-Presets（V1.03 稳定版）
 
-用于comfyui的灵活组合插件，使用ai构建完成，包括这个ReadMe，目前插件还在更新完善中。
+用于comfyui的灵活组合插件，使用ai构建完成，目前插件还在更新完善中。
 
-EzFlex 插件套件：模型组合加载器（`EzFlex-ModelsCombo`）+ 分辨率/Latent 选择器（`EzFlex-FreeLatent`）
-+ 控制/参数预设节点（`NodeSwitchGroup` / `NodeSwitchMaster` / `MainControl` / `ParamPresetControl` / `ParamPresetOutput`）
-+ 任意预览（`EzFlex-PreviewAny`），共 **8 个节点**，都在 ComfyUI 前端里用可视化面板配置，再通过节点真实加载/生成/控制。
+EzFlex 节点列表：
+总控制节点( `MainControl`）
+模型组合加载器（`EzFlex-ModelsCombo`)
+分辨率/Latent 选择器（`EzFlex-FreeLatent`）
+节点总控制(`NodeSwitchMaster`)
+节点开关组（`NodeSwitchGroup`)
+参数预设控制节点（`ParamPresetControl`）
+参数输出控制节点（`ParamPresetOutput`）
+任意预览（`EzFlex-PreviewAny`）
+提示词助手（`EzFlex-PromptHelper`）
+共 **9 个节点**
 
-> 版本：`__version__="1.0.2"`、`pyproject.toml version="1.0.2"`。此前 1.4/1.6/1.0 等均为测试版/RC，现定为一个稳定维护分支 V1.02。
-> 依赖：`mutagen>=1.46.0`（音频/视频标签读取）；`ffprobe`（外部可选，装则读视频容器标签）。
+##版本更新内容：
+
+V1.03：优化ReadMe描述，FreeLatent增加强制生效按键（忽略外部输入宽高及批次），修复对齐后端默认按照8对齐的问题，新增提示词助手节点。
+V1.02：优化ModelsCombo画廊浏览搜索逻辑。
+V1.01：优化参数预设控制节点切换预设连线逻辑。
+V1.0：稳定发行第一版。
 
 ## 安装
 
-把本目录放到 `ComfyUI/custom_nodes/` 下，重启 ComfyUI（如用 ComfyUI-Manager 会按 `pyproject.toml` 自动装 `mutagen`）。
+把本目录放到 `ComfyUI/custom_nodes/` 下，重启 ComfyUI。
 
 ## 使用
 
-**节点内嵌控件（主界面，参考 comfyui-aaalice-nodes 的 addDOMWidget 做法）**
+Comfyui节点列表中搜索EzFlex点击选择使用。
 
-把 `EzFlex-ModelsCombo` 节点加到画布上，配置器控件会直接显示**在节点内部**：
-- 顶部工具条：`+ 添加加载器`（Checkpoint/UNET/CLIP/VAE/LoRA）、`复制配置`
-- 每个加载器一行：类型 / 名称 / 文件 / 额外参数（device、weight_dtype、clip type、LoRA 强度、LoRA 目标）
-- 底部显示输出端口统计（MODEL / CLIP / VAE 数量）
+## 节点功能
 
-改动会**实时写入节点的 `config` 输入框**（该输入进 prompt、驱动 Python 加载），
-所以无需手动粘贴、无需刷新，也**不存在页面缓存旧版的问题**（控件由前端 JS 运行时生成）。
+###总控制节点( `MainControl`）：
 
-**全屏编辑器（已移除）**
+-控制：控制总体节点行为，目前可控节点：模型组合加载器（`EzFlex-ModelsCombo`)、分辨率/Latent 选择器（`EzFlex-FreeLatent`）、节点总控制(`NodeSwitchMaster`)、参数预设控制节点（`ParamPresetControl`）。
+-预设：可自由组合保存删除总体节点行为预设。
+-快捷加载：可快捷加载其他EzFlex节点。
 
-> `web/modelscombo.html` 与入口 `web/modelscombo.js` 均已删除（侧边栏「模型组合」配置器不再提供）。
-> 请直接使用**节点内嵌控件**（改动实时写入节点 `config`，无缓存问题）。
+###模型组合加载器（`EzFlex-ModelsCombo`)：
 
-## 节点
+-组合加载：可自由组合加载Unet、Clip、Vae、Checkpoint、Lora模型。
+-预设：可自由组合保存删除模型加载方式。
+-预览：可预览下拉列表模型封面。
+-画廊：可画廊式预览选择加载模型。
+-输出：根据模型数量（加载器卡片）及类型生成对应数量及类型输出端口，其中lora加载器串联在选择目标model后面，多个lora按卡片顺序串联，输出名称为`自定义名称_model/clip/vae`。
+-顺序：可自由调整卡片顺序。
 
-`EzFlex-ModelsCombo`（类别 `EzFlex`，类名 `ModelsComboLoader`）
+###分辨率/Latent 选择器（`EzFlex-FreeLatent`）：
 
-- 输入：`config`（STRING，配置器页面生成的 JSON 数组，隐藏，由内嵌面板驱动）
-- 输出：`MODEL 1..N`、`CLIP 1..N`、`VAE 1..N`（每种类型最多 32 个端口，
-  与配置按主加载器出现顺序一一对应；未用端口返回 None）
-- 面板背景为白色/淡灰卡片（与其它 EzFlex 节点统一）；**预设下拉「选中即生效」**（无需点「加载」按钮，
-  按钮已移除），选到占位则清空内部。
+-画布：可自由拖拽画布生成对应空Latent，按住ctrl可取消吸附。
+-宽高输入：可手动输入宽高。
+-对齐分辨率：根据`优化/标准`算法按照`分辨率步数`计算相应宽高，目前影响`手动输入宽高、宽高预设选择、比例及Mp值计算后的宽高`。
+-MP：百万像素。
+-比例预设：宽 : 高，可选择默认比例预设及自定义比例预设。
+-宽高预设：可选择默认宽高预设及自定义宽高预设，可自定义保存删除（`根据目前实际宽高`）。
+-自定义比例：可自定义保存删除输入的比例预设。
+-信息面板：实时显示实际宽高、比例、MP值。
+-输入：外部宽高、批次数量。
+-输出：空Latent、宽高、批次数量。
+-强制生效：绿色时忽略外部宽高/批次，强制面板值生效，并解除控件禁用（仅任一输入有值时可用）
 
-`EzFlex-FreeLatent`（类别 `EzFlex`，类名 `FreeLatentNode`）
+###节点总控制(`NodeSwitchMaster`)：
 
-- 输入：`config`（STRING，socketless 隐藏，由 canvas 面板驱动的 JSON）；`width` / `height` / `batch_size`（INT 可连接 socket，接入>0 时覆盖面板值）
-- 输出：`Latent`（`[batch, 4, h/8, w/8]`）、`Width`、`Height`、`Batch`（INT）
+-控制：控制节点开关组行为，可自定义组合保存删除预设。
 
-### 配置 JSON 结构
+###节点开关组（`NodeSwitchGroup`)：
 
-```json
-[
-  { "id": 1, "type": "checkpoint", "name": "主模型", "file": "xx.safetensors",
-    "extra": { "weight_dtype": "fp16" }, "targetId": null },
-  { "id": 2, "type": "unet", "name": "FP16 UNET", "file": "xx.safetensors",
-    "extra": { "device": "default", "weight_dtype": "fp8_e4m3fn" }, "targetId": null },
-  { "id": 3, "type": "lora", "name": "细节", "file": "lora.safetensors",
-    "extra": { "strength_model": 1.0, "strength_clip": 1.0 }, "targetId": 1 }
-]
-```
+-控制：控制节点（已分组）动作行为`开启/禁用/绕过（忽略）`
+-预设：可自由保存删除节点开关预设。
+-分组匹配：按名称/按颜色，子节点匹配。
+-顺序：按位置/名称自动排序卡片。
+-注意：该节点为实例预设，删除节点后对应预设同步消失。
 
-- `type`：checkpoint / unet / clip / vae / lora
-- checkpoint 同时产出 MODEL + CLIP + VAE 三个端口
-- LoRA 通过 `targetId` 作用于目标主加载器的 MODEL/CLIP
 
-### 参数映射（与内置节点一致）
+###参数预设控制节点（`ParamPresetControl`）：
 
-| type       | 加载函数                          | 参数                          |
-|------------|-----------------------------------|-------------------------------|
-| checkpoint | `comfy.sd.load_checkpoint_guess_config` | weight_dtype, device     |
-| unet       | `comfy.sd.load_diffusion_model`   | weight_dtype, device          |
-| clip       | `comfy.sd.load_clip`              | type（CLIPLoader 同款列表）, device |
-| vae        | `comfy.sd.VAE`                    | weight_dtype(fp16/bf16/fp32), device |
-| lora       | `comfy.sd.load_lora_for_models`   | strength_model, strength_clip |
+-控制：`参数绿/红按钮`：是否显示在输出列表及参数组卡片下拉列表中。`参数组下拉列表`：选择输出参数（输出或特定）。
+-预设：可自由保存删除参数组预设。
+-参数：目前有int、float、bool、string、complex、tuple、list、set、dictionary八种类型
+-顺序：参数组卡片、参数卡片均可自由拖动。
+-输出：根据参数组卡片数量生成对应输出端口，多参数红色，单参数灰色。
+
+###参数输出控制节点（`ParamPresetOutput`）：
+
+-控制：开启/禁用控制参数输出,int->0,bool->false，float->0.0，string等->空字符串。
+
+###任意预览（`EzFlex-PreviewAny`）：
+
+-预览类型：自动识别任意输入类型，渲染对应预览卡片（可拖拽排序，随连接自动增删）。
+-保存设置：自动保存点击后可保存否则仅预览，可选择保存位置、保存选项。
+-保存类型：
+
+| 类型 | 接受数据 | 预览方式 | 支持格式 |
+|---|---|---|---|
+| IMAGE | tensor `[B,H,W,C]` | 缩略图 + 全屏原图 | PNG / JPEG / WebP / BMP / TIFF |
+| MASK | 2D/3D tensor | 灰度 PNG | PNG |
+| AUDIO | `{waveform,sample_rate}` 或 `(waveform,sr)` 或文件对象 | 播放器 | WAV / MP3 / FLAC / OGG / M4A / AAC |
+| VIDEO | 帧列表 或 VideoFrom 文件对象 | 首帧封面 + 播放器 | MP4 / WebM / MOV / GIF / AVI / MKV |
+| CONDITIONING | 含 `conditioning/context` 的 dict | 文本摘要 | — |
+| LIST / TUPLE / SET | list / tuple / set | 索引值树（序号:值） | JSON |
+| DICT | dict | 键值树（键:值） | JSON |
+| STRING | str | 文本（截断 + 弹窗全文） | TXT / MD / JSON / CSV / LOG / HTML |
+| LATENT | `{samples}` dict | shape / dtype 摘要 | — |
+| MODEL_3D | File3D 对象（含 path/file） | three.js 查看器（离线） | glb / gltf / obj / fbx / stl / dae / ply |
+| MODEL | ModelPatcher | 模型元数据卡 | safetensors / gguf / onnx / ckpt / pt |
+| CLIP | comfy.sd CLIP | 元数据卡 | safetensors / gguf / onnx |
+| VAE | comfy.sd VAE | 元数据卡 | safetensors / gguf / onnx |
+| CONTROL_NET / CLIP_VISION / STYLE_MODEL / UPSCALE_MODEL / LORA_MODEL / GLIGEN / SAMPLER / SIGMAS / GUIDER / NOISE / SEGS | 对应 ComfyUI 对象 | 文本摘要 | — |
+| EMPTY | 未连接 | “(未连接)” | — |
+
+-附加能力：媒体全屏（图片滚轮缩放/拖拽平移，视频/音频可播放、3D 可全屏）；生成信息（图片/视频/音频/3D 从内嵌、sidecar 或当前工作流兜底提取 模型 / LoRA / CLIP / VAE + 提示词 + 采样参数）；模型元数据（架构 / 作者 / 触发词 / 训练参数 / 路径 / 哈希）；保存导出（图片 / 音频 / 视频 / 文本按所选格式存到 ComfyUI 输出目录）；数据预览弹窗。
+
+###提示词助手（`EzFlex-PromptHelper`）：
+
+-工具：提示词卡片管理 + 完整富文本编辑器（加粗/斜体/颜色/字号/对齐/查找替换/取色器/规则弹窗）。
+-输入：固定 clip / 图像 / 视频 / 音频 / 3D 模型（后四者可批量）+ 每卡一个文本输入端口（按顺序链接到卡片）。
+-输出：固定「合并提示词」字符串 + 每卡一个字符串输出端口。
+-状态：开发中，`V1.03` 起列入节点清单，后续继续完善。
+
 
 ## 目录结构
 
 ```
 Comfyui-EzFlex-Presets/
-├── __init__.py          # 全部 7 节点类 + 预设路由 + 输出类型同步路由
+├── __init__.py          # 全部 9 节点类 + 预设路由 + 输出类型同步路由
 ├── pyproject.toml
 ├── README.md
-├── user_data/           # 每节点一个预设库：EzFlex-ModelsCombo.json / EzFlex-FreeLatent.json /
-│                        #   EzFlex-NodeSwitchMaster.json / EzFlex-MainControl.json /
-│                        #   EzFlex-ParamPresetControl.json（NodeSwitchGroup 预设按实例存 config）
+├── user_data/           # 预设库（运行时由插件写入）：EzFlex-ModelsCombo.json / EzFlex-FreeLatent.json /
+│                        #   EzFlex-NodeSwitchMaster.json / EzFlex-NodeSwitchGroup.json /
+│                        #   EzFlex-MainControl.json / EzFlex-ParamPresetControl.json
+│                        # 说明：这些由服务器预设路由运行期生成；你机器上若还有 EzFlex-PreviewAny.json 等，
+│                        #   属本地运行产生，不是插件自带/固定的文件。
 └── web/
     ├── modelscombo_node.js  # ModelsCombo 内嵌控件（addDOMWidget）
     ├── freelatent_node.js   # FreeLatent 内嵌 canvas 分辨率选择器
@@ -91,81 +140,18 @@ Comfyui-EzFlex-Presets/
     ├── main_control.js      # MainControl 面板
     ├── param_preset_control.js # ParamPresetControl 面板 + 动态端口
     ├── param_preset_output.js  # ParamPresetOutput 面板 + 动态端口
-    └── preview_any.js          # PreviewAny 白板 + 拖拽卡片 + 动态 socket + 预览
+    ├── preview_any.js          # PreviewAny 白板 + 拖拽卡片 + 动态 socket + 预览
+    ├── prompt_helper.js        # PromptHelper 提示词助手面板（开发中）
+    └── libs/ utils/ curves/    # three.js 与加载器/曲线资源（本地离线，供 PreviewAny 3D 查看器用）
 ```
-> 废弃的 `freeswitch_node.js`（旧 FreeSwitch 拆分占位）已删除。
 
-## EzFlex-FreeLatent（分辨率选择器）
+## 依赖
+- torch
+- numpy
+- Pillow
+- safetensors
+- gguf
+- onnx
+- av
+- mutagen>=1.46.0
 
-`EzFlex-FreeLatent`（类别 `EzFlex`）在节点内嵌一个 canvas 可视化面板，用于自由选择 Latent 尺寸：
-
-- **拖拽画布**：右下角/右缘/下缘手柄（Pointer Events）拖动宽高（Shift 保持比例，Ctrl 关闭 8 的倍数对齐）；输入 socket 稳定可连接，端口名用黑框标签（Latent/Width/Height/Batch）
-- **顶部工具条**：最大限制边（1024/2048/4096/8192/自定义）、批次数量、宽高交换（上下错开箭头，干净 W↔H 互换）、算法切换（优=比例优先 / 标=标准四舍五入）
-- **控制行**：宽度 / 高度 / 对齐倍数 / MP（百万像素）/ 比例下拉（含自定义比例）
-- **预设**：下拉保存/加载/删除，保存弹自绘命名输入框，存到 `user_data/EzFlex-FreeLatent.json`（首启自动写入 14 个默认分辨率）
-- **自定义比例**：预设行末 `[宽]:[高]` + 保存/删除，存到同一 json 的 `customRatios` 键（`/freelatent/presets/custom_ratios`）
-- **输出**：`Latent`（`[batch, 4, h/8, w/8]`）+ `Width` / `Height` / `Batch`（INT）
-
-配置由节点内 `config` 输入框（隐藏）承载，进 prompt 驱动 `FreeLatentNode` 创建 Latent，与 `ModelsComboLoader` 同一套每节点单文件预设机制。
-
-## 控制/参数预设五节点（V1.2 稳定版，类别 `EzFlex`）
-
-控制链：`EzFlex-MainControl` → `EzFlex-NodeSwitchMaster` → `EzFlex-NodeSwitchGroup` → 画布节点 mode（0/2/4）；
-`EzFlex-ParamPresetControl` →（连线）→ `EzFlex-ParamPresetOutput`。
-
-### `EzFlex-NodeSwitchGroup`（分组预设）
-- **rgthree 式自动发现**：自动扫描工作流中的 ComfyUI 分组（Ctrl+G 建的组），按节点级
-  `匹配颜色 / 匹配标题 / 子工作流生效 / 排序` 过滤后自动成行（无需手动加开关）。
-- 每行 = 一个画布分组，3 态（开启/禁用/绕过）滑块一键给该分组内节点设 `node.mode` 0/2/4。
-- 分组预设：全部开启/全部禁用/全部绕过（映射所有匹配分组）+ 自定义快照（**按实例存本节点 config**，
-  多个 Group 节点同名预设、匹配条件不同也互不影响）。
-
-### `EzFlex-NodeSwitchMaster`（节点控制总预设）
-- 行 = 画布上的 NodeSwitchGroup 实例；总预设 = {分组节点 → 某分组预设} 映射；切换总预设时
-  级联写入各分组节点的 config 并应用开关。命名总预设存 `user_data/EzFlex-NodeSwitchMaster.json`。
-
-### `EzFlex-MainControl`（总控制节点）
-- 行 = 画布上的 ModelsCombo + FreeLatent + NodeSwitchMaster + ParamPresetControl 实例（卡片可拖拽排序）；
-  总预设 = {目标节点 → 该节点预设} 映射，一键级联下推。命名总预设存 `user_data/EzFlex-MainControl.json`；
-  左上角预设只保留 `default` + 命名总预设（无“全部开启/禁用/绕过”基础项）。
-- 顶栏可「加载单个节点 / 加载全部」（6 节点 2 列排布），便于搭控制网。
-
-### `EzFlex-ParamPresetControl`（参数预设控制）
-- 面板：预设下拉（default + 命名预设）/ 保存/删除/重置，参数组列表（**指针拖拽排序**），编辑弹窗
-  （参数增删、拖拽排序、名称/类型/值）。
-- **动态输出端口 = 参数组数 1:1**（类型 `EZFLEX_PARAM_GROUP`，携带组数据）；分组增删/排序/改名后
-  端口与连接跟随（同 ModelsCombo 机制：复用 socket、重排、更新 link origin_slot、同步类 RETURN_TYPES）。
-- 命名预设存 `user_data/EzFlex-ParamPresetControl.json`。
-
-### `EzFlex-ParamPresetOutput`（参数预设输出）
-- 输入 = 一个分组端口（从 ParamPresetControl 对应分组端口连线）；面板显示参数名/类型/值 + 开启/禁用。
-- **动态输出端口 = 参数数 1:1**，按参数类型映射：int→INT、float→FLOAT、string→STRING、bool→BOOLEAN、
-  复杂类型（complex/tuple/list/set/dictionary）→ STRING；**禁用参数端口保留、输出该类型中性默认值**
-  （int→0 / float→0.0 / bool→False / 其余→""），重新开启无需重接线。
-- 参数增删/排序/类型变化/连接变化后输出端口与连接跟随。
-
-### `EzFlex-PreviewAny`（任意预览）
-- **`OUTPUT_NODE=True`**（可作为输出节点被触发执行）；输入为 `input_1..N`(ANY) 固定槽，**每连一个输入自动增加一个槽/卡片**（已连接 + 1 空槽），卡片**可拖拽排序**，顺序即 socket 顺序（复用 socket、重排、更新 target_slot/origin_slot）。
-- 顶部只有两个控件：**存档开关**（绿=自动保存 / 浅阴影=不保存）与**保存位置**（弹窗选择，默认 ComfyUI 输出目录）；无预设。
-- 卡片尾部有**浅色文件夹图标**，点击在系统文件管理器中打开已保存文件并选中它。
-- 输入任意类型自动解析：文本/数字/信息类正常显示、过长点开弹文本框；IMAGE 走 base64 内联预览放大；VIDEO 取首帧 + 帧数；AUDIO 转 WAV 可播放；MODEL/CLIP/VAE 显示文件名并尽量读取元数据（safetensors/gguf/onnx，缺失依赖降级）。
-- 3D 模型旋转/缩放等大媒体侧栏播放为后续扩展。
-
-## V1.01 稳定版新增
-
-### ModelsCombo「⧉ 浏览」批量添加
-- 工具栏「添加加载器」与「预设名」之间新增「⧉ 浏览」按钮，打开**全屏模型浏览器**，读取 LoraManager 生成的 `<模型名>.metadata.json` + 同目录预览图。
-- 支持 checkpoint / unet / lora 三种可映射类型（embeddings 跳过）；顶部标签栏分离「全部 / Checkpoint / UNET / LoRA」。
-- 左侧文件夹树（LoraManager 风格 SVG 图标、点文件夹名任意处即展开/收起并选中、递归开启即展开全部、树/列表切换、全部折叠、隐藏/展开侧栏同一行）。
-- 卡片：左上角「类型+架构缩写」、右上角半透明「+ / −」按钮（添加/移除对应加载器）、底部毛玻璃只显示 标题+版本号；点卡片弹详情子窗。
-- 后端：`/models_combo/lora_meta`（列表）、`/models_combo/lora_meta_detail`（单个）、预览复用 `/models_combo/preview`。
-
-### PreviewAny「生成信息」
-- 图片/视频/3D/音频等任意预览卡片，能读取到元数据时右上角出现「生成信息」。
-- 读取链：①PIL 内嵌文本块（PNG/WEBP/动画 webp）→ ②同名 sidecar JSON/txt → ③容器内嵌元数据（GLB/glTF asset/extras、视频 ffprobe、音频 mutagen）。
-- 若文件本身不带元数据，会从**当前工作流**（`extra_pnginfo['workflow']`）兜底提取用的模型/提示词/采样参数；对从文件加载的媒体不会用当前工作流参数冒充（有守卫）。
-- MODEL/CLIP/VAE 卡片继续走「模型自身元数据」（架构/触发词/训练参数等）。
-
-### 依赖
-- `mutagen>=1.46.0`：音频/视频标签读取；`ffprobe`：外部可选，视频容器标签。
-- **Python 改动需重启 ComfyUI**；前端 JS no-store，刷新（Ctrl+F5）即生效。

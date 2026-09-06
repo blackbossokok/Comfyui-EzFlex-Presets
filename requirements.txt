@@ -1,27 +1,8 @@
-# ============================================================
-# EzFlex 插件套件（Comfyui-EzFlex-Presets） Python 依赖
-# 运行环境：ComfyUI 的 Python 虚拟环境（ComfyUI 自带的大部分包可直接使用）。
-# 安装：<ComfyUI>/venv/Scripts/pip install -r requirements.txt
-# ============================================================
-
-# ---------- 随 ComfyUI 自带（核心，无需额外安装） ----------
-# torch / torchvision：模型加载、Latent 生成、张量预览
 torch
-# numpy：图像/张量处理（PreviewAny 编码、ModelsCombo 不直接依赖但被 torch/comfy 使用）
 numpy
-# Pillow：图像缩略图/PNG 编码（PreviewAny 图像预览）
 Pillow
-# safetensors：安全读取 .safetensors 权重与 __metadata__（PreviewAny 模型元数据）
 safetensors
-
-# ---------- 可选：模型元数据预览（EzFlex-PreviewAny） ----------
-# 缺失时节点自动降级为只显示文件名，不报错。
-onnx        # 读取 .onnx 元数据（producer/graph）
-gguf        # 读取 .gguf 元数据（架构/量化/超参数）
-
-# ---------- 说明：以下由 ComfyUI 内核提供，不通过 pip 单独安装 ----------
-# folder_paths / comfy.sd / comfy_api / server / aiohttp
-
-# ---------- 预留（当前未启用，后续媒体预览可用） ----------
-# torchaudio、soundfile：音频处理/播放（当前 PreviewAny 用手写 WAV 编码）
-# av、opencv-python-headless：视频取帧/播放（当前 PreviewAny 只用首帧）
+gguf
+onnx
+av
+mutagen>=1.46.0

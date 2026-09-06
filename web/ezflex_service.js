@@ -24,6 +24,7 @@ export const NODE_TYPES = {
   PREVIEW_ANY: "EzFlex-PreviewAny",
   COMBO: "EzFlex-ModelsCombo",
   LATENT: "EzFlex-FreeLatent",
+  PROMPT_HELPER: "EzFlex-PromptHelper",
 };
 
 export const MODE_NUM = { on: 0, off: 2, bypass: 4 }; // LiteGraph.ALWAYS / NEVER / BYPASS
