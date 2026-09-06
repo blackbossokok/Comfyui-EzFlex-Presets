@@ -2,6 +2,8 @@
 
 用于comfyui的灵活组合插件，使用ai构建完成，目前插件还在更新完善中。
 
+![整体预览](./images/整体预览.png)
+
 ## EzFlex 节点列表：
 - 总控制节点( `MainControl`）
 - 模型组合加载器（`EzFlex-ModelsCombo`)
