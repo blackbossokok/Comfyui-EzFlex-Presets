@@ -87,6 +87,8 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 ### 参数输出控制节点（`ParamPresetOutput`）：
 
 - 控制：开启/禁用控制参数输出,int->0,bool->false，float->0.0，string等->空字符串。
+- 类型提示：显示实际类型，若值与参数预设控制节点（`ParamPresetControl`）设定类型不一致，默认输出string并标红。
+- 值预览：可点击弹窗预览。
 
 ### 任意预览（`EzFlex-PreviewAny`）：
 
@@ -112,7 +114,7 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 | CONTROL_NET / CLIP_VISION / STYLE_MODEL / UPSCALE_MODEL / LORA_MODEL / GLIGEN / SAMPLER / SIGMAS / GUIDER / NOISE / SEGS | 对应 ComfyUI 对象 | 文本摘要 | — |
 | EMPTY | 未连接 | “(未连接)” | — |
 
-- 附加能力：媒体全屏（图片滚轮缩放/拖拽平移，视频/音频可播放、3D 可全屏）；生成信息（图片/视频/音频/3D 从内嵌、sidecar 或当前工作流兜底提取 模型 / LoRA / CLIP / VAE + 提示词 + 采样参数）；模型元数据（架构 / 作者 / 触发词 / 训练参数 / 路径 / 哈希）；保存导出（图片 / 音频 / 视频 / 文本按所选格式存到 ComfyUI 输出目录）；数据预览弹窗。
+- 预览方式：数据预览弹窗/生成信息。
 
 ### 提示词助手（`EzFlex-PromptHelper`）：
 
