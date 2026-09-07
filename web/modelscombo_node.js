@@ -86,8 +86,8 @@ const MC_CSS = `
 .mc-bb-searchfield{flex:0 0 auto;min-width:100px;max-width:150px;height:32px;padding:4px 8px;font-size:12px;border:1px solid #dce3ec;border-radius:7px;background:#fff;outline:none;font-family:inherit;cursor:pointer;box-sizing:border-box;}
 .mc-bb-searchfield:focus{border-color:#64748b;box-shadow:0 0 0 3px rgba(43,58,74,.06);}
 .mc-bb-count{font-size:12px;color:#6b7a8e;white-space:nowrap;}
-.mc-bb-close{position:absolute;top:10px;right:12px;z-index:5;width:30px;height:30px;border-radius:50%;border:1px solid #e6e9ef;background:#fff;color:#6b7a8e;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.06);}
-.mc-bb-close:hover{background:#eef1f6;color:#1a1f2b;}
+.mc-bb-close{position:absolute;top:10px;right:12px;z-index:5;width:30px;height:30px;border-radius:50%;border:1px solid rgba(220,38,38,.32);background:rgba(220,38,38,.1);color:#dc2626;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.06);}
+.mc-bb-close:hover{background:rgba(220,38,38,.22);color:#b91c1c;border-color:rgba(220,38,38,.5);}
 .mc-bb-tabs{display:flex;align-items:center;gap:6px;padding:8px 18px;border-bottom:1px solid #e6e9ef;background:#fff;flex-shrink:0;}
 .mc-bb-tab{padding:5px 14px;font-size:12px;border-radius:7px;border:1px solid #e6e9ef;background:#fff;color:#6b7a8e;cursor:pointer;font-family:inherit;transition:.15s;}
 .mc-bb-tab:hover{background:#f3f5f9;color:#1a1f2b;}

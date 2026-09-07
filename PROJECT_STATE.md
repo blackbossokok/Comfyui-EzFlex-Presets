@@ -1,22 +1,23 @@
-# EzFlex 插件套件 项目交接文档（V1.03 稳定版）
+# EzFlex 插件套件 项目交接文档（V1.04 稳定版）
 
 > 供新窗口继续开发使用。硬数据，无闲聊。
-> 当前版本：`__version__="1.0.3"`、`pyproject.toml version="1.0.3"`（README 记为 `V1.03`）。
+> 当前版本：`__version__="1.0.4"`、`pyproject.toml version="1.0.4"`（README 记为 `V1.04`）。
 > 环境：ComfyUI `0.30.x`；前端 `comfyui_frontend_package`（Vue / Node 2.0，addDOMWidget）。
 > venv python：`<ComfyUI>\.venv\Scripts\python.exe`。
 > 插件目录：`D:\software\AI_software\Comfy-Desktop\ComfyUI-Installs\Comfyui0.30.1\ComfyUI\custom_nodes\Comfyui-EzFlex-Presets`
 
 ---
 
-## 0. 当前状态（9 节点定版）
+## 0. 当前状态（11 节点定版）
 
 节点（类别均 `EzFlex`，Add-Node 菜单顺序）：
-`EzFlex-MainControl → EzFlex-ModelsCombo → EzFlex-FreeLatent → EzFlex-NodeSwitchMaster → EzFlex-NodeSwitchGroup → EzFlex-ParamPresetControl → EzFlex-ParamPresetOutput → EzFlex-PreviewAny → EzFlex-PromptHelper`
+`EzFlex-MainControl → EzFlex-ModelsCombo → EzFlex-FreeLatent → EzFlex-NodeSwitchMaster → EzFlex-NodeSwitchGroup → EzFlex-ParamPresetControl → EzFlex-ParamPresetOutput → EzFlex-PreviewAny → EzFlex-PromptHelper → EzFlex-MediaLoader → EzFlex-MediaOut`
 
-- 版本：`__version__="1.0.3"`、`pyproject version="1.0.3"`、README `V1.03`。
-- 控制链：`MainControl → Master → Group → node.mode(0/2/4)`；`ParamPresetControl →(连线)→ ParamPresetOutput`。
+- 版本：`__version__="1.0.4"`、`pyproject version="1.0.4"`、README `V1.04`。
+- 控制链：`MainControl → Master → Group → node.mode(0/2/4)`；`ParamPresetControl →(连线)→ ParamPresetOutput`；`MediaLoader →(连线)→ MediaOut`。
 - 控制类节点（MainControl/Master/Group）为**纯前端生效**（rgthree 同款：Python 只承载 config，`run` 返回 `()`，mode 由浏览器端改、随工作流序列化）。
-- `EzFlex-PromptHelper` 为**开发中**节点（V1.03 起列入清单，继续完善）。
+- `EzFlex-PromptHelper` 为**开发中**节点（V1.03 起列入清单，继续完善）；**当前阶段：`MediaLoader/MediaOut`（V1.04）基本完成，进入 `EzFlex-PromptHelper` 交互/多模态优化**。
+- `EzFlex-MediaLoader` / `EzFlex-MediaOut` 为 **V1.04 新增**：素材组织/拆分，详见各节点小节。
 
 ---
 
@@ -24,9 +25,9 @@
 
 ```
 Comfyui-EzFlex-Presets/
-├── __init__.py              # 9 节点类 + 预设路由 + 输出类型同步路由 + 新增 PromptHelper。__version__="1.0.3"
-├── pyproject.toml           # version="1.0.3"，dependencies=["mutagen>=1.46.0"]
-├── README.md                # 使用说明（V1.03）
+├── __init__.py              # 11 节点类 + 预设路由 + 输出类型同步路由 + PromptHelper。__version__="1.0.4"
+├── pyproject.toml           # version="1.0.4"，dependencies=["mutagen>=1.46.0"]
+├── README.md                # 使用说明（V1.04）
 ├── PROJECT_STATE.md         # 本文件
 ├── requirements.txt         # torch/numpy/Pillow/safetensors/gguf/onnx/av/mutagen
 ├── user_data/               # 预设库（运行期由服务器预设路由写入）
@@ -47,6 +48,8 @@ Comfyui-EzFlex-Presets/
     ├── param_preset_output.js   # ParamPresetOutput 面板 + 动态端口
     ├── preview_any.js           # PreviewAny 白板 + 拖拽卡片 + 动态 socket + 预览
     ├── prompt_helper.js         # PromptHelper 提示词助手面板（开发中）
+    ├── media_loader.js          # MediaLoader 素材加载器面板 + 动态端口
+    ├── media_out.js             # MediaOut 素材输出面板 + 动态端口
     └── libs/ utils/ curves/     # three.js 与加载器/曲线资源（本地离线，供 3D 查看器）
 ```
 
@@ -118,12 +121,30 @@ Comfyui-EzFlex-Presets/
 - 预览类型与格式见 README「保存类型」表（IMAGE/MASK/AUDIO/VIDEO/CONDITIONING/LIST·TUPLE·SET/DICT/STRING/LATENT/MODEL_3D/MODEL/CLIP/VAE/各类控制模型/EMPTY）。媒体全屏（图片滚轮缩放/拖拽、视频/音频播放、3D three.js 查看器）、生成信息、模型元数据卡、保存导出、数据预览弹窗。
 - 模型元数据：`_model_meta` 恒返回 JSON（至少含类型），读 safetensors/gguf/onnx 的 architecture/author/title/tags/`ss_tag_frequency`；`_model_file_path` 从上游加载节点 widget 兜底（LoraLoader 的 `lora_name` 等）解析路径；`_looks_like_file` 放宽。
 
-### EzFlex-PromptHelper（提示词助手，V1.03 开发中）
-- 输入：`config`(隐藏) + 固定 `clip`/`image`/`video`/`audio`/`model_3d`（后四者可批量）+ 动态 `card_in_1..N`(STRING，= 卡片数 1:1，按顺序链接到卡片)。
+### EzFlex-PromptHelper（提示词助手，V1.03 起开发；V1.04 优化中）
+- 输入：`config`(隐藏) + 固定 `clip`(CLIP) + 动态「综合媒体」端口（红色 ANY，可接 图像/视频/音频/3D 模型 等任意媒体，连接后自动补一个空槽）+ 动态 `card_in_1..N`(STRING，= 卡片数 1:1，按顺序链接到卡片；某卡输入口被连接后对应卡片变灰)。
 - 输出：固定「合并提示词」STRING（按卡片顺序 `\n` 拼接）+ 动态卡片输出 `卡片 1..N`(STRING)。
-- 前端 `web/prompt_helper.js`：完整富文本编辑器面板（卡片增删/拖拽排序 + 编辑弹窗 默认/优化 tab、格式工具条、颜色/字号/缩进、工具 全半角转换/优化占位、插入媒体引用、查找替换、取色器、规则弹窗）。
-- 动态端口复用 ModelsCombo/ParamPreset/PreviewAny 经验：按 `_ezCardId` 复用、重排、回写 `origin_slot/target_slot`、`deferSync` 守卫；卡片数变化 POST `/prompt_helper/outputs` 同步类 `RETURN_TYPES/RETURN_NAMES`。
-- 已知限制：类 `RETURN_TYPES` 全局共享；富文本用 `document.execCommand`（已弃用但可用）；「优化提示词 (API)」为占位；媒体输入仅计数/引用提示，不参与合并文本。
+- 端口标签：输入输出端口用**节点外黑框标签**叠加层（仿 ModelsCombo `installOutsideLabels`：DOM 覆盖层逐帧对齐 socket 圆点、随画布缩放、**半透明 50%**；标题输入即实时刷新标签文字；media `*` 圆点红、CLIP 黄、STRING 灰）。`hideConfigWidget` 隐藏 config 输入口。
+- 前端 `web/prompt_helper.js`：完整富文本编辑器面板（卡片增删/拖拽排序 + 编辑弹窗 默认/优化 tab（**白色简约分段滑块、丝滑切换**）、**Word/Office 风格图标工具条**（B/I/U/S + 左/中/右/两端对齐 SVG）、颜色/字号/**缩进（首行缩进 text-indent，对每段首行生效）**、工具 全半角转换（**仅标点**）/优化、插入媒体引用、查找替换、取色器、规则弹窗；时间轴开始/结束无 placeholder 留空；**卡片标题为白底圆角可编辑块、未聚焦灰色、聚焦白底无高亮边框、空时显示灰色“标题”**；**只在单点卡片(无拖动位移)才打开编辑弹窗**；点击卡片弹窗外空白自动关闭并保存（卡片内拖动到外面松开不关）；取色器等颜色弹窗点击外面自动关闭但不关卡片弹窗。面板头部按钮序：**整体编辑(黑) / 调用设置 / 规则设置 / skill设置 / ＋新增提示词卡片(灰)**。**调用设置**弹窗按**侧边栏**切分：**[通用设置 / API设置 / TextGenerate设置 / llama设置]**，较窄(520px)、**一行一列**、输入左对齐、**数字无上下箭头**；通用设置有**三个滑块开关**（运行期自动优化 TextGenerate / API / llama），分别驱动 run 期三种自动优化。**skill 设成弹窗 `skill设置`**：仿 ModelsCombo 浏览，左侧文件夹树可展开、选中即写入 `optimize.skill`（列出 `SKILL.cn.md` 与 `SKILL.md` 分别以“· 中文/· 英文”显示，不再默认预览 cn）。**「整体编辑」Word 大纲**：每条卡片= 左侧浅矮小标题行[序号 / 可编辑标题 / 时间轴(两个可输入框) / 删除「－」] + 下方内容；顶部 skill 提示 + 默认/优化滑块 + 工具栏（B/I/U/S+对齐+字号+缩进+颜色/高亮+新增卡片）；块内标题/时间轴灰色、无高亮，每卡正文 min-height≈3行；点外面空白自动保存关闭。
+- 缩进：**首行缩进**（text-indent，对每个回车产生的段落生效，`<br>` 软换行不缩进）；`card.indent` 持久化，打开编辑弹窗回填并重新施加；无段落/换行模式下拉框。
+- 优化：工具下拉「优化提示词 (API) / (TextGenerate) / (llama)」；`POST /prompt_helper/optimize` 按 method 分发（核心 `_ph_optimize_impl` 同步可复用）。**媒体参与优化**：执行期会把已连接的「综合媒体」传给优化——本地 CLIP(textgen) 把 image/video/audio 随 prompt 一起喂给 `clip.tokenize`（同内置 TextGenerate）；「调用设置」①新增「运行期自动优化」选择（不 / API / llama），选 api/llama 且连了图像时，run 期把首张图编码成 base64 data URL 传给视觉接口（API 走 OpenAI 兼容 image_url / Anthropic image block；llama 进程内需 vision GGUF+mmproj 才读图）。`textgen` 仅运行期可用（`run` 时若 `optimize.textgen.enabled=true` 且 clip `generate` 可用则自动生成优化提示词，带 skill+媒体）。**clip 生成说明**：仅对 text-gen 编码器（Gemma/Qwen3-VL/flux2 等有 `generate`）生效；普通 `stable_diffusion` CLIP 无 `generate`，已启用时会抛清晰错误（不再静默失效）。**说明**：远程 API/llama 需用户填主机/密钥或 GGUF 模型路径并联网/本机推理；本地 CLIP 生成仅在执行期可用。**优化结果写入卡片「优化提示词」页签**，卡片编辑页脚有「默认/优化提示词」下拉切换合并输出用哪个（`card.useOptimized`）。
+- 动态端口复用 ModelsCombo/ParamPreset/PreviewAny 经验：按 `_ezCardId`/`_ezMedia` 复用、重排、回写 `origin_slot/target_slot`、`deferSync` 守卫；卡片数变化 POST `/prompt_helper/outputs` 同步类 `RETURN_TYPES/RETURN_NAMES`；media `*` 端口顺序 = 已连接媒体数 + 1（自动补空槽）。
+- 已知限制：类 `RETURN_TYPES` 全局共享；富文本用 `document.execCommand`（弃用但可用）；「优化提示词 (API)/(llama)」需用户提供主机/密钥/服务并联网；OAuth 登录未实现（OAI/Claude 用密钥+主机模式）；textgen 仅运行期可用（且需 text-gen CLIP，普通 CLIP 会报清晰错误）；综合媒体仅计数/引用提示，不参与合并文本；厂商/模型列表为参照 Chatbox 的建议项（可编辑，可能随厂商变动）。
+
+### EzFlex-MediaLoader（素材加载器，V1.04，基本完成）
+- 输入：`config`(隐藏 STRING，承载分组/卡片/文件)。输出：每张「素材卡片」一个 `*` 通配端口（深红），标签=`分组名_卡片名`，带半透明黑框标签叠加层（仿 ModelsCombo `installOutsideLabels`）；节点删除时清理标签。
+- config 数据模型：`{ groups:[{id,name,cards:[{id,name,items:[{id,files:[{id,name,path,subfolder,dir,type}]}]}]}], currentGroupId, currentPreset }`；卡片内 `items` 是媒体网格项，每项可含 1..N 个文件（批量堆叠，右下 `+N`）。
+- 运行期：`load()` 按「分组顺序→卡片顺序」加载（图像→张量、视频→帧列表、音频→`{waveform,sample_rate}`、3D→描述 dict、**文本类→文件内容字符串**），输出 `{_kind:"ezflex_media_card", cardId,label,files:[{id,name,type,value,path}]}`；文本由 `_ml_load_media` 对 `_TEXT_EXTS` 读取内容（≤1MB，utf-8 容错），非文本 `other` 输出路径。
+- 浏览（文件资源管理器式）：`GET /media_loader/browse?path=`（默认 input 目录，返回 dirs/files/roots/parent；文件 `url=""` + `/media_loader/serve?path=` 出内容）；`_ml_roots()` 含 Windows 盘符 + `D:\storge\EdgeDownload`；前端回退 `/media_loader/files`。顶栏 `素材浏览`+后退/前进/上级/刷新+**手动路径输入 `.eml-path`（默认空，回车跳转）**+搜索；**红色 ✕ 在右上角**（toolbar `position:relative` + `.eml-bbclose{position:absolute;top:8px;right:14px}`）；左侧**可展开目录树**（点整行展开一层/收起、当前文件夹高亮、右侧显示其文件不含子目录）；右侧视图 列表/大/小/详细 + 全选/反选/清除 + 已选 + 右下「添加到素材卡片」；ctrl/shift 多选、拖上传。`storeRoots` 不再填下拉（输入框保持空）。
+- 面板参数：`gridCols`（每行卡片数，默认 3）+ `gridRowH`（**卡片高度倍数**，默认 1；`pv.height = max(1,gridRowH)*96px`，`gridRowH<=0` 走 16:9 aspect）。顶栏「**加载输出**」按钮：`window.LiteGraph.createNode('EzFlex-MediaOut')` + `app.graph.add` + `n.pos=[node.pos[0]+node.size[0]+60,node.pos[1]]` + `node.connect(0,n,0)`（失败 toast）。
+- 预设 `/media_loader/presets`；`POST /media_loader/outputs` 同步类 `RETURN_TYPES/RETURN_NAMES`；`default` 始终可选项；新分组/卡片组自动命名 `分组1/卡片组1…`。
+- 前端 `web/media_loader.js`：自定义圆角预设下拉（PromptHelper 风格）；视频卡片悬停居中播放键（播放显示原生控件、隐藏信息面板、暂停恢复）；音频自绘白色播放条（进度可点、音量滑条+静音）；3D three.js 查看器（材质/线框/背景/复位/生成预览图/全屏 + 首次自动拍不重拍）；文本预览显示内容；顶栏「加载输出」按钮用 `LiteGraph.createNode('EzFlex-MediaOut')` 自动加一个 MediaOut 并尝试连第一个卡片端口。
+
+### EzFlex-MediaOut（素材输出，V1.04）
+- 输入：`card`（`*` 通配，深红，来自 MediaLoader 某张卡片）+ `config`(隐藏)。输出按模式：`split`=逐文件独立端口；`card`/`row`/`group`=按结构合并（每端口类型按真实媒体类型 `IMAGE/VIDEO/AUDIO/MODEL_3D`）。
+- config：`{off:[文件id]}` 局部禁用（保留端口、输出 `None`）。
+- 前端 `web/media_out.js`：4 模式切换（拆分/卡片/卡片组/分组）；每行**类型图标**（TYPE_ICONS 共享）+ 名称/类型 + 开/关；**翻页**底部一栏（左页码列表 `< 1 … >`，右固定宽 `第[ ]页` `[10]个/页`，失焦生效，默认 10/页）；`_mout_mode` 返回模式、`_mo_groupings` 分组；节点删除清标签。
+- **PromptHelper @ 兼容**：`graphMediaFiles` 识别 `EzFlex-MediaLoader` / `EzFlex-MediaOut` 节点，素材文件纳入 `@` 媒体下拉。
 
 ---
 
@@ -132,7 +153,9 @@ Comfyui-EzFlex-Presets/
 - 命名预设统一走 `_register_preset_routes(node_name, api_path)`（GET 列表 / POST 保存同名覆盖 / DELETE {name}；服务器 `user_data/<节点名>.json`，`utf-8-sig` 读）。路由：
   - `/models_combo/presets`（ModelsCombo）、`/freelatent/presets`（FreeLatent，with_ratios）
   - `/nodeswitch_master/presets`、`/nodeswitch_group/presets`、`/main_control/presets`、`/param_preset_control/presets`
-- 动态输出同步路由（前端 POST）：`/param_preset_control/outputs`、`/param_preset_output/outputs`、`/preview_any/outputs`、`/prompt_helper/outputs`。
+  - `/media_loader/presets`（MediaLoader）
+- 动态输出同步路由（前端 POST）：`/param_preset_control/outputs`、`/param_preset_output/outputs`、`/preview_any/outputs`、`/prompt_helper/outputs`、`/media_loader/outputs`、`/media_out/outputs`。
+- MediaLoader 文件浏览：`GET /media_loader/files`（input 目录媒体，含子目录/大小/时间/`/view` URL）。
 - PreviewAny 媒体/3D 路由：`GET /preview_any/serve_video`、`GET /preview_any/serve_3d`（按 `?path=` serve 本地文件带 Range）、`GET /preview_any/3d/{path:.*}`（serve 插件 web 树，供 three.js 本地资源）、`GET /preview_any/fs/{path:.*}`、`POST /preview_any/folders`、`POST /preview_any/open`、`POST /preview_any/pick_folder`（tkinter）。
 - 节点当前状态存各自 config widget（随工作流序列化）。
 - web 静态：`_serve_no_store` 覆盖全部 JS，前端刷新即生效；Python 改类需重启 ComfyUI。
@@ -156,6 +179,44 @@ Comfyui-EzFlex-Presets/
 10. **3D 本地 three.js**：ComfyUI 内置 `vendor-three-*.js` 非独立（import 内部模块），故把自包含 `three@0.160.0` + GLTF/OBJ/FBXLoader + BufferGeometryUtils + fflate + NURBSCurve 放 `web/libs`、`web/utils`、`web/curves`；`FBXLoader` 依赖 `web/curves/NURBSUtils.js`（已补）。serve 用 `/preview_any/3d/{path}`（ComfyUI 默认不递归 expose `web/` 子目录）。加载器按 URL 扩展名挑；未知格式为空时看状态栏文本定位。
 11. **PreviewAny 生成信息读取链** `_file_gen_meta(path)`：①PIL 内嵌文本块（PNG/WEBP/JPEG/动画 webp）→ ②同名 sidecar（`<base>.json`/`<base>.metadata.json`/`<file>.json`/`<base>.txt`）→ ③容器内嵌（GLB/glTF/视频用 ffprobe 回落 mutagen/音频用 mutagen 标签）。`_workflow_gen_meta` 从 `extra_pnginfo['workflow']` 兜底提取模型/LoRA/CLIP/VAE+提示词+采样参数；若上游是 `Load*/FromFile` 则不冒充外部文件参数（防误导守卫）。
 12. **模型标签工具提示**：前后端都有 `ss_*`/`modelspec.*` 的中文悬停 tooltip（来源/作者/哈希/训练词比重/分桶等）。
+
+### 4.1 V1.04 专项经验（MediaLoader / MediaOut / PromptHelper 交互，硬数据）
+
+**MediaLoader 浏览（文件资源管理器式）**
+- 前端一定要**函数名一致**：`const renderPane` 定义 / `drawPane()` 调用，曾因定义叫 `renderPane` 调用叫 `drawPane` 直接 `ReferenceError: drawPane is not defined` → 弹窗渲染中断空白。教训：重命名/改调用后 `node --check` + 实际打开弹窗验证。
+- **后端路由未加载**时前端 fetch 会静默失败 → 空列表。`fetchBrowse` 必须**回退**：先 `/media_loader/browse`，失败或空就回退旧的 `/media_loader/files`（input 目录）。教训：前端对新路由做旧路由兜底，否则不重启 ComfyUI 就一片空白；前端 JS = `_serve_no_store`（Ctrl+F5 生效），后端路由改动需完全重启。
+- 浏览默认打开 input 目录；`_ml_roots()` 返回盘符 + 常用目录快速入口（`D:\storge\EdgeDownload`）。文件 `url=""`，统一用 `/media_loader/serve?path=<abs>` 出内容（`_ml_resolve` 兼容绝对/相对）。
+- 左树**点整行展开一层/再点收起**，不“进入”；右侧只显示**选中文件夹的文件（不含子目录）**（子目录已在左树展开）。目录树用 `treeCache/treeExpanded`（懒加载：点开才 fetch 子目录）。
+- 顶部导航：后退/前进/上级/刷新 + 盘符 + 搜索；视图 列表/大/小/详细 置**右上/右列顶部**（用户多次调整位置，按“顶栏只留导航、视图/选择在文件面板上方一行、添加在右下”的最终版）。选中用 `refreshSel()`（切 class 不整列表重绘，避免闪烁）；大/小图标 tile 预览**固定高度 + object-fit:contain + overflow:hidden + gridAutoRows**（否则图片按原图尺寸把格子纵向撑成条）。
+
+**MediaLoader 媒体卡 / 预览**
+- 相机/预览：3D `autoShot` 只**首次未拍时**自动拍（`if (!_mlPreview[item.id]) setTimeout(autoShot,320)`），否则每次打开都重置到正面→重复拍。
+- 视频卡片：自定义悬停**居中播放键**（`▶`），`playing` 态隐藏 `.info` 信息面板、隐藏播放键、显示原生控件（`video.controls=true`）；暂停恢复信息+播放键；播放中点卡片不弹大图。**播放键用 CSS 类定位**（上次写成 `el('button','eml-play')` 没给样式 → 跑到右边）。
+- 音频：浏览器原生 `<audio>` 控件**无法完全刷白**（进度条是内部 `::-webkit-media-controls-timeline`/`::-webkit-slider-runnable-track`，vendor 伪元素不可靠）。**自绘 `makeAudioPlayer`**（白底圆角 + ▶/暂停、可点进度（`isFinite(audio.duration)` 守卫）、音量滑条+静音；`<audio>` 用**屏外隐藏** `position:absolute;left:-9999px` 而非 `display:none`，避免某些浏览器不加载/不播放）。教训：要对控件完全可控就得自绘，别死磕原生样式。
+- 文本类（`.txt/.md/.json…`）：预览 fetch `/media_loader/serve` 内容显示在**等宽白底可滚动**卡片（`min-height:120px` + `pre-wrap` + 错误兜底），避免纯空白。
+- 预览切素材**复用同类型媒体元素**（`_pvMedia/_pvType`，仅换 `src`）避免整块重建→闪屏；音频预览时 `main` 左右 `padding:44px` 给左右箭头让位。
+- 删除节点：`onRemoved` 必须清理 `node._emlOutEls`/`_emooOutEls`（黑框标签 DOM 挂在 body，忘了清会残留）。
+
+**MediaOut**
+- 4 模式：`_mout_mode` 返回 `split/card/row/group`；`split` 用 `card['files']`，`card/row/group` 用 `card.get('_rows')`（MediaLoader `load()` 挂共享引用，**不做 tensor 复制**）。禁用文件（`off` config）保留端口、输出 `None`（重启用不断连）。
+- 翻页：`node._moPage/_moPerPage`（默认 10）；**页栏要 append 到 `.emoo-root` 面板根**，`node._emooRoot` 是 `.emoo-shell`（外层壳）——append 到壳会被 `inset:0 14px` 面板裁掉看不到。底部一栏：左=页码列表 `< 1 … >`，右=固定宽 `第[ ]页 [10]个/页`（`justify-content:space-between`）。
+- 数字输入框去上下箭头：`.emoo-root input[type=number]{-moz-appearance:textfield;appearance:textfield}` + `::-webkit-inner/outer-spin-button{none}`（MediaLoader 同理 `.eml-root`）。
+
+**PromptHelper 多重弹窗一层层关闭（本轮踩坑）**
+- 目标：点**最外层只关最上面一层**，点卡片弹窗/总体编辑内部不关；**拖动在外面松开不关**；点开关按钮（高亮/取色）**不闪关**。
+- 方案：一个**分层协调器**（`_phLayers` 栈 + capture `pointerdown`/`pointerup`）。
+  - **只关“按下前已打开”的层**：`pointerdown` 快照 `_phDownOpen=new Set(_phLayers)`；`pointerup` 里 `if (!_phDownOpen.has(el)) continue;`——否则点开关按钮（按钮在下拉外）会在同一击里把刚打开的下拉关掉（闪一下关闭）。
+  - **拖动不关**：`pointerup` 时 `Math.max(|dx|,|dy|)>6` 直接 return。
+  - **一次只关最上层**：从栈顶往下找第一个不包含 `target`（且 `target !== el`，即点在层内内容时保留）的层，关掉就 `break`。
+  - 自动注册：`MutationObserver` 监听 `eph-*` 元素 class，出现 `.active/.open` 就 `phLayerPush`，去掉即出栈。
+  - **删除旧“整批关闭”**：过去 `document.addEventListener('mousedown', ...)` 各自关自己的弹窗，导致点外面一下子全关；统一删掉，只留协调器。
+  - **模态背板**：协调器记录本次关掉的层 `_phClosedEl`；各模态背板关闭（编辑器 `closeEditModal`、`@` 媒体查看器 `stop`、取色器 `closePicker`、规则窗口）改成 `if (target === modal && (_phClosedEl === null || _phClosedEl === modal)) close()`——只有“本次关的就是自己”才关，避免内层刚关外层又跟着关。
+  - 编辑器背板：`_editModal` 的 `mouseup` 只有 `_phClosedEl===null||===_editModal` 才 `closeEditModal(true)`（内层弹窗打开时点背板先关内层，不动编辑器）。
+
+**其它**
+- “加载输出”按钮（MediaLoader 顶栏）：`window.LiteGraph.createNode('EzFlex-MediaOut')` 生成节点并 `app.graph.add`，`n.pos=[node.pos[0]+node.size[0]+60, node.pos[1]]`，尝试 `node.connect(0,n,0)` 连第一个卡片端口（失败 toast）。
+- 共享前端工具放 `web/ezflex_service.js`：`TYPE_ICONS`（图片/视频/音频/3D/文本 SVG）、`makeAudioPlayer`、`decorateSelect/decorateSelectsIn`（**注意**：装饰器会隐藏原生 `<select>`，很多节点原有 `.value/.options/.change` 逻辑依赖原生元素，强行覆盖后“原界面看不见”——已回退这些节点到原生 select；仅媒体加载器预设下拉保留自绘）。
+- 每个新的弹窗/下拉参考 `phFixedDD`/`phCenterPopup`（定位）、`uiPrompt`/`uiConfirm`（自绘弹窗）。
 
 ---
 
@@ -188,6 +249,6 @@ Copy-Item <插件目录>\web\ezflex_service.js $env:TEMP\c.mjs ; node --check $e
 - [ ] Vue（Nodes 2.0）下 `EzFlex-ModelsCombo` 与 `EzFlex-FreeLatent` 白色面板底部略凸（可接受，不回退白框）。
 - [ ] `web/modelscombo.js` 侧边栏入口、`web/modelscombo.html`、`web/FreeLatent.HTML`、`freeswitch_node.js`、所有 `.bak_*` 均已删；`_serve_no_store` 已同步移除对应条目。
 - [ ] 图生图 / 视频生视频 后续单独拆节点，不再塞进 FreeLatent；图像缩放（按比例/按像素/按固定宽高）、VAE 编码、获取图像尺寸 由内置节点承担或后续做 EzFlex 单功能节点。
-- [ ] `EzFlex-PromptHelper` 开发中：类 `RETURN_TYPES` 全局共享；`document.execCommand` 富文本（弃用但可用）；「优化提示词 (API)」占位待后端接入；媒体输入目前仅计数/引用提示。
+- [ ] `EzFlex-PromptHelper` **下一阶段优化**：类 `RETURN_TYPES` 全局共享；`document.execCommand` 富文本（弃用但可用）；「优化提示词 (API)/(llama)」需用户提供接口/密钥/llama-server 地址并联网调用（`/prompt_helper/optimize`），textgen 仅运行期可用；综合媒体端口目前仅计数/引用提示；媒体端口 `*` 类型连接校验依赖 ComfyUI 通配，Vue 模式下黑框标签叠加层可能需按 Vue 端口坐标再校准。
 - [ ] 临时预览文件（`ezpv_*`）会积累，建议自动清理。
 - [ ] Python 改动（新节点/路由/类）需完整重启 ComfyUI；前端 JS no-store，刷新页面即生效。

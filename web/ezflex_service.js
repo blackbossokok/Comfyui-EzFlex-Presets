@@ -25,6 +25,8 @@ export const NODE_TYPES = {
   COMBO: "EzFlex-ModelsCombo",
   LATENT: "EzFlex-FreeLatent",
   PROMPT_HELPER: "EzFlex-PromptHelper",
+  MEDIA_LOADER: "EzFlex-MediaLoader",
+  MEDIA_OUT: "EzFlex-MediaOut",
 };
 
 export const MODE_NUM = { on: 0, off: 2, bypass: 4 }; // LiteGraph.ALWAYS / NEVER / BYPASS
@@ -276,7 +278,7 @@ export function uiPrompt(msg, def) {
   return new Promise((resolve) => {
     if (!_dlg || !_dlg.parentNode) {
       _dlg = document.createElement('div');
-      _dlg.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:9999;background:rgba(0,0,0,.35);';
+      _dlg.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100010;background:rgba(0,0,0,.35);';
       const box = document.createElement('div');
       box.style.cssText = 'background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:14px;box-shadow:0 10px 34px rgba(0,0,0,.2);display:flex;flex-direction:column;gap:10px;min-width:280px;max-width:380px;font-family:Inter,sans-serif;';
       const lab = document.createElement('div'); lab.style.cssText = 'font-size:12px;color:#1a1a2e;';
@@ -309,7 +311,7 @@ export function uiConfirm(msg) {
   return new Promise((resolve) => {
     if (!_confirm || !_confirm.parentNode) {
       _confirm = document.createElement('div');
-      _confirm.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:9999;background:rgba(0,0,0,.35);';
+      _confirm.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100010;background:rgba(0,0,0,.35);';
       const box = document.createElement('div');
       box.style.cssText = 'background:#fff;border:1px solid #d0d5dd;border-radius:12px;padding:16px 18px;box-shadow:0 14px 44px rgba(0,0,0,.24);display:flex;flex-direction:column;gap:14px;min-width:300px;max-width:380px;font-family:Inter,sans-serif;';
       const lab = document.createElement('div'); lab.style.cssText = 'font-size:13px;color:#1a1a2e;line-height:1.5;word-break:break-all;';
@@ -384,4 +386,94 @@ export function socketPanelCSS(side) {
 .ezfx-sh-strip-l{left:0;}
 .ezfx-sh-strip-r{right:0;}
 `;
+}
+
+// ===== 统一自定义下拉（非破坏：隐藏原生 select，叠一个圆角按钮 + 自绘菜单，value/change 走原 select）=====
+let _ezddInjected = false;
+export function decorateSelect(sel) {
+  if (!sel || sel.nodeName !== 'SELECT' || sel._ezdd) return sel;
+  sel._ezdd = true;
+  if (!_ezddInjected) {
+    _ezddInjected = true;
+    const st = document.createElement('style');
+    st.textContent = '.ez-dd-wrap{position:relative;display:inline-flex;align-items:center;flex:0 0 auto;}.ez-dd-btn{appearance:none;-webkit-appearance:none;min-width:120px;height:32px;padding:4px 30px 4px 12px;border:1px solid #dce3ec;border-radius:999px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath d=\'M1 1l4 4 4-4\' stroke=\'%236b7a8e\' stroke-width=\'1.5\' fill=\'none\' stroke-linecap=\'round\'/%3E%3C/svg%3E") no-repeat right 13px center;font-size:12px;color:#1a1f2b;cursor:pointer;outline:none;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;}.ez-dd-btn:hover,.ez-dd-btn:focus{border-color:#2b3a4a;background-color:#fff;}.ez-dd-menu{display:none;position:absolute;top:35px;left:0;z-index:1200;min-width:160px;max-width:280px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.14);padding:4px;max-height:260px;overflow:auto;}.ez-dd-menu.open{display:block;}.ez-dd-item{padding:6px 12px;font-size:12px;color:#1a1f2b;border-radius:8px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;}.ez-dd-item:hover{background:#f3f5f9;}.ez-dd-item.active{background:rgba(43,58,74,.08);font-weight:600;color:#2b3a4a;}';
+    document.head.appendChild(st);
+  }
+  const wrap = document.createElement('div'); wrap.className = 'ez-dd-wrap';
+  const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'ez-dd-btn';
+  const menu = document.createElement('div'); menu.className = 'ez-dd-menu';
+  const holder = sel.parentNode;
+  if (!holder) return sel;
+  holder.insertBefore(wrap, sel);
+  sel.style.cssText = 'position:absolute;opacity:0;pointer-events:none;width:0;height:0;left:0;top:0;';
+  wrap.appendChild(sel); wrap.appendChild(btn); wrap.appendChild(menu);
+  const refresh = () => {
+    btn.textContent = sel.value || (sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : '');
+    menu.innerHTML = '';
+    if (!sel.options.length) { const e = document.createElement('div'); e.className = 'ez-dd-item'; e.textContent = '（无）'; e.style.color = '#94a3b8'; menu.appendChild(e); }
+    for (let i = 0; i < sel.options.length; i++) {
+      const o = sel.options[i]; const it = document.createElement('div'); it.className = 'ez-dd-item' + (o.selected ? ' active' : ''); it.textContent = o.textContent || o.value; it.dataset.v = o.value;
+      it.addEventListener('click', () => { sel.value = o.value; try { sel.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {} refresh(); menu.classList.remove('open'); });
+      menu.appendChild(it);
+    }
+  };
+  sel.addEventListener('change', refresh);
+  btn.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('open'); });
+  menu.addEventListener('mousedown', (e) => e.preventDefault());
+  document.addEventListener('click', () => { menu.classList.remove('open'); });
+  refresh();
+  return sel;
+}
+const _ddState = { roots: new Set(), ob: null };
+export function decorateSelectsIn(root) {
+  if (root && root.querySelectorAll) _ddState.roots.add(root);
+  if (!_ddState.ob) {
+    _ddState.ob = new MutationObserver((muts) => {
+      muts.forEach((m) => m.addedNodes.forEach((n) => {
+        const sels = n.nodeName === 'SELECT' ? [n] : (n.querySelectorAll ? Array.from(n.querySelectorAll('select')) : []);
+        sels.forEach((s) => { if (!s._ezdd && _ddState.roots.size && [..._ddState.roots].some((r) => r.contains(s))) decorateSelect(s); });
+      }));
+    });
+    _ddState.ob.observe(document.body, { childList: true, subtree: true });
+  }
+  const scope = (root && root.querySelectorAll ? root : document);
+  scope.querySelectorAll('select').forEach((s) => { if (!s._ezdd) decorateSelect(s); });
+}
+
+export const TYPE_ICONS = {
+  image: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="16" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M3 17l4-5 4 4 3-3 4 4"/></svg>',
+  video: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5"/><path d="M10 9l5 3-5 3z" fill="currentColor"/></svg>',
+  audio: '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><rect x="2" y="10" width="2.2" height="4" rx="1.1"/><rect x="5.5" y="7" width="2.2" height="10" rx="1.1"/><rect x="9" y="3" width="2.2" height="18" rx="1.1"/><rect x="12.5" y="8" width="2.2" height="8" rx="1.1"/><rect x="16" y="5" width="2.2" height="14" rx="1.1"/><rect x="19.5" y="9" width="2.2" height="6" rx="1.1"/></svg>',
+  model_3d: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2z"/><path d="M12 2v9M4 6.5l8 4.5 8-4.5M12 20v-8.5"/></svg>',
+  other: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h5"/><path d="M9 13h6M9 17h6"/></svg>',
+  text: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h5"/><path d="M9 13h6M9 17h6"/></svg>',
+};
+
+let _apInjected = false;
+export function makeAudioPlayer(url) {
+  if (!_apInjected) {
+    _apInjected = true;
+    const st = document.createElement('style');
+    st.textContent = '.ez-ap{display:flex;align-items:center;gap:8px;width:100%;background:#fff;border-radius:8px;padding:8px 10px;box-sizing:border-box;color:#1a1f2b;font-family:Inter,sans-serif;}.ez-ap button{background:none;border:none;color:#1a1f2b;font-size:14px;cursor:pointer;padding:0;line-height:1;font-family:inherit;}.ez-ap-time{font-size:12px;color:#6b7a8e;white-space:nowrap;flex:0 0 auto;font-variant-numeric:tabular-nums;}.ez-ap-track{flex:1 1 auto;height:6px;background:#eef1f6;border-radius:4px;position:relative;cursor:pointer;}.ez-ap-fill{position:absolute;left:0;top:0;bottom:0;background:#5f6b7a;border-radius:4px;width:0;}.ez-ap-vol{flex:0 0 auto;color:#1a1f2b;}';
+    document.head.appendChild(st);
+  }
+  const wrap = document.createElement('div'); wrap.className = 'ez-ap';
+  const audio = document.createElement('audio'); audio.src = url; audio.preload = 'metadata'; audio.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+  const play = document.createElement('button'); play.type = 'button'; play.textContent = '▶'; play.title = '播放/暂停';
+  const time = document.createElement('span'); time.className = 'ez-ap-time'; time.textContent = '0:00 / 0:00';
+  const track = document.createElement('div'); track.className = 'ez-ap-track';
+  const fill = document.createElement('div'); fill.className = 'ez-ap-fill'; track.appendChild(fill);
+  const volBtn = document.createElement('button'); volBtn.type = 'button'; volBtn.className = 'ez-ap-vol'; volBtn.textContent = '🔊'; volBtn.title = '静音/取消静音';
+  const volRange = document.createElement('input'); volRange.type = 'range'; volRange.min = '0'; volRange.max = '100'; volRange.value = '100'; volRange.title = '音量'; volRange.style.cssText = 'width:46px;height:4px;accent-color:#5f6b7a;';
+  const fmt = (s) => { const m = Math.floor((s || 0) / 60), ss = Math.floor((s || 0) % 60); return m + ':' + String(ss).padStart(2, '0'); };
+  play.addEventListener('click', () => { if (audio.paused) audio.play(); else audio.pause(); });
+  audio.addEventListener('timeupdate', () => { if (isFinite(audio.duration) && audio.duration > 0) fill.style.width = Math.min(100, audio.currentTime / audio.duration * 100) + '%'; time.textContent = fmt(audio.currentTime) + ' / ' + fmt(audio.duration); });
+  audio.addEventListener('loadedmetadata', () => { time.textContent = '0:00 / ' + fmt(audio.duration); });
+  audio.addEventListener('play', () => { play.textContent = '❚❚'; });
+  audio.addEventListener('pause', () => { play.textContent = '▶'; });
+  track.addEventListener('click', (e) => { const r = track.getBoundingClientRect(); if (isFinite(audio.duration) && audio.duration > 0) audio.currentTime = Math.max(0, Math.min(audio.duration, (e.clientX - r.left) / r.width * audio.duration)); });
+  volBtn.addEventListener('click', () => { audio.muted = !audio.muted; volBtn.textContent = audio.muted ? '🔇' : '🔊'; volRange.value = audio.muted ? '0' : String(Math.round((audio.volume || 1) * 100)); });
+  volRange.addEventListener('input', () => { audio.volume = Number(volRange.value) / 100; audio.muted = Number(volRange.value) === 0; volBtn.textContent = Number(volRange.value) === 0 ? '🔇' : '🔊'; });
+  wrap.appendChild(audio); wrap.appendChild(play); wrap.appendChild(time); wrap.appendChild(track); wrap.appendChild(volBtn); wrap.appendChild(volRange);
+  return wrap;
 }

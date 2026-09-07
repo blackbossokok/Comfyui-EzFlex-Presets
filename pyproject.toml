@@ -1,7 +1,7 @@
 [project]
 name = "Comfyui-EzFlex-Presets"
-version = "1.0.3"
-description = "EzFlex 预设套件：模型组合加载器、分辨率选择器、节点控制总预设/分组预设/总控制、参数预设控制/输出、任意预览。"
+version = "1.0.4"
+description = "EzFlex 预设套件：模型组合加载器、分辨率选择器、节点控制总预设/分组预设/总控制、参数预设控制/输出、任意预览、提示词助手、素材加载器/输出。"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "blackbossokok" }]

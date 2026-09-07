@@ -60,7 +60,7 @@ import comfy.sd
 
 from comfy_api.latest import io
 
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 WEB_DIRECTORY = "./web"
 
@@ -84,7 +84,8 @@ try:
     for _fname in ("modelscombo_node.js", "freelatent_node.js",
                    "ezflex_service.js", "node_switch_group.js", "node_switch_master.js",
                    "main_control.js", "param_preset_control.js", "param_preset_output.js",
-                   "preview_any.js", "prompt_helper.js"):
+                   "preview_any.js", "prompt_helper.js",
+                   "media_loader.js", "media_out.js"):
         _routes.get("/extensions/Comfyui-EzFlex-Presets/" + _fname)(_serve_no_store(_fname))
 except Exception:
     pass
@@ -462,6 +463,7 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
 
 _register_preset_routes("EzFlex-ModelsCombo", "/models_combo/presets")
 _register_preset_routes("EzFlex-FreeLatent", "/freelatent/presets", with_ratios=True)
+_register_preset_routes("EzFlex-MediaLoader", "/media_loader/presets")
 
 
 # ComfyUI 校验节点输出类型时读的是「类 RETURN_TYPES」（execution.py validate），
@@ -3490,12 +3492,13 @@ except Exception:
 
 
 # ===== EzFlex-PromptHelper：提示词卡片合并节点 =====
-# 固定输入：clip(单)/image(批)/video(批)/audio(批)/model_3d(批)；
-# 动态输入 = 提示词卡片数 1:1（card_in_1..N，按顺序链接到提示词卡片）；
+# 输入：固定 clip(单 CLIP) + 动态「综合媒体」端口(red ANY，可接图像/视频/音频/3D 模型等，前端连接后自动补一个空槽)
+#   + 动态「提示词文本」输入 = 卡片数 1:1（card_in_1..N，按顺序链接到提示词卡片）；
 # 输出：固定「合并提示词」STRING（按卡片顺序拼接）+ 动态输出 = 卡片数 1:1（每卡一段 STRING）。
 # 复用 ModelsCombo/ParamPreset/PreviewAny 的动态端口经验：前端按卡片数增删/reuse socket、
 # 更新 origin_slot/target_slot，并 POST /prompt_helper/outputs 同步类 RETURN_TYPES/RETURN_NAMES。
 _PH_MAX_CARDS = 32
+_PH_MAX_MEDIA = 16
 
 
 def parse_prompt_cards(config):
@@ -3530,9 +3533,136 @@ def parse_prompt_cards(config):
             "modelType": item.get("modelType") or "text",
             "model": item.get("model") or "",
             "provider": item.get("provider") or "",
+            "apiUrl": item.get("apiUrl") or item.get("apiLink") or "",
+            "indent": float(item.get("indent") or 0),
+            "indentMode": item.get("indentMode") or "paragraph",
+            "useOptimized": bool(item.get("useOptimized")),
         })
     return cards
 
+
+def parse_prompt_optimize(config):
+    """把 PromptHelper 的 config JSON 里的「调用设置」(optimize) 对象解析出来（API/TextGenerate/llama）。"""
+    if isinstance(config, str):
+        if not config.strip():
+            return {"provider": "", "model": "", "apiUrl": "", "apiKey": "", "proxy": "", "skill": "", "textgen": {}, "llama": {}}
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError:
+            data = {}
+    else:
+        data = config or {}
+    if not isinstance(data, dict):
+        data = {}
+    o = data.get("optimize")
+    if not isinstance(o, dict):
+        o = {}
+    tg = o.get("textgen")
+    ll = o.get("llama")
+    return {
+        "provider": o.get("provider") or "",
+        "model": o.get("model") or "",
+        "apiUrl": o.get("apiUrl") or "",
+        "apiKey": o.get("apiKey") or "",
+        "proxy": o.get("proxy") or "",
+        "skill": o.get("skill") or "",
+        "autoMethod": o.get("autoMethod") or "",
+        "autoTextgen": bool(o.get("autoTextgen")),
+        "autoApi": bool(o.get("autoApi")),
+        "autoLlama": bool(o.get("autoLlama")),
+        "clearCache": bool(o.get("clearCache")),
+        "textgen": tg if isinstance(tg, dict) else {},
+        "llama": ll if isinstance(ll, dict) else {},
+    }
+
+
+def _ph_clip_generate(clip, prompt, tg, media=None):
+    """用已连接的 text-gen CLIP 按 TextGenerate 同款参数生成文本（供 run 期内自动优化）。
+    若连接的 CLIP 不支持文本生成（无 generate / tokenize 签名不兼容），抛清晰错误，便于排查。
+    media 字典可带 image/video/audio（来自综合媒体输入），随 prompt 一起喂给 text-gen CLIP（如 Qwen-VL/Gemma 可看图反推/扩写）。"""
+    if not hasattr(clip, "generate"):
+        raise ValueError(
+            "该 CLIP 不支持文本生成：TextGenerate 只对 Gemma/Qwen3-VL/flux2 等 text-gen 编码器生效；"
+            "普通 stable_diffusion 等 CLIP 没有 generate 方法。请改用正确的 text-gen CLIP，或换用「优化提示词 (API/lama)」。"
+        )
+    media = media or {}
+    img = media.get("image"); vid = media.get("video"); aud = media.get("audio")
+    use_tpl = bool(tg.get("use_default_template", True))
+    thinking = bool(tg.get("thinking", False))
+    try:
+        tokens = clip.tokenize(prompt, skip_template=not use_tpl, min_length=1, thinking=thinking, image=img, video=vid, audio=aud)
+    except TypeError:
+        try:
+            tokens = clip.tokenize(prompt, skip_template=not use_tpl, min_length=1, thinking=thinking)
+        except TypeError:
+            tokens = clip.tokenize(prompt)
+    do_sample = str(tg.get("sampling_mode", "on")) == "on"
+    seed = tg.get("seed")
+    if seed in (None, "", 0):
+        seed = None
+    gen = clip.generate(
+        tokens,
+        do_sample=do_sample,
+        max_length=int(tg.get("max_length", 512)),
+        temperature=float(tg.get("temperature", 0.7)),
+        top_k=int(tg.get("top_k", 64)),
+        top_p=float(tg.get("top_p", 0.95)),
+        min_p=float(tg.get("min_p", 0.05)),
+        repetition_penalty=float(tg.get("repetition_penalty", 1.05)),
+        presence_penalty=float(tg.get("presence_penalty", 0.0)),
+        seed=seed,
+    )
+    return clip.decode(gen)
+
+
+# ===== 按「调用设置」里的 CLIP 路径+类型 自行加载 text-gen CLIP（点击即用，像 llama 一样）=====
+_PH_CLIP_CACHE = {}
+
+
+def ph_resolve_model(p):
+    """把用户填的模型路径解析为真实绝对路径（safetensors/gguf/ckpt/pt/bin），支持绝对路径、相对 models 的子路径、仅文件名。"""
+    if not p:
+        return ""
+    p = p.strip().strip('"').strip("'")
+    if os.path.isfile(p):
+        return os.path.abspath(p)
+    base = os.path.basename(p)
+    for root in _ph_md_roots():
+        cand = os.path.join(root, p)
+        if os.path.isfile(cand):
+            return os.path.abspath(cand)
+        for dirpath, _dirs, files in os.walk(root):
+            if base in files:
+                return os.path.abspath(os.path.join(dirpath, base))
+    return ""
+
+
+def _ph_clip_instance(clip_path, clip_type):
+    key = (clip_path, clip_type)
+    if key in _PH_CLIP_CACHE:
+        return _PH_CLIP_CACHE[key]
+    import comfy.sd
+    ct = getattr(comfy.sd.CLIPType, str(clip_type or "stable_diffusion").upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
+    try:
+        clip = comfy.sd.load_clip(ckpt_paths=[clip_path],
+                                  embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                                  clip_type=ct, model_options={})
+    except Exception as e:
+        raise ValueError(f"加载 CLIP 失败：{e}（请确认是 text-gen 文本编码器且 CLIP 类型正确）") from e
+    _PH_CLIP_CACHE[key] = clip
+    return clip
+
+
+def ph_clear_model_cache():
+    """清空已加载的 CLIP / llama 模型缓存（调用后释放显存）。"""
+    try:
+        _PH_CLIP_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _LLAMA_CACHE.clear()
+    except Exception:
+        pass
 
 def _ph_html_to_text(html):
     """把卡片 contenteditable 的 HTML 转成纯文本（供合并提示词用）。"""
@@ -3556,6 +3686,63 @@ def _ph_media_count(value):
             return value.shape[0]
         return 1
     return 1
+
+
+def _ph_gather_media(kwargs):
+    """从 media_in_* 输入里挑一个 image / video / audio 供优化调用（仅执行期有真实值）。
+    兼容单张/批张量（tensor 或 list/tuple of tensor）：首个张量当 image，第二个当 video；
+    带 waveform/sample_rate 的 dict 当 audio；带 get_stream_source 的对象（VHS 视频/流）当 video。"""
+    img = vid = aud = None
+    tensors = []
+    for i in range(1, _PH_MAX_MEDIA + 1):
+        v = kwargs.get(f"media_in_{i}")
+        if v is None:
+            continue
+        items = v if isinstance(v, (list, tuple)) else [v]
+        for x in items:
+            if x is None:
+                continue
+            if isinstance(x, torch.Tensor):
+                tensors.append(x)
+            elif isinstance(x, dict) and ("waveform" in x or "sample_rate" in x):
+                if aud is None:
+                    aud = x
+            elif hasattr(x, "get_stream_source"):
+                if vid is None:
+                    vid = x
+    for t in tensors:
+        if img is None:
+            img = t
+        elif vid is None:
+            vid = t
+    return {"image": img, "video": vid, "audio": aud}
+
+
+def _ph_image_to_dataurl(tensor):
+    """把 IMAGE 张量编码成 base64 PNG data URL，供视觉模型（API/llama mmproj）看图。失败返回 ''。"""
+    try:
+        import io, base64
+        import numpy as np
+        from PIL import Image
+        t = tensor
+        if isinstance(t, torch.Tensor):
+            if t.ndim == 4:
+                t = t[0]
+            arr = t.squeeze().float().cpu().numpy()
+        else:
+            return ""
+        if arr.ndim == 3 and arr.shape[-1] in (3, 4):
+            arr = np.clip((arr - arr.min()) / max(float(arr.max() - arr.min()), 1e-6) * 255, 0, 255).astype("uint8")
+            img = Image.fromarray(arr)
+        elif arr.ndim == 2:
+            arr = np.clip((arr - arr.min()) / max(float(arr.max() - arr.min()), 1e-6) * 255, 0, 255).astype("uint8")
+            img = Image.fromarray(arr, "L")
+        else:
+            return ""
+        buf = io.BytesIO(); img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return ""
 
 
 def _ph_output_types(count):
@@ -3584,10 +3771,1256 @@ except Exception:
     pass
 
 
+def _ph_chat_completion(url, headers, body, proxy="", timeout=90):
+    """同步 OpenAI 兼容 chat/completions 请求（在线程池里跑，避免阻塞事件循环）。
+    proxy 非空时走该代理（http/https），空则强制直连（忽略系统代理，默认）。"""
+    import urllib.request, urllib.error, socket
+    data_b = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data_b, method="POST",
+                                 headers={"Content-Type": "application/json", **headers})
+    try:
+        if proxy:
+            ph = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        else:
+            ph = urllib.request.ProxyHandler({})   # 空 dict = 不使用系统代理，直连
+        opener = urllib.request.build_opener(ph)
+        with opener.open(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8")[:300]
+        except Exception:
+            pass
+        raise ValueError(f"API 返回错误 {e.code}（{e.reason}）：{detail or '无错误详情'}") from e
+    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+        suffix = f"（若需代理，请在「调用设置·API设置」填代理地址，如 http://127.0.0.1:7890）" if not proxy else ""
+        raise ValueError(f"无法连接 API 主机 {url}：网络超时或无法访问{suffix}。原始错误：{e}") from e
+
+
+# ===== 进程内 llama-cpp-python（用户 venv 已装 llama-cpp-python 时的本地推理）=====
+_LLAMA_CACHE = {}
+
+
+def _ph_llama_instance(model_path, mmproj, n_ctx, n_gpu_layers, n_batch):
+    key = (model_path, mmproj, n_ctx, n_gpu_layers, n_batch)
+    if key in _LLAMA_CACHE:
+        return _LLAMA_CACHE[key]
+    import llama_cpp
+    kw = dict(model_path=model_path, n_ctx=n_ctx, n_gpu_layers=n_gpu_layers, n_batch=n_batch, verbose=False)
+    if mmproj:
+        kw["mmproj"] = mmproj
+    llm = llama_cpp.Llama(**kw)
+    _LLAMA_CACHE[key] = llm
+    return llm
+
+
+def _ph_llama_chat(llm, prompt, skill, params, image_b64=None):
+    msgs = [{"role": "system", "content": skill or "You are a helpful assistant that rewrites and enhances the user's prompt."},
+            {"role": "user", "content": prompt}]
+    seed = int(params.get("seed", -1))
+    stop = (params.get("stop") or "").strip()
+    kw = dict(
+        messages=msgs,
+        max_tokens=int(params.get("max_tokens", 256)),
+        temperature=float(params.get("temperature", 0.7)),
+        top_p=float(params.get("top_p", 0.95)),
+        top_k=int(params.get("top_k", 40)),
+        repeat_penalty=float(params.get("repeat_penalty", 1.1)),
+        seed=seed,
+        stop=([s.strip() for s in stop.split(",") if s.strip()] if stop else None),
+    )
+    if image_b64:
+        try:
+            from PIL import Image
+            import io, base64, numpy as np
+            if image_b64.startswith("data:") and ";base64," in image_b64:
+                image_b64 = image_b64.split(";base64,", 1)[1]
+            img = Image.open(io.BytesIO(base64.b64decode(image_b64))).convert("RGB")
+            kw["images"] = [np.asarray(img)]
+        except Exception:
+            pass
+    resp = llm.create_chat_completion(**kw)
+    return resp["choices"][0]["message"]["content"]
+
+
+def _ph_optimize_impl(data):
+    """同步优化核心：route 与 run 期共用。data 含 method/prompt/skill/provider/model/apiUrl/apiKey/image + llama/textgen 配置。
+    返回优化后的文本；出错抛 ValueError（带可读信息）。image 为 base64 data URL，供视觉模型看图。"""
+    method = str((data or {}).get("method") or "api")
+    prompt = str((data or {}).get("prompt") or "")
+    if not prompt.strip():
+        raise ValueError("prompt 为空")
+    if method == "textgen":
+        # 从调用设置里配置的 CLIP 路径 + 类型自行加载 text-gen CLIP（点击即用，同 llama）。
+        tgcfg = (data or {}).get("textgen") or {}
+        clip_path = ph_resolve_model(str(tgcfg.get("clip_path") or "").strip())
+        if not clip_path:
+            raise ValueError("TextGenerate 需在「调用设置·TextGenerate设置」里填 CLIP 模型路径 + 类型，才能点击即用；或改回「运行期自动优化(TextGenerate)」用已连接的 CLIP 在工作流运行时生成。")
+        clip = _ph_clip_instance(clip_path, str(tgcfg.get("clip_type") or "stable_diffusion"))
+        return _ph_clip_generate(clip, prompt, tgcfg, {})
+
+    provider = str((data or {}).get("provider") or "")
+    model = str((data or {}).get("model") or "")
+    skill = str((data or {}).get("skill") or "").strip()
+    image = str((data or {}).get("image") or "").strip()   # base64 data URL / http url
+    llama = (data or {}).get("llama") or {}
+
+    HOST = {
+        "OpenAI": "https://api.openai.com/v1",
+        "DeepSeek": "https://api.deepseek.com/v1",
+        "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "Anthropic Claude": "https://api.anthropic.com/v1",
+        "SiliconFlow": "https://api.siliconflow.cn/v1",
+        "OpenRouter": "https://openrouter.ai/api/v1",
+        "Alibaba Qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "Moonshot Kimi": "https://api.moonshot.ai/v1",
+        "xAI Grok": "https://api.x.ai/v1",
+        "Mistral": "https://api.mistral.ai/v1",
+        "Groq": "https://api.groq.com/openai/v1",
+        "Ollama": "http://localhost:11434/v1",
+    }
+    is_anthropic = "Claude" in provider
+
+    # ---- llama：进程内 llama-cpp-python，否则走 llama.cpp 服务器 ----
+    if method == "llama":
+        llama_mode = str(llama.get("mode") or "local")
+        model_path = _ph_resolve_gguf(str(llama.get("model") or "").strip())
+        if llama_mode == "local" and model_path:
+            mmproj = _ph_resolve_gguf(str(llama.get("mmproj") or "").strip())
+            llm = _ph_llama_instance(model_path, mmproj, int(llama.get("n_ctx", 2048)), int(llama.get("n_gpu_layers", 0)), int(llama.get("n_batch", 512)))
+            return _ph_llama_chat(llm, prompt, skill, llama, image_b64=image or None)
+        server = str(llama.get("server") or "").strip() or "http://127.0.0.1:8080"
+        url = server.rstrip("/") + "/v1/chat/completions"
+        headers, api_key = {}, ""
+
+    # ---- api：OpenAI 兼容 或 Anthropic messages ----
+    else:
+        api_url = str((data or {}).get("apiUrl") or "").strip()
+        api_key = str((data or {}).get("apiKey") or "").strip()
+        if not api_url:
+            api_url = HOST.get(provider, "")
+        if not api_url:
+            raise ValueError("请填写 API 主机地址（如 https://api.deepseek.com/v1）")
+        base = api_url.rstrip("/")
+        if is_anthropic:
+            url = base + "/messages" if not base.endswith("/messages") else base
+            headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"} if api_key else {"anthropic-version": "2023-06-01"}
+        else:
+            url = base + "/chat/completions" if not base.endswith("/chat/completions") else base
+            headers = {"Authorization": "Bearer " + api_key} if api_key else {}
+
+    system = skill or "You are a helpful assistant that rewrites and enhances the user's prompt for a text/image/video model. Output only the enhanced prompt."
+    if is_anthropic:
+        content = []
+        if image:
+            media_type, b64 = _ph_split_data_url(image)
+            content.append({"type": "image", "source": {"type": "base64", "media_type": media_type or "image/png", "data": b64}})
+        content.append({"type": "text", "text": prompt})
+        body = {"model": model or "claude-sonnet-4", "max_tokens": 1024, "messages": [{"role": "user", "content": content}]}
+    else:
+        user_content = []
+        if image:
+            user_content.append({"type": "image_url", "image_url": {"url": image}})
+        user_content.append({"type": "text", "text": prompt})
+        body = {
+            "model": model or "gpt-4o-mini",
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_content}],
+            "temperature": 0.7,
+        }
+
+    _proxy = str((data or {}).get("proxy") or "").strip()   # 可选代理（http/socks5）
+    result = _ph_chat_completion(url, headers, body, proxy=_proxy)
+    if is_anthropic:
+        return str(result["content"][0]["text"])
+    return str(result["choices"][0]["message"]["content"])
+
+
+def _ph_split_data_url(url):
+    """把 data:<mime>;base64,<data> 拆成 (media_type, base64)；非 data: 返回 ('', url)。"""
+    if url.startswith("data:") and ";base64," in url:
+        head, b64 = url.split(";base64,", 1)
+        return head.replace("data:", ""), b64
+    return "", url
+
+
+async def _ph_optimize(req):
+    """按 method 优化提示词：api / llama 走 OpenAI 兼容 HTTP；textgen 需在执行期用已连接 CLIP。"""
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    try:
+        import asyncio
+        text = await asyncio.to_thread(_ph_optimize_impl, data or {})
+    except ValueError as e:
+        msg = str(e)
+        status = 400 if ("需在节点执行" in msg or "未填写" in msg or "为空" in msg or "请填写" in msg) else 502
+        return _web.json_response({"error": msg}, status=status)
+    except Exception as e:
+        return _web.json_response({"error": f"调用失败：{e}"}, status=502)
+    if (data or {}).get("clearCache"):
+        ph_clear_model_cache()
+    return _web.json_response({"ok": True, "text": text})
+
+
+try:
+    PromptServer.instance.routes.post("/prompt_helper/optimize")(_ph_optimize)
+except Exception:
+    pass
+
+
+# ===== skill 文件：扫描 models 根目录下的 skills 文件夹（md 文件，自动创建）=====
+_SKILLS_ROOT_CACHE = None
+
+
+def ph_skills_dirs():
+    global _SKILLS_ROOT_CACHE
+    if _SKILLS_ROOT_CACHE is not None:
+        return _SKILLS_ROOT_CACHE
+    bases = []
+    seen = set()
+    # 实例 models 根
+    try:
+        for r in (folder_paths.get_folder_paths("models") or []):
+            if r and os.path.normpath(r) not in seen:
+                seen.add(os.path.normpath(r)); bases.append(r)
+    except Exception:
+        pass
+    # 共享 models 派生：LLM 等注册目录的父级就是共享 models 基目录（如 ...\ComfyUI-Shared\models）
+    try:
+        for r in (folder_paths.get_folder_paths("LLM") or []):
+            par = os.path.dirname(r)
+            if par and os.path.normpath(par) not in seen:
+                seen.add(os.path.normpath(par)); bases.append(par)
+    except Exception:
+        pass
+    if not bases:
+        try:
+            if folder_paths.models_dir:
+                bases = [folder_paths.models_dir]
+        except Exception:
+            pass
+    if not bases:
+        bases = [os.path.abspath("models")]
+    dirs = [os.path.join(b, "skills") for b in bases if b]
+    if not dirs:
+        dirs = [os.path.join(bases[0], "skills")]
+    _SKILLS_ROOT_CACHE = dirs
+    return dirs
+
+
+def ph_ensure_skills_dir():
+    dirs = ph_skills_dirs()
+    for d in dirs:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+    return dirs[0] if dirs else None
+
+
+async def _ph_skills(req):
+    seen = set()
+    out = []
+    for d in ph_skills_dirs():
+        if not os.path.isdir(d):
+            continue
+        dabs = os.path.abspath(d)
+        for dirpath, dirs, files in os.walk(dabs):
+            dirs[:] = [x for x in dirs if x.lower() not in ("references", "reference", "assets")]
+            folder_rel = os.path.relpath(dirpath, dabs).replace("\\", "/")
+            for entry in ("SKILL.cn.md", "SKILL.md"):
+                if entry not in files:
+                    continue
+                full = os.path.join(dirpath, entry)
+                if full in seen:
+                    continue
+                seen.add(full)
+                rel = os.path.relpath(full, dabs).replace("\\", "/")
+                label = (folder_rel or os.path.splitext(entry)[0]) + (" · 中文" if "cn" in entry else " · 英文")
+                out.append({"name": label, "file": rel, "path": rel})
+    out.sort(key=lambda x: (x["file"] or "").lower())
+    return _web.json_response({"skills": out, "dir": ph_ensure_skills_dir()})
+
+
+async def _ph_skill_content(req):
+    fn = (req.query.get("file") or "").strip().lstrip("/")
+    if (not fn) or not fn.lower().endswith(".md") or ".." in fn or ":" in fn or fn.startswith("/") or fn.startswith("\\"):
+        return _web.json_response({"error": "bad file"}, status=400)
+    for d in ph_skills_dirs():
+        dabs = os.path.abspath(d)
+        p = os.path.abspath(os.path.join(dabs, fn))
+        try:
+            if os.path.commonpath([dabs, p]) != dabs:
+                continue
+        except Exception:
+            continue
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as fh:
+                    return _web.json_response({"name": os.path.splitext(os.path.basename(fn))[0], "text": fh.read()})
+            except Exception as e:
+                return _web.json_response({"error": str(e)}, status=500)
+    return _web.json_response({"error": "not found"}, status=404)
+
+
+def _ph_media_input_dirs():
+    from urllib.parse import quote as _q
+    roots, seen = [], set()
+    for name, fn in (("input", None), (None, "input_directory"), (None, "get_input_directory")):
+        try:
+            if fn:
+                v = getattr(folder_paths, fn)()
+            elif name:
+                v = folder_paths.get_folder_paths(name) or []
+            else:
+                v = None
+            items = v if isinstance(v, (list, tuple)) else ([v] if v else [])
+            for r in items:
+                if r and os.path.normpath(r) not in seen:
+                    seen.add(os.path.normpath(r)); roots.append(r)
+        except Exception:
+            pass
+    return roots
+
+
+async def _ph_media_files(req):
+    ext_img = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+    ext_vid = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+    ext_aud = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus"}
+    ext_mod = {".obj", ".glb", ".gltf", ".fbx", ".stl"}
+    from urllib.parse import quote as _q
+    out = []
+    for root in _ph_media_input_dirs():
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            rel = os.path.relpath(dirpath, root).replace("\\", "/")
+            for f in sorted(files):
+                ext = os.path.splitext(f)[1].lower()
+                typ = "image" if ext in ext_img else ("video" if ext in ext_vid else ("audio" if ext in ext_aud else ("model" if ext in ext_mod else None)))
+                if not typ:
+                    continue
+                sub = "" if rel == "." else rel
+                url = "/view?filename=" + _q(f) + ("&subfolder=" + _q(sub) if sub else "") + "&type=input"
+                path = (rel + "/" + f) if rel != "." else f
+                out.append({"name": f, "path": path, "type": typ, "url": url})
+    return _web.json_response({"media": out})
+
+
+def _ph_userdata_file():
+    try:
+        import folder_paths as fp
+        base = getattr(fp, 'user_directory', None) or os.path.join(os.path.dirname(getattr(fp, 'models_dir', '')), 'user')
+        if base:
+            return os.path.join(base, 'ezflex_custom_providers.json')
+    except Exception:
+        pass
+    return ''
+
+
+async def _ph_custom_load(req):
+    fn = _ph_userdata_file(); arr = []
+    if fn and os.path.isfile(fn):
+        try:
+            with open(fn, 'r', encoding='utf-8') as fh:
+                arr = json.loads(fh.read())
+        except Exception:
+            arr = []
+    if not isinstance(arr, list): arr = []
+    return _web.json_response({"providers": arr})
+
+
+async def _ph_custom_save(req):
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    fn = _ph_userdata_file()
+    if not fn:
+        return _web.json_response({"error": "no userdata"}, status=500)
+    rec = { "name": (data.get("name") or "").strip(), "model": (data.get("model") or "").strip(),
+            "apiUrl": (data.get("apiUrl") or "").strip(), "apiKey": (data.get("apiKey") or "").strip(),
+            "proxy": (data.get("proxy") or "").strip() }
+    if not rec["name"]:
+        return _web.json_response({"error": "请填写厂商名"}, status=400)
+    try:
+        arr = []
+        if os.path.isfile(fn):
+            try:
+                with open(fn, 'r', encoding='utf-8') as fh: arr = json.loads(fh.read())
+            except Exception: arr = []
+        if not isinstance(arr, list): arr = []
+        idx = next((i for i, x in enumerate(arr) if (x.get("name") or "") == rec["name"]), -1)
+        if idx >= 0: arr[idx] = rec
+        else: arr.append(rec)
+        with open(fn, 'w', encoding='utf-8') as fh: json.dump(arr, fh, ensure_ascii=False, indent=2)
+        return _web.json_response({"ok": True, "providers": arr})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+try:
+    PromptServer.instance.routes.get("/prompt_helper/skills")(_ph_skills)
+    PromptServer.instance.routes.get("/prompt_helper/skills/content")(_ph_skill_content)
+    PromptServer.instance.routes.get("/prompt_helper/media_files")(_ph_media_files)
+    PromptServer.instance.routes.get("/prompt_helper/custom_providers")(_ph_custom_load)
+    PromptServer.instance.routes.post("/prompt_helper/custom_providers")(_ph_custom_save)
+except Exception:
+    pass
+
+
+# ===== GGUF 模型：扫描「实例 models」+「共享 models」(extra_model_paths 注册的 LLM 等) 供 llama 选取/解析 =====
+def _ph_md_roots():
+    roots = []
+    seen = set()
+    cand = ("models", "LLM", "llm", "gguf", "diffusion_models", "text_encoders", "clip", "clip_vision", "unet")
+    for name in cand:
+        try:
+            for r in (folder_paths.get_folder_paths(name) or []):
+                if r and os.path.normpath(r) not in seen:
+                    seen.add(os.path.normpath(r)); roots.append(r)
+        except Exception:
+            continue
+    # 兜底：把 folder_names_and_paths 里名称含 llm/gguf 的注册目录也纳入
+    try:
+        for name in folder_paths.folder_names_and_paths:
+            if ("llm" in name.lower() or "gguf" in name.lower()) and name not in cand:
+                try:
+                    for r in (folder_paths.get_folder_paths(name) or []):
+                        if r and os.path.normpath(r) not in seen:
+                            seen.add(os.path.normpath(r)); roots.append(r)
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    if not roots:
+        try:
+            if folder_paths.models_dir:
+                roots = [folder_paths.models_dir]
+        except Exception:
+            pass
+    if not roots:
+        roots = [os.path.abspath("models")]
+    return [r for r in roots if r]
+
+
+def _ph_resolve_gguf(p):
+    """把用户填的 GGUF 路径解析为真实绝对路径：支持绝对路径、相对任一 models/LLM 根的子路径、仅文件名。找不到返回 ''。"""
+    if not p:
+        return ""
+    p = p.strip().strip('"').strip("'")
+    if os.path.isfile(p):
+        return os.path.abspath(p)
+    base = os.path.basename(p)
+    for root in _ph_md_roots():
+        cand = os.path.join(root, p)
+        if os.path.isfile(cand):
+            return os.path.abspath(cand)
+        for dirpath, _dirs, files in os.walk(root):
+            if base in files:
+                return os.path.abspath(os.path.join(dirpath, base))
+    return ""
+
+
+async def _ph_llama_models(req):
+    """列出共享 models 文件夹下所有 .gguf（相对每个根目录的路径），供前端像选模型一样选取。"""
+    seen = set()
+    out = []
+    for root in _ph_md_roots():
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                if not fn.lower().endswith(".gguf"):
+                    continue
+                full = os.path.abspath(os.path.join(dirpath, fn))
+                if full in seen:
+                    continue
+                seen.add(full)
+                rel = os.path.relpath(full, os.path.abspath(root))
+                out.append({"path": rel.replace("\\", "/"), "name": fn})
+    out.sort(key=lambda x: (x["name"] or "").lower())
+    return _web.json_response({"models": out})
+
+
+async def _ph_llama_resolve(req):
+    p = (req.query.get("path") or "").strip()
+    r = _ph_resolve_gguf(p)
+    if not r:
+        return _web.json_response({"error": "未找到该 GGUF 模型"}, status=404)
+    return _web.json_response({"ok": True, "path": r})
+
+
+async def _ph_clip_models(req):
+    """列出共享/实例 models 下的 .safetensors/.ckpt/.pt 等文本编码器文件，供 TextGenerate 选 CLIP 模型。"""
+    seen = set()
+    out = []
+    for root in _ph_md_roots():
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                lf = fn.lower()
+                if not lf.endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin")):
+                    continue
+                full = os.path.abspath(os.path.join(dirpath, fn))
+                if full in seen:
+                    continue
+                seen.add(full)
+                rel = os.path.relpath(full, os.path.abspath(root)).replace("\\", "/")
+                out.append({"path": rel, "name": fn})
+    out.sort(key=lambda x: (x["name"] or "").lower())
+    return _web.json_response({"models": out})
+
+
+try:
+    PromptServer.instance.routes.get("/prompt_helper/llama_models")(_ph_llama_models)
+    PromptServer.instance.routes.get("/prompt_helper/llama_resolve")(_ph_llama_resolve)
+    PromptServer.instance.routes.get("/prompt_helper/clip_models")(_ph_clip_models)
+except Exception:
+    pass
+
+
+# ===== EzFlex-MediaLoader / EzFlex-MediaOut：媒体素材加载与拆分 =====
+# 数据模型（MediaLoader config widget）：
+#   { groups:[{id,name,cards:[{id,name,items:[{id,files:[{id,name,path,subfolder,dir,type}]}]}]}],
+#     currentGroupId, currentPreset }
+#   - 「素材卡片」= 一行卡片，对应 MediaLoader 的一个深红输出端口（标签 = 分组名_卡片名）。
+#   - 卡片内 items 是网格里的媒体卡；每张媒体卡可含 1..N 个文件（批量堆叠）。
+#   - MediaLoader 运行期按「分组顺序→卡片顺序」加载每张卡片内全部文件，
+#     输出为一个带 _kind=ezflex_media_card 的卡片对象（files 为已加载值列表）。
+#   - MediaOut 接收该卡片对象，按文件逐个拆出真实类型的输出端口。
+
+MEDIA_MAX_CARDS = 64
+
+_MEDIA_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+_MEDIA_VID_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
+_MEDIA_AUD_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma"}
+_MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".3ds", ".dae", ".blend"}
+
+
+def _media_kind(name):
+    """按文件后缀推断媒体类型：image / video / audio / model_3d，无则返回 'other'。"""
+    ext = os.path.splitext(name or "")[1].lower()
+    if ext in _MEDIA_IMG_EXTS:
+        return "image"
+    if ext in _MEDIA_VID_EXTS:
+        return "video"
+    if ext in _MEDIA_AUD_EXTS:
+        return "audio"
+    if ext in _MEDIA_3D_EXTS:
+        return "model_3d"
+    return "other"
+
+
+MEDIA_TO_COMFY = {
+    "image": "IMAGE", "video": "VIDEO", "audio": "AUDIO",
+    "model_3d": "MODEL_3D", "model": "MODEL_3D", "3d": "MODEL_3D",
+    "other": "STRING", "text": "STRING",
+}
+
+
+def _ml_resolve(path):
+    """把相对 input 目录的路径解析为绝对路径（支持子目录）；找不到返回 ''。"""
+    if not path:
+        return ""
+    try:
+        for root in _ph_media_input_dirs():
+            p = os.path.join(root, path)
+            if os.path.isfile(p):
+                return os.path.abspath(p)
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    except Exception:
+        pass
+    return ""
+
+
+def _ml_load_image(path):
+    from PIL import Image
+    i = Image.open(path).convert("RGB")
+    arr = np.array(i).astype(np.float32) / 255.0
+    return torch.from_numpy(arr)[None,]
+
+
+def _ml_load_video(path):
+    import av
+    frames = []
+    with av.open(path, mode="r") as container:
+        v = next((s for s in container.streams if s.type == "video"), None)
+        if v is None:
+            return []
+        for frame in container.decode(v):
+            arr = frame.to_ndarray(format="rgb24")
+            frames.append(torch.from_numpy(arr.astype(np.float32) / 255.0)[None,])
+    return frames
+
+
+def _ml_load_audio(path):
+    try:
+        import av
+        import numpy as np
+        rate = 44100
+        chunks = []
+        with av.open(path, mode="r") as container:
+            s = next((x for x in container.streams if x.type == "audio"), None)
+            if s is None:
+                return {"waveform": torch.zeros(0), "sample_rate": 44100}
+            if s.rate:
+                rate = int(s.rate)
+            for frame in container.decode(s):
+                arr = frame.to_ndarray()
+                if arr.ndim == 1:
+                    arr = arr[None, :]
+                chunks.append(arr)
+        if not chunks:
+            return {"waveform": torch.zeros(0), "sample_rate": rate}
+        cat = np.concatenate(chunks, axis=1).astype(np.float32) / 32768.0
+        return {"waveform": torch.from_numpy(cat), "sample_rate": rate}
+    except Exception:
+        return {"waveform": torch.zeros(0), "sample_rate": 44100}
+
+
+def _ml_load_3d(path):
+    from urllib.parse import quote as _q
+    return {
+        "path": os.path.abspath(path),
+        "name": os.path.basename(path),
+        "kind": "model_3d",
+        "url": "/preview_any/serve_3d?path=" + _q(os.path.abspath(path)),
+    }
+
+
+_TEXT_EXTS = {".txt", ".md", ".json", ".csv", ".log", ".py", ".js", ".html", ".css", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".sh", ".bat", ".ts", ".tsx", ".jsx", ".toml", ".srt", ".ass", ".vtt"}
+_TEXT_CAP = 1024 * 1024
+
+
+def _ml_read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            data = f.read(_TEXT_CAP)
+        return data
+    except Exception:
+        return path
+
+
+def _ml_load_media(path, ftype):
+    ftype = (ftype or _media_kind(path) or "").lower()
+    if ftype == "image":
+        return _ml_load_image(path)
+    if ftype == "video":
+        return _ml_load_video(path)
+    if ftype == "audio":
+        return _ml_load_audio(path)
+    if ftype in ("model_3d", "model", "3d"):
+        return _ml_load_3d(path)
+    if os.path.splitext(path)[1].lower() in _TEXT_EXTS:
+        return _ml_read_text(path)
+    return path
+
+
+def parse_media_cards(config):
+    """把 MediaLoader config 解析成按「分组→卡片」顺序排序的卡片列表（带 label）。"""
+    if isinstance(config, str):
+        if not config.strip():
+            return []
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError:
+            return []
+    else:
+        data = config
+    if isinstance(data, dict):
+        data = data.get("groups") or []
+    if not isinstance(data, list):
+        return []
+    cards_out = []
+    for g in data:
+        if not isinstance(g, dict):
+            continue
+        gname = (g.get("name") or "").strip() or "分组"
+        for c in (g.get("cards") or []):
+            if not isinstance(c, dict):
+                continue
+            items = []
+            for it in (c.get("items") or []):
+                if not isinstance(it, dict):
+                    continue
+                files = []
+                for f in (it.get("files") or []):
+                    if not isinstance(f, dict):
+                        continue
+                    nm = f.get("name") or ""
+                    files.append({
+                        "id": f.get("id"),
+                        "name": nm,
+                        "path": f.get("path") or "",
+                        "subfolder": f.get("subfolder") or "",
+                        "dir": f.get("dir") or "input",
+                        "type": f.get("type") or _media_kind(nm) or "other",
+                    })
+                items.append({"id": it.get("id"), "files": files})
+            cname = (c.get("name") or "").strip() or "素材卡片"
+            cards_out.append({
+                "id": c.get("id"),
+                "name": cname,
+                "group": gname,
+                "label": gname + "_" + cname,
+                "items": items,
+            })
+    return cards_out
+
+
+def _card_labels(cards):
+    return [c.get("label") or (c.get("group") + "_" + c.get("name")) for c in cards]
+
+
+async def _ml_files(req):
+    """列出 input 目录下的媒体文件（含子目录），供 MediaLoader 浏览弹窗选取。"""
+    from urllib.parse import quote as _q
+    out = []
+    for root in _ph_media_input_dirs():
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            rel = os.path.relpath(dirpath, root).replace("\\", "/")
+            for fn in sorted(files):
+                typ = _media_kind(fn)
+                if typ == "other":
+                    continue
+                sub = "" if rel == "." else rel
+                path = (rel + "/" + fn) if rel != "." else fn
+                full = os.path.join(dirpath, fn)
+                try:
+                    size = os.path.getsize(full)
+                    mtime = _fmt_mtime(os.path.getmtime(full))
+                except Exception:
+                    size, mtime = 0, ""
+                url = "/view?type=input&filename=" + _q(fn) + ("&subfolder=" + _q(sub) if sub else "")
+                out.append({
+                    "name": fn, "path": path, "subfolder": sub, "dir": "input",
+                    "type": typ, "url": url, "size": size, "mtime": mtime,
+                })
+    return _web.json_response({"files": out})
+
+
+async def _ml_outputs(req):
+    try:
+        data = await req.json()
+        labels = data.get("labels") or []
+        MediaLoaderNode.RETURN_TYPES = tuple("*" for _ in labels)
+        MediaLoaderNode.RETURN_NAMES = tuple(labels)
+        return _web.json_response({"ok": True, "names": labels})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+async def _mo_outputs(req):
+    try:
+        data = await req.json()
+        mode = str(data.get("mode") or "split")
+        files = data.get("files") or []
+        off = data.get("off") or []
+        if not isinstance(off, list):
+            off = []
+        offset = {str(x) for x in off}
+        if mode == "split":
+            types = [MEDIA_TO_COMFY.get(str(f.get("type") or "other").lower(), "STRING") for f in files]
+            names = [f.get("name") or f"文件 {i + 1}" for i, f in enumerate(files)]
+        else:
+            groups = data.get("groups") or []
+            rows = _config_to_rows(groups)
+            groupings = _mo_groupings(mode, off, rows)
+            if mode == "group":
+                # 分组模式：把空组也去掉后，按分组标签输出
+                types = [g["type"] for g in groupings]
+                names = [g["name"] for g in groupings]
+            else:
+                types = [g["type"] for g in groupings]
+                names = [g["name"] for g in groupings]
+        MediaOutNode.RETURN_TYPES = tuple(types)
+        MediaOutNode.RETURN_NAMES = tuple(names)
+        return _web.json_response({"ok": True, "types": types, "names": names})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+def _mout_parse_off(config):
+    """解析 MediaOut 局部禁用的文件 id 集合（config = {"off":[ids]}）。"""
+    if isinstance(config, str):
+        if not config.strip():
+            return {}
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError:
+            return {}
+    else:
+        data = config or {}
+    if not isinstance(data, dict):
+        return {}
+    off = data.get("off") or []
+    if not isinstance(off, list):
+        off = []
+    return {str(x): True for x in off}
+
+
+def _mout_mode(config):
+    """MediaOut 输出模式：split / card / row / group。"""
+    if isinstance(config, str):
+        if not config.strip():
+            return "split"
+        try:
+            data = json.loads(config)
+        except json.JSONDecodeError:
+            return "split"
+    else:
+        data = config or {}
+    if isinstance(data, dict):
+        m = str(data.get("mode") or "split")
+        if m in ("card", "row", "group"):
+            return m
+    return "split"
+
+
+def _mo_one(files, name):
+    """给定一个输出分组的文件列表，算出端口类型：单文件用真实类型，多文件用 *。"""
+    files = files or []
+    if len(files) == 1:
+        t = MEDIA_TO_COMFY.get(str(files[0].get("type") or "other").lower(), "STRING")
+    else:
+        t = "*"
+    return {"name": name or "素材", "type": t, "files": files}
+
+
+def _mo_groupings(mode, off, rows):
+    """把 rows（素材卡片组结构）按 mode 归组，返回 [{name,type,files}]。"""
+    offset = {str(x) for x in (off or [])}
+    def keep(f): return f and str(f.get("id")) not in offset
+    out = []
+    if mode == "card":
+        for row in rows:
+            for it in (row.get("items") or []):
+                files = [f for f in (it.get("files") or []) if keep(f)]
+                if not files:
+                    continue
+                out.append(_mo_one(files, files[0].get("name") or "素材"))
+    elif mode == "row":
+        for row in rows:
+            files = []
+            for it in (row.get("items") or []):
+                files.extend([f for f in (it.get("files") or []) if keep(f)])
+            if not files:
+                continue
+            out.append(_mo_one(files, row.get("label") or "素材卡片组"))
+    elif mode == "group":
+        byg, order = {}, []
+        for row in rows:
+            g = row.get("group") or "分组"
+            if g not in byg:
+                byg[g] = []; order.append(g)
+            byg[g].append(row)
+        for g in order:
+            files = []
+            for row in byg[g]:
+                for it in (row.get("items") or []):
+                    files.extend([f for f in (it.get("files") or []) if keep(f)])
+            if not files:
+                continue
+            out.append(_mo_one(files, g))
+    return out
+
+
+def _config_to_rows(groups):
+    """把前端 config 的 groups（分组→素材卡片组→单个卡片→批量卡片）转成 rows 结构（含 label）。"""
+    rows = []
+    for grp in (groups or []):
+        if not isinstance(grp, dict):
+            continue
+        gname = (grp.get("name") or "").strip() or "分组"
+        for c in (grp.get("cards") or []):
+            if not isinstance(c, dict):
+                continue
+            items = []
+            for it in (c.get("items") or []):
+                if not isinstance(it, dict):
+                    continue
+                files = []
+                for f in (it.get("files") or []):
+                    if not isinstance(f, dict):
+                        continue
+                    nm = f.get("name") or ""
+                    files.append({"id": f.get("id"), "name": nm,
+                                  "type": f.get("type") or _media_kind(nm) or "other"})
+                items.append({"id": it.get("id"), "files": files})
+            cname = (c.get("name") or "").strip() or "素材卡片组"
+            rows.append({"group": gname, "cardId": c.get("id"), "label": gname + "_" + cname, "items": items})
+    return rows
+
+
+def _mout_flatten(card):
+    """把 MediaLoader 卡片对象 / 单值 / 列表 统一展开成文件描述符列表。"""
+    if card is None:
+        return []
+    if isinstance(card, dict) and card.get("_kind") == "ezflex_media_card":
+        return card.get("files") or []
+    if isinstance(card, (list, tuple)):
+        out = []
+        for i, x in enumerate(card):
+            if isinstance(x, dict) and "value" in x:
+                out.append(x)
+            else:
+                out.append({"id": f"f{i}", "name": getattr(x, "name", None) or f"文件 {i + 1}",
+                            "type": _media_kind(getattr(x, "name", None) or "") or "other", "value": x})
+        return out
+    if isinstance(card, dict) and ("value" in card or "type" in card):
+        return [card]
+    return [{"id": "f0", "name": "文件", "type": "other", "value": card}]
+
+
+def _ml_media_root():
+    roots = _ph_media_input_dirs()
+    return roots[0] if roots else ""
+
+
+def _media_safe(name):
+    name = os.path.basename((name or "").replace("\\", "/")).strip()
+    name = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff()（）\s]+", "_", name)
+    return name
+
+
+async def _ml_upload(req):
+    """接收拖拽上传的多媒体文件，保存到 ComfyUI input 目录，返回可加入素材卡片的文件描述。"""
+    try:
+        root = _ml_media_root()
+        if not root:
+            return _web.json_response({"error": "no input dir"}, status=500)
+        from urllib.parse import quote as _q
+        results = []
+        post = await req.post()
+        for val in post.getall("files", []):
+            if not (hasattr(val, "filename") and hasattr(val, "file")):
+                continue
+            name = _media_safe(val.filename)
+            if not name:
+                continue
+            data = val.file.read() if hasattr(val.file, "read") else val.file
+            dest = os.path.join(root, name)
+            with open(dest, "wb") as fh:
+                fh.write(data)
+            typ = _media_kind(name)
+            try:
+                size = os.path.getsize(dest)
+                mtime = _fmt_mtime(os.path.getmtime(dest))
+            except Exception:
+                size, mtime = 0, ""
+            results.append({
+                "name": name, "path": name, "subfolder": "", "dir": "input",
+                "type": typ, "size": size, "mtime": mtime,
+                "url": "/view?type=input&filename=" + _q(name),
+            })
+        return _web.json_response({"files": results})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+def _ml_roots():
+    """返回可供浏览的根目录：ComfyUI input 目录 + Windows 各盘符 + 常见目录。"""
+    roots = []
+    seen = set()
+    inp = _ml_media_root()
+    if inp:
+        roots.append({"name": "input", "path": inp})
+        seen.add(os.path.normpath(inp))
+    if os.name == "nt":
+        import string
+        for c in string.ascii_uppercase:
+            p = c + ":\\"
+            try:
+                if os.path.exists(p):
+                    np = os.path.normpath(p)
+                    if np not in seen:
+                        seen.add(np); roots.append({"name": c + ":\\", "path": p})
+            except Exception:
+                pass
+        for p in ("D:/storge/EdgeDownload", "D:/storge"):
+            if os.path.isdir(p):
+                np = os.path.normpath(p)
+                if np not in seen:
+                    seen.add(np); roots.append({"name": "EdgeDownload" if p.endswith("EdgeDownload") else "storge", "path": p})
+    else:
+        for p in ("/", os.path.expanduser("~")):
+            if os.path.isdir(p):
+                np = os.path.normpath(p)
+                if np not in seen:
+                    seen.add(np); roots.append({"name": p, "path": p})
+    return roots
+
+
+async def _ml_browse(req):
+    """浏览任意目录（默认 input）：返回子目录、媒体文件、父级与可用盘符。"""
+    from urllib.parse import quote as _q
+    path = (req.query.get("path") or "").strip()
+    if not path:
+        path = _ml_media_root()
+    try:
+        path = os.path.abspath(path)
+    except Exception:
+        path = _ml_media_root()
+    if not path or not os.path.isdir(path):
+        return _web.json_response({"error": "not a dir", "path": path}, status=404)
+    dirs, files = [], []
+    try:
+        for n in os.listdir(path):
+            full = os.path.join(path, n)
+            try:
+                if os.path.isdir(full):
+                    dirs.append({"name": n, "path": full})
+                else:
+                    typ = _media_kind(n)
+                    if typ == "other":
+                        continue
+                    rel = os.path.relpath(full, path).replace("\\", "/")
+                    try:
+                        size = os.path.getsize(full); mtime = _fmt_mtime(os.path.getmtime(full))
+                    except Exception:
+                        size, mtime = 0, ""
+                    files.append({"name": n, "path": full, "type": typ, "size": size, "mtime": mtime,
+                                  "url": ""})
+            except Exception:
+                continue
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+    dirs.sort(key=lambda x: (x["name"] or "").lower())
+    files.sort(key=lambda x: (x["name"] or "").lower())
+    parent = os.path.dirname(path)
+    return _web.json_response({"path": path, "parent": parent, "name": os.path.basename(path) or path,
+                               "dirs": dirs, "files": files, "roots": _ml_roots()})
+
+
+async def _ml_serve(req):
+    """按路径流式返回本地文件（本地工具用途，仅只读须存在的文件）；相对路径按 input 目录解析。"""
+    path = (req.query.get("path") or "").strip()
+    abs_path = path if os.path.isabs(path) else _ml_resolve(path)
+    if not abs_path or not os.path.isfile(abs_path):
+        return _web.Response(status=404, text="not found")
+    try:
+        return _web.FileResponse(abs_path, headers={"Cache-Control": "no-store"})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+async def _ml_open(req):
+    """在系统文件管理器中打开素材文件所在目录。"""
+    try:
+        data = await req.json()
+        path = (data.get("path") or "").strip()
+        abs_ = _ml_resolve(path)
+        if not abs_ or not os.path.exists(abs_):
+            return _web.json_response({"error": "file not found"}, status=404)
+        folder = os.path.dirname(os.path.abspath(abs_))
+        import subprocess
+        import sys
+        if sys.platform.startswith("win"):
+            try:
+                subprocess.Popen(["explorer", "/select,", os.path.abspath(abs_)])
+            except Exception:
+                os.startfile(folder)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", os.path.abspath(abs_)])
+        else:
+            subprocess.Popen(["xdg-open", folder])
+        return _web.json_response({"ok": True})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+async def _ml_save_as(req):
+    """把素材文件另存到用户挑选的目录（dest 由前端调 pick_folder 得到）。"""
+    try:
+        data = await req.json()
+        path = (data.get("path") or "").strip()
+        dest = (data.get("dest") or "").strip()
+        abs_ = _ml_resolve(path)
+        if not abs_ or not os.path.isfile(abs_):
+            return _web.json_response({"error": "file not found"}, status=404)
+        if not dest or not os.path.isdir(dest):
+            return _web.json_response({"error": "bad dest"}, status=400)
+        import shutil
+        target = os.path.join(dest, os.path.basename(abs_))
+        shutil.copy2(abs_, target)
+        return _web.json_response({"ok": True, "dest": target})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+async def _ml_pick_folder(req):
+    """弹 Windows 原生「选择文件夹」对话框（在线程里跑，避免阻塞事件循环并保证置顶）。"""
+    def _pick():
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            base = folder_paths.get_input_directory() if hasattr(folder_paths, "get_input_directory") else ""
+            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True); root.lift()
+            path = filedialog.askdirectory(initialdir=base, title="选择另存目录")
+            root.destroy()
+            return path
+        except Exception:
+            return ""
+    try:
+        import asyncio
+        path = await asyncio.to_thread(_pick)
+        return _web.json_response({"ok": bool(path), "path": os.path.normpath(path) if path else ""})
+    except Exception as e:
+        return _web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+try:
+    PromptServer.instance.routes.get("/media_loader/files")(_ml_files)
+    PromptServer.instance.routes.get("/media_loader/browse")(_ml_browse)
+    PromptServer.instance.routes.get("/media_loader/serve")(_ml_serve)
+    PromptServer.instance.routes.post("/media_loader/outputs")(_ml_outputs)
+    PromptServer.instance.routes.post("/media_loader/upload")(_ml_upload)
+    PromptServer.instance.routes.post("/media_loader/open")(_ml_open)
+    PromptServer.instance.routes.post("/media_loader/save_as")(_ml_save_as)
+    PromptServer.instance.routes.post("/media_loader/pick_folder")(_ml_pick_folder)
+    PromptServer.instance.routes.post("/media_out/outputs")(_mo_outputs)
+except Exception:
+    pass
+
+
+class MediaLoaderNode:
+    """EzFlex-MediaLoader：可视化组织素材（分组→素材卡片→媒体文件），每张「素材卡片」对应一个深红输出端口。
+    运行期按 ComfyUI 内置节点同逻辑加载文件（图像→张量、视频→帧列表、音频→waveform dict、3D→File3D 描述），
+    卡片内单文件=单值、多文件=批量列表（供 MediaOut 逐个拆出）。"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "config": ("STRING", {
+                    "multiline": True,
+                    "default": "{}",
+                    "tooltip": "「素材加载器」面板生成的配置 JSON（分组/卡片/文件）。",
+                }),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "load"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "EzFlex-MediaLoader：以「分组→素材卡片→媒体」组织素材，每张素材卡片一个深红输出端口（标签=分组名_卡片名）；运行期按内置节点同逻辑加载图像/视频/音频/3D。"
+
+    def load(self, config="{}", **kwargs):
+        cards = parse_media_cards(config)
+        rows = []
+        for card in cards:
+            items = []
+            for item in (card.get("items") or []):
+                loaded_item = []
+                for f in (item.get("files") or []):
+                    path = _ml_resolve(f.get("path") or "")
+                    if not path:
+                        continue
+                    ftype = (f.get("type") or _media_kind(f.get("name") or f.get("path")) or "other").lower()
+                    val = _ml_load_media(path, ftype)
+                    loaded_item.append({
+                        "id": f.get("id"), "name": f.get("name") or os.path.basename(path),
+                        "type": ftype, "value": val, "path": f.get("path") or "",
+                    })
+                items.append({"id": item.get("id"), "files": loaded_item})
+            rows.append({"group": card.get("group"), "cardId": card.get("id"),
+                         "label": card.get("label"), "items": items})
+        outputs = []
+        labels = []
+        for card in cards:
+            row = next((r for r in rows if str(r["cardId"]) == str(card.get("id"))), None)
+            flat = []
+            if row:
+                for it in row["items"]:
+                    flat.extend(it["files"])
+            outputs.append({"_kind": "ezflex_media_card", "cardId": card.get("id"),
+                            "label": card.get("label"), "files": flat, "_rows": rows})
+            labels.append(card.get("label") or "卡片")
+        self.__class__.RETURN_TYPES = tuple("*" for _ in outputs)
+        self.__class__.RETURN_NAMES = tuple(labels)
+        return tuple(outputs)
+
+
+class MediaOutNode:
+    """EzFlex-MediaOut：接收 MediaLoader 的某张「素材卡片」（深红输入），把该卡片内的文件逐个拆到独立输出端口。
+    单文件卡片→1 个输出，多文件（批量）→N 个输出；每个输出端口按该文件真实媒体类型着色（IMAGE/VIDEO/AUDIO/MODEL_3D）。
+    局部禁用某个文件时保留端口、输出 None（同 ParamPresetOutput 经验）。"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "card": (_ANY, {
+                    "forceInput": True,
+                    "tooltip": "来自 EzFlex-MediaLoader 的某张「素材卡片」端口（深红输入）。",
+                }),
+                "config": ("STRING", {
+                    "multiline": True,
+                    "default": "{}",
+                    "tooltip": "「素材输出」面板配置（局部禁用文件 id 集合）。",
+                }),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "run"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "EzFlex-MediaOut：按「拆分成多个文件端口」或「按卡片合并成一个输出」两种模式输出素材卡片；端口按真实媒体类型着色。"
+
+    def run(self, card=None, config="{}", **kwargs):
+        off = _mout_parse_off(config)
+        mode = _mout_mode(config)
+        rows = None
+        if isinstance(card, dict):
+            rows = card.get("_rows") or None
+        if mode == "split":
+            files = _mout_flatten(card)
+            types, names, outputs = [], [], []
+            for i, f in enumerate(files):
+                fid = f.get("id") if isinstance(f, dict) else f"f{i}"
+                name = f.get("name") if isinstance(f, dict) else f"文件 {i + 1}"
+                ftype = (f.get("type") if isinstance(f, dict) else "other") or "other"
+                types.append(MEDIA_TO_COMFY.get(str(ftype).lower(), "STRING"))
+                names.append(name)
+                outputs.append(None if str(fid) in off else (f.get("value") if isinstance(f, dict) else f))
+            self.__class__.RETURN_TYPES = tuple(types)
+            self.__class__.RETURN_NAMES = tuple(names)
+            return tuple(outputs)
+        # card / row / group：基于整张 MediaLoader 的结构
+        if not rows:
+            flat = _mout_flatten(card)
+            label = (card.get("label") or "素材卡片组") if isinstance(card, dict) else "素材卡片组"
+            rows = [{"group": (card.get("label") or "分组") if isinstance(card, dict) else "分组",
+                     "cardId": (card.get("cardId") if isinstance(card, dict) else None),
+                     "label": label,
+                     "items": [{"id": f.get("id") if isinstance(f, dict) else f"f{i}", "files": [f]} for i, f in enumerate(flat)]}]
+        groupings = _mo_groupings(mode, off, rows)
+        types = [g["type"] for g in groupings]
+        names = [g["name"] for g in groupings]
+        outputs = []
+        for g in groupings:
+            values = [f.get("value") if isinstance(f, dict) else f for f in g["files"]]
+            outputs.append(values[0] if len(values) == 1 else values)
+        self.__class__.RETURN_TYPES = tuple(types)
+        self.__class__.RETURN_NAMES = tuple(names)
+        return tuple(outputs)
+
+
 class PromptHelperNode:
     """EzFlex-PromptHelper：可视化编辑提示词卡片（完整富文本编辑器），
-    固定接收 clip/图像/视频/音频/3D 模型（图像/视频/音频/3D 可批量），
-    动态输入端口 = 卡片数 1:1（按顺序链接到卡片），
+    固定接收 clip（单）+ 动态「综合媒体」端口（ANY，可接 图像/视频/音频/3D 模型 等任意媒体，连接后自动补空槽），
+    动态「提示词文本」输入端口 = 卡片数 1:1（按顺序链接到卡片，连接后该卡片面板内容被外部文本覆盖并置灰），
     输出：固定「合并提示词」+ 动态卡片输出端口 = 卡片数 1:1。
     """
 
@@ -3601,15 +5034,14 @@ class PromptHelperNode:
                     "tooltip": "「提示词卡片」面板生成的配置 JSON（卡片列表）。",
                 }),
             },
-            "optional": {
-                "clip": ("CLIP", {"forceInput": True, "tooltip": "CLIP（固定单个）。"}),
-                "image": ("IMAGE", {"forceInput": True, "tooltip": "图像（可批量，[B,H,W,C]）。"}),
-                "video": ("VIDEO", {"forceInput": True, "tooltip": "视频（可批量）。"}),
-                "audio": ("AUDIO", {"forceInput": True, "tooltip": "音频（可批量）。"}),
-                "model_3d": ("MODEL_3D", {"forceInput": True, "tooltip": "3D 模型（可批量）。"}),
-            },
+            "optional": {},
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
+        for i in range(1, _PH_MAX_MEDIA + 1):
+            inputs["optional"][f"media_in_{i}"] = (_ANY, {
+                "forceInput": True,
+                "tooltip": f"综合媒体 {i}：可接 图像/视频/音频/3D 模型 等任意媒体（连接后自动新增一个空端口）。",
+            })
         for i in range(1, _PH_MAX_CARDS + 1):
             inputs["optional"][f"card_in_{i}"] = ("STRING", {
                 "forceInput": True,
@@ -3621,13 +5053,59 @@ class PromptHelperNode:
     RETURN_NAMES = tuple(["合并提示词"] + [f"卡片 {i + 1}" for i in range(_PH_MAX_CARDS)])
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "EzFlex-PromptHelper：可视化编辑提示词卡片（完整富文本编辑器）；固定媒体输入 + 每卡一个文本输入；按卡片顺序合并为提示词，并逐卡输出。"
+    DESCRIPTION = "EzFlex-PromptHelper：可视化编辑提示词卡片（完整富文本编辑器）；固定 CLIP + 动态综合媒体端口（ANY）+ 每卡一个文本输入；按卡片顺序合并为提示词，并逐卡输出。"
 
-    def run(self, config="{}", clip=None, image=None, video=None, audio=None,
-            model_3d=None, unique_id=None, extra_pnginfo=None, **kwargs):
+    def run(self, config="{}", unique_id=None, extra_pnginfo=None, **kwargs):
         cards = parse_prompt_cards(config)
         count = len(cards)
+        opt = parse_prompt_optimize(config)
+        tg = opt.get("textgen") or {}
 
+        # 运行期自动生成（TextGenerate）：从「调用设置」配置的 CLIP 路径+类型 自行加载（同点击即用，不再依赖 clip 输入）。
+        skill = (opt.get("skill") or "").strip()
+        media = _ph_gather_media(kwargs)
+        if bool(opt.get("autoTextgen")) or bool(tg.get("enabled")):
+            clip_path = ph_resolve_model(str(tg.get("clip_path") or "").strip())
+            if not clip_path:
+                raise ValueError("[EzFlex-PromptHelper] 已开启「运行期自动优化 (TextGenerate)」，请在「调用设置·TextGenerate设置」里填写 CLIP 模型路径 + 类型。")
+            tclip = _ph_clip_instance(clip_path, str(tg.get("clip_type") or "stable_diffusion"))
+            for card in cards:
+                if (card.get("contentOptimized") or "").strip():
+                    continue
+                src = card.get("content") or _ph_html_to_text(card.get("contentHTML"))
+                if src.strip():
+                    gen_prompt = (skill + "\n\n" + src) if skill else src
+                    card["contentOptimized"] = _ph_clip_generate(tclip, gen_prompt, tg, media)
+                    card["contentOptimizedHTML"] = card["contentOptimized"]
+
+        # 运行期自动用「API / llama」优化（带已连接的图像做视觉）：optimize.autoApi / autoLlama，需图像输入。
+        if bool(opt.get("autoApi")) or bool(opt.get("autoLlama")):
+            auto_method = "llama" if bool(opt.get("autoLlama")) else "api"
+            img_url = _ph_image_to_dataurl(media.get("image")) if media.get("image") is not None else ""
+            for card in cards:
+                if (card.get("contentOptimized") or "").strip():
+                    continue
+                src = card.get("content") or _ph_html_to_text(card.get("contentHTML"))
+                if not src.strip():
+                    continue
+                payload = {
+                    "method": auto_method, "prompt": src, "skill": skill,
+                    "provider": opt.get("provider") or "", "model": opt.get("model") or "",
+                    "apiUrl": opt.get("apiUrl") or "", "apiKey": opt.get("apiKey") or "",
+                    "proxy": opt.get("proxy") or "",
+                    "image": img_url, "llama": opt.get("llama") or {}, "textgen": opt.get("textgen") or {},
+                }
+                try:
+                    card["contentOptimized"] = _ph_optimize_impl(payload)
+                    card["contentOptimizedHTML"] = card["contentOptimized"]
+                except Exception as e:
+                    print(f"[PromptHelper] {auto_method} 运行期优化失败: {e}")
+
+        if bool(opt.get("clearCache")):
+            ph_clear_model_cache()
+
+        # 运行时用到模型优化（TextGenerate/API/llama）时：输出必须是优化结果，未完成/失败则不输出（不回退默认提示词）。
+        auto_used = bool(opt.get("autoTextgen")) or bool(tg.get("enabled")) or bool(opt.get("autoApi")) or bool(opt.get("autoLlama"))
         card_texts = []
         for i in range(count):
             raw = kwargs.get(f"card_in_{i + 1}")
@@ -3636,17 +5114,24 @@ class PromptHelperNode:
                 text = str(raw)  # 已连接的外部文本输入：覆盖该卡片
             elif i < len(cards):
                 card = cards[i]
-                text = card.get("content") or _ph_html_to_text(card.get("contentHTML"))
+                if auto_used:
+                    # 运行时已用模型优化：只输出优化结果；优化未完成/失败则输出空，不回退默认。
+                    text = card.get("contentOptimized") or ""
+                elif card.get("useOptimized"):
+                    text = card.get("contentOptimized") or card.get("content") or _ph_html_to_text(card.get("contentHTML"))
+                else:
+                    text = card.get("content") or _ph_html_to_text(card.get("contentHTML"))
             card_texts.append(text if text is not None else "")
 
         merged = "\n".join(card_texts)
-        # 媒体批量计数（供前端显示可引用数量，不入合并文本）
-        counts = {
-            "image": _ph_media_count(image),
-            "video": _ph_media_count(video),
-            "audio": _ph_media_count(audio),
-            "model_3d": _ph_media_count(model_3d),
-        }
+        # 综合媒体批量计数（供前端显示可引用数量，不入合并文本）；按连接顺序累计各类媒体数量
+        counts = {"image": 0, "video": 0, "audio": 0, "model_3d": 0}
+        for i in range(1, _PH_MAX_MEDIA + 1):
+            v = kwargs.get(f"media_in_{i}")
+            if v is None:
+                continue
+            n = _ph_media_count(v)
+            counts["image"] += n  # 综合媒体不区分类型，统一计为「image」便于前端显示引用数量
 
         self.__class__.RETURN_TYPES = ("STRING",) * (count + 1)
         self.__class__.RETURN_NAMES = tuple(["合并提示词"] + [f"卡片 {i + 1}" for i in range(count)])
@@ -3672,6 +5157,8 @@ NODE_CLASS_MAPPINGS = {
     "EzFlex-ParamPresetOutput": ParamPresetOutputNode,
     "EzFlex-PreviewAny": PreviewAnyNode,
     "EzFlex-PromptHelper": PromptHelperNode,
+    "EzFlex-MediaLoader": MediaLoaderNode,
+    "EzFlex-MediaOut": MediaOutNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3684,4 +5171,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EzFlex-ParamPresetOutput": "EzFlex-ParamPresetOutput",
     "EzFlex-PreviewAny": "EzFlex-PreviewAny",
     "EzFlex-PromptHelper": "EzFlex-PromptHelper",
+    "EzFlex-MediaLoader": "EzFlex-MediaLoader",
+    "EzFlex-MediaOut": "EzFlex-MediaOut",
 }
