@@ -1,16 +1,10 @@
-#comfyui自带
-torch
-numpy
-Pillow
-safetensors
-av
-
-# 本插件额外需要）：读音频/视频标签与容器元数据
+# 读音频/视频标签与容器元数据
 mutagen>=1.46.0
 
-# 可选：提示词助手「设置·llama设置 → 进程内（llama-cpp-python）」需要；
-llama-cpp-python
+# comfyui自带 torch / numpy / Pillow / safetensors / av 
 
-# 可选：读对应格式的模型文件需要；
-gguf
-onnx
+# 提示词助手「设置·llama设置 → 进程内（llama-cpp-python）」
+# pip install llama-cpp-python   
+
+# 读取 .gguf / .onnx 模型文件时需要           
+# pip install gguf onnx
