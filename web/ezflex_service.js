@@ -306,6 +306,9 @@ function injectSocketPanelBaseCSS() {
 /* Vue：面板体（各节点 .*-root）也穿透，节点可整块拖；按钮/下拉/输入/文本域保持可交互。 */
 .ezfx-is-vue [class*="-root"]{pointer-events:none!important;}
 .ezfx-is-vue [class*="-root"] button,.ezfx-is-vue [class*="-root"] select,.ezfx-is-vue [class*="-root"] input,.ezfx-is-vue [class*="-root"] textarea{pointer-events:auto!important;}
+/* 普通模式同理：面板里**后建**的按钮/输入也要能点 —— 一次性 querySelectorAll 快照管不到动态重建的行
+   （实测：MediaOut 的 开/关 要点两下、或先点一下面板才点得动），这里改用常驻 CSS 兜住。 */
+.ezfx-panel-shell button,.ezfx-panel-shell select,.ezfx-panel-shell input,.ezfx-panel-shell textarea{pointer-events:auto!important;}
 /* Vue：加宽面板(左右 inset 缩小)，让不透明白面板遮住原生 socket label，只在外缘留圆点可拖；
    不再靠隐藏 slot 内部(那条会把圆点一起藏掉) */
 .ezfx-is-vue [class*="-root"]{left:var(--ezfx-vue-side,10px)!important;right:var(--ezfx-vue-side,10px)!important;}

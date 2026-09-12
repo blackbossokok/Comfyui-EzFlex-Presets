@@ -333,6 +333,13 @@ function renderPanel(node, conn) {
   const panelRoot = root.querySelector('.emoo-root') || root;
   renderMode(node);
   const files = conn ? conn.files : [];
+  // 内容没变就不重建：settle 定时器每 250ms 会摸一次面板，重建会把「按下还没松手」的那次点击吃掉
+  // （现象：开/关 要点两下、或者先点一下面板才点得动）。签名覆盖模式/翻页/文件/开关状态。
+  const sig = [(node._ezMode || 'split'), node._moPage, node._moPerPage,
+    files.map((f) => ((f && f.id) + ':' + ((f && f.name) || ''))).join(','),
+    files.map((f) => ((node._ezLocalOff && node._ezLocalOff[f.id]) ? '1' : '0')).join('')].join('|');
+  if (node._moSig === sig) return;
+  node._moSig = sig;
   const list = root.querySelector('.emoo-list'); if (!list) return; list.innerHTML = '';
   const status = root.querySelector('.emoo-status');
   if (!conn || !files.length) {
@@ -365,7 +372,7 @@ function renderPanel(node, conn) {
     const toggle = el('div', 'emoo-toggle');
     const on = el('button'); on.className = 'on' + (!off ? ' active' : ''); on.textContent = '开';
     const offb = el('button'); offb.className = 'off' + (off ? ' active' : ''); offb.textContent = '关';
-    const set = (enabled) => { node._ezLocalOff = node._ezLocalOff || {}; node._ezLocalOff[f.id] = !enabled; writeLocalOff(node); renderPanel(node, conn); updatePorts(node, true); };
+    const set = (enabled) => { node._ezLocalOff = node._ezLocalOff || {}; node._ezLocalOff[f.id] = !enabled; node._moSig = ''; writeLocalOff(node); renderPanel(node, conn); updatePorts(node, true); };
     on.addEventListener('click', () => set(true)); offb.addEventListener('click', () => set(false));
     toggle.appendChild(on); toggle.appendChild(offb); row.appendChild(toggle);
     list.appendChild(row);
@@ -504,6 +511,52 @@ function hookPrototype(nt) {
   };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; try { (this._emooOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); this._emooOutEls = []; } catch (_) {} try { if (this._emooRoot) this._emooRoot.remove(); } catch (_) {} this._emooSetup = false; return r; };
 }
+// ===== 运行期空传：排队提交前，把「已禁用但仍连着」的端口从 prompt 里摘掉（不改画布） =====
+// 服务器拿到的 prompt 里那条输入**根本不存在** → 下游按「没提供」走：
+//   可选输入 → 用它自己的默认值；必需输入 → ComfyUI 校验直接拦下并指名报错（Required input is missing）。
+// 画布 / 连线 / 保存的工作流一律不动：不拔线、不闪、不需要恢复；只影响这一次提交。
+export function moPruneDisabledInputs(output) {
+  if (!output || typeof output !== 'object') return [];
+  const offById = {};
+  Object.keys(output).forEach((id) => {
+    const pn = output[id]; if (!pn || pn.class_type !== 'EzFlex-MediaOut') return;
+    let cfg = {}; try { cfg = JSON.parse((pn.inputs && pn.inputs.config) || '{}') || {}; } catch (_) { cfg = {}; }
+    const off = Array.isArray(cfg.off) ? cfg.off.map(String) : [];
+    if (off.length) offById[String(id)] = new Set(off);
+  });
+  if (!Object.keys(offById).length) return [];
+  const g = app && app.graph;
+  const nodeById = (id) => findNodeById(id) || (((g && (g._nodes || g.nodes)) || []).find((x) => x && String(x.id) === String(id))) || null;
+  const cut = [];   // 先算完再删：分析中途出错就不会留下"删一半"的 prompt
+  Object.keys(output).forEach((id) => {
+    const pn = output[id]; const ins = pn && pn.inputs; if (!ins) return;
+    Object.keys(ins).forEach((k) => {
+      const v = ins[k];
+      if (!Array.isArray(v) || v.length < 2 || Array.isArray(v[0])) return;   // 只认 [上游节点 id, 槽位] 这种连线
+      const off = offById[String(v[0])]; if (!off) return;
+      const slot = parseInt(v[1], 10); if (!isFinite(slot)) return;
+      const node = nodeById(v[0]);
+      const sock = node && node.outputs && node.outputs[slot];
+      const files = (sock && sock._ezFiles) || [];   // 面板盖的章：这个端口承载哪些文件
+      if (!files.length || !files.every((f) => f && off.has(String(f.id)))) return;   // 没盖章 / 不是全禁用 → 不动
+      cut.push({ node: pn, key: k, title: ((pn._meta && pn._meta.title) || pn.class_type || ('#' + id)) });
+    });
+  });
+  cut.forEach((c) => { delete c.node.inputs[c.key]; });
+  return cut.map((c) => c.title + ' - ' + c.key);
+}
+function installQueuePrune() {
+  if (!api || api.__ezMoPruneHooked || typeof api.queuePrompt !== 'function') return;
+  api.__ezMoPruneHooked = true;
+  const prev = api.queuePrompt;
+  api.queuePrompt = async function (number, prompt, extra) {
+    let cut = [];
+    try { cut = moPruneDisabledInputs(prompt && prompt.output); } catch (e) { console.warn('[MediaOut] 摘除已禁用端口的输入失败（本次按原样提交）：', e); }
+    if (cut.length) console.log('[MediaOut] 本次运行把 ' + cut.length + ' 条已禁用端口按「未连接」提交：' + cut.join('、'));
+    return prev.apply(this, arguments);
+  };
+}
+installQueuePrune();
 app.registerExtension({
   name: 'EzFlex.MediaOut',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },

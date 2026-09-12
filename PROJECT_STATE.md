@@ -14,7 +14,7 @@
 | 规模 | `__init__.py` ≈ 6261 行；`web/prompt_helper.js` ≈ 4064 行 |
 | **生效方式** | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS（`_serve_no_store`）→ **页面强刷 Ctrl+F5** |
 | 依赖 | 唯一必须额外装的：`mutagen>=1.46.0`（音频/视频标签与容器元数据）；**可选**：`llama-cpp-python`（提示词助手"进程内 llama"模式；本机 0.3.46 验证过，看图要带 mtmd 的较新构建）、`gguf` / `onnx`（只有读这些模型才用到，缺了跳过"模型元数据卡"不报错）、`ffprobe` 外部可选（`shutil.which` 探测，没有就只走 sidecar JSON）；其余 torch/numpy/Pillow/safetensors/av 由 ComfyUI 自带 —— 见 `requirements.txt` 的分组注释 |
-| 前端版本横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-12-uifix`），控制台看 `[PromptHelper] 模块已加载 · build …` |
+| 前端版本横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-12-dockv9`），控制台看 `[PromptHelper] 模块已加载 · build …` |
 
 ## 1. 节点清单（11 个，category 全 `EzFlex`）
 
@@ -160,6 +160,19 @@ Comfyui-EzFlex-Presets/
 - 芯片 DOM `span.eph-mref`（`contentEditable=false`）+ 子节点 `span.eph-mref-ico`（图标）+ `span.eph-mref-txt`（文字）。插入走 `insertMediaRefOnce`：**每次都插一份**（同一素材可重复引用）。
 - 「引用媒体」窗口（`_refBrowser`，`eph-rb`）：一个生成节点一块，卡片 `+` 插入 / `−` 移除一份 / `×N` 计数；右键弹 `.eph-ctx` 菜单（设为全体引用库 / 取消全体引用 / 仅本卡片引用）。引用目标只在窗口里体现（选中节点卡片标浅绿），工具条不做提示。
 
+**平铺模式（弹窗 ⇄ 右侧浮层）**
+- 头部按钮「⧉ 平铺 / 🗗 弹窗」→ `phDockToggle(node)`：开关存节点 config `ui.dock`（`stateFor` 默认 / `loadFromConfig` 读 / `syncToConfig` 写），同时写 `localStorage['ezflex.phDockMode']` 作**新节点默认**（节点里显式存过就以节点为准）。
+- 三个浮层（`eph-modal` 卡片编辑 / `eph-all` 总体编辑 / `eph-rb` 引用媒体）加类 `ph-dock`：`inset:auto` + 内联 left/top/width/height/z-index、无遮罩、点外侧不关；**位置记的是画布坐标**（跟节点一样「放在哪就在哪」）：`phDockXform()` 取 `app.canvas.ds` 的 `scale/offset` + 画布元素 rect（与 modelscombo 的取法同源），`phDockAnchorTo()` 把屏幕位换算成 `cx/cy` 存进 `_phDockMem`，`phDockPlace()` 再按当前变换摆回屏幕；`phDockTrack()` 注册进 `scheduleOnRedraw`，**画布平移/缩放（setDirty）时面板跟着走**。画布被拖远后重开面板会 `phDockVisible()` 判定不可见 → 复位到右侧默认位（不然窗口会丢在画面外）。`phDockApply()` 在三处 open 时调用；`phDockInstall()` 只装一次，装两样东西：**标题栏拖动**（`⠿` 把手 + 视口内夹取）和**右下角缩放**（`.eph-dock-size`，拖拽改 width/height，最小 320×200，结果一起记进 `_phDockMem`）。平铺态**无遮罩、无阴影**（`box-shadow:none`），并隐藏「全屏」键。
+- **关闭语义沿用原样**：✕ / 取消 = 放弃（`closeEditModal(false)`、`_allModal` 直接 remove active），保存 = 提交。弹窗模式的「点外侧自动保存」在平铺下不存在（没有遮罩）→ 平铺要保存必须点「保存」。
+- 两三个面板同开时默认位置按 `PH_DOCK_ORDER` 错开 44px，露出下面那层的 ⠿ 把手；应用/拖动都会把该层抬到最上。
+- **摆放/拖动都不夹取**（用户要求可以挪到视窗外）：`phDockPlace()` 只按画布变换算屏幕位，拖标题栏也不夹；**双击标题栏**回默认位（`mem.cx/cy = undefined` → 按右侧默认位重落）。默认高度 **60vh**、默认 top 96。
+- **尺寸跟节点一样随画布缩放（滚轮）**：`mem.w/h` 存**画布单位**，`phDockPlace()` 里按 `ds.scale` 设 `transform: scale(k)` + `transform-origin: 0 0`（锚点不动）；所有落点换算都要 `/k`（`save()` 写回、缩放起手 `rw/rh`）。**最小尺寸按画布单位 320×240**（逻辑固定、屏幕上随缩放变 —— 早先按屏幕 380px 卡，缩小极限会随画布缩放漂）。
+- **默认落点挂节点**：`phDockDefaultAnchor()` 按 PromptHelper 的 `pos/size` 算 —— 卡片编辑 / 总体编辑落在**节点右侧**隔 40px（两者纵错 36px），**引用媒体落在节点下方** 40px；**每次打开都回到这个默认位**（拿不到节点才退回屏幕右侧），打开后仍可拖走、跟画布走。
+- **层叠放在 ComfyUI 之下**：`PH_DOCK_Z_BASE = 900 / MAX = 998`（`phDockRaise()` 段内递增）—— ComfyUI 前端的菜单/节点列表弹窗在 999~99999，平铺面板压在上面会挡住它们（实测挡过双击打开的节点列表和顶部工具栏）。我们自己的模态仍在 99999+，弹窗模式不受影响。
+- **引用媒体去重**：`filesOnInput` 出口过 `dedupeFiles()`（按 `mediaKeyOf` = path/url/name），渲染层再按媒体键去重（计数 + 列表）—— 修 MediaOut 端口复用/扇出时「引用媒体」出现重复卡片的问题（弹窗模式同样生效）。
+- **平铺模式差异：引用媒体自动跟新** —— `onIndexChange(phRefAutoRefresh)`：编号引擎靠 `LGraphNode.onConnectionsChange/onAdded/onRemoved` 钩子打脏标记 → rAF 重建 → 广播；只有「面板开着**且**是平铺」才重渲染，弹窗模式维持「打开时刷新」。**没有新增轮询/定时器**（复用引擎既有事件）。
+- **页签滑块（默认/优化 那个胶囊）**：`phDockThumbs()` 在铺开/换模式/拖拽缩放改尺寸时调 `moveTabThumb()` / `moveAllTabThumb()` 重排，否则宽度变了它停在旧值、得点一下才正。
+
 **已知限制**
 - 类 `RETURN_TYPES` 全局共享（多实例由最后 POST 者决定）。
 - 富文本仍用 `document.execCommand`（弃用但可用）。
@@ -237,6 +250,10 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - **拖动不关**：`pointerup` 时 `max(|dx|,|dy|)>6` 直接 return。**一次只关最上层**：从栈顶往下找第一个不包含 `target` 的层，关掉即 break。
 - 自动注册：`MutationObserver` 监听 `eph-*` 的 class，出现 `.active/.open` 就入栈，去掉即出栈。**删掉旧的「各自 mousedown 关自己」**（会导致点外面一下全关）。
 - 关层时调 `el._phOnClose()` 做收尾（停播媒体 / 关放大预览）。**模态背板**：只有「本次关的就是自己」才关。
+- ⚠️ **画布坐标换算拿 rect 要用 canvas 元素**：`app.canvas` 是 LGraphCanvas 实例，**它自己没有 `getBoundingClientRect`**（调用直接抛错）。换算公式是 ComfyUI 版 litegraph 的 `ds.convertOffsetToCanvas` / `convertCanvasToOffset`：`screen(元素内) = (画布坐标 + ds.offset) * ds.scale`，`画布坐标 = screen / scale - offset`，再叠加 `元素.getBoundingClientRect()` 的 left/top。取元素用 `canvas.canvas || canvas.canvasEl || canvas.ds.element`。踩坑记录：一开始照抄 modelscombo 的 `canvas.getBoundingClientRect()`（那处被 try/catch 吞掉，实际一直走鼠标坐标兜底），结果平铺面板拿不到变换 → **一直钉在屏幕上不跟画布走**。
+- **平铺面板必须显式放行**：协调器里加 `if (el.classList.contains('ph-dock')) continue;` —— 平铺层没有全屏遮罩，点画布外侧时 `el.contains(t)` 永远为假，不放行就会第一下点外侧把它关掉（这正是平铺模式要避免的）。
+- ⚠️ **面板里「后建」的控件要能点**：`makeDomWidgetHitThrough()` 把面板设成 `pointer-events:none`，只对**调用当时已存在**的 `button/select/input/textarea` 逐个写内联 `auto`；之后动态重建的行（MediaOut 的 开/关、翻页）没人管 → 表现是「点不动、要先点一下节点面板才点得动」。修法：`injectSocketPanelBaseCSS()` 里加常驻 CSS `.ezfx-panel-shell button,…{pointer-events:auto!important;}`（经典模式也要，Vue 原来就有）。
+- ⚠️ **定时重建会吃掉点击**：MediaOut 的 `settle` 定时器每 250ms 调 `renderPanel()`，`list.innerHTML=''` 一重建，按下还没松手的那次点击就没了（现象：开/关 要点两下）。修法：`renderPanel()` 先算内容签名（模式 / 页码 / 每页 / 文件 id+名字 / 开关状态），签名没变直接 return。`set()` 里把 `node._moSig` 清掉强制重建。另外卡片弹窗 / 总体编辑各自的 `mouseup` 点外侧回调也要加 `!classList.contains('ph-dock')` 守卫。
 
 ### 5.7 MediaOut / MediaLoader
 - **拆分口串号（已修）**：3 个文件都显示 `@图片1`，根因是 socket 解析丢了文件 `id` → `media_out.js` 往 socket 盖 `sock._ezFiles`（拆分口 = 1 个文件，卡片/分组口 = 该组全部文件），编号引擎优先读它。
@@ -247,6 +264,17 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - 浏览器原生 `<audio>` 控件**无法完全刷白**（`::-webkit-media-controls-*` 不可靠）→ 自绘 `makeAudioPlayer`；`<audio>` 用**屏外隐藏** `position:absolute;left:-9999px`（不是 `display:none`）。
 - 预览切素材**复用同类型媒体元素**（仅换 `src`）避免闪屏。播放键要用 **CSS 类定位**（曾写成 `el('button','eml-play')` 没给样式 → 跑到右边）。
 - 翻页页栏要 append 到 `.emoo-root` 面板根，**不能 append 到 `.emoo-shell` 外壳**（会被 `inset:0 14px` 裁掉看不见）。数字输入框去上下箭头：`appearance:textfield` + `::-webkit-inner/outer-spin-button{none}`。
+
+- ⚠️ **端口没盖 `_ezFiles` 时不要退回「整张卡片」**：编号引擎的兜底一度是 `ezMediaFilesOfNode()`（= 该卡片**全部**文件），于是 MediaOut 关掉 1 个或几个素材、或端口/槽位刚重建时，引用媒体会冒出 MediaLoader 已加载、但没接入生成节点（或已被关）的所有文件。现在只做精确兜底：按 `_ezMediaId` 找一个文件，或**拆分模式**按槽位序号取，其余返回空。`media_index_test.mjs` 有对应断言。
+
+- ⚠️ **EzFlex 节点在「媒体上溯」里必须是终点**：`filesUpstream()` 本来「本端口取不到就顺着输入继续往上找」（为穿透内置 Get Video Components 而设），结果 MediaOut 端口没盖 `_ezFiles` 时会一路捞到它的输入 = MediaLoader 的**整张卡片** —— 只要该 MediaOut 接进了生成节点，引用媒体就冒出全部已加载文件（含没接入、已被关掉的）。现在 `EzFlex-MediaOut` / `EzFlex-MediaLoader` 命中即 `return []` 终止上溯（`media_index_test.mjs` 用「两个文件的卡片」断言守住）。
+
+### 5.7.1 运行期空传（禁用端口 → prompt 里摘掉这条输入）
+- 背景：拆分模式禁用端口输出 `None`，下游若「可选 + 默认 None + 不判 None」照样崩（对节点来说"没连"的默认值也是 None）。
+- 做法（`media_out.js` 的 `moPruneDisabledInputs()` + `api.queuePrompt` 包装）：**前端排队提交前**，把指向「已禁用端口」的输入键从 prompt 里删掉 —— 不改画布、不拔线、不闪。判定用 prompt 里 MediaOut 的 `inputs.config.off` + 活节点 `outputs[slot]._ezFiles`（面板盖的章）；**没盖章 / 混合端口 / 找不到节点 → 一律保守不动**。先算完再删，分析出错不会留"删一半"的 prompt；包装层 try/catch，任何异常都按原样提交。
+- 后端因此看到的是「这条输入不存在」：可选输入 → 用节点自己的默认值；**必需输入 → `execution.py:898-913` 校验直接拦下并指名报错**（前端显示「缺少连接 — {节点} 缺少必需的输入：{输入}」）。
+- 覆盖范围：比 `/prompt` 更靠前的网络入口只有 `api.queuePrompt`（前端包里 `fetchApi('/prompt')` 直连 0 处）；**从 HTTP API / API 格式 JSON 排队不经前端，盖不到 → 仍是 `None`**。
+- 测试：`_dev_tests/media_out_prune_test.mjs`（14 条：正常摘 / 混合组保留 / 没盖章保留 / off 空 / 源不对 / 找不到节点 / 幂等 / 包装层与返回值）。
 
 ### 5.8 其它
 - **ComfyUI 的 `ui` 契约：每个键的值必须是「列表」**（`execution.py:413` 用 `{k: [y for x in uis for y in x[k]]}` 把多个 ui dict 合并成**值列表**）。踩坑：PromptHelper 的 ui 给了标量 —— `useOverallOptimized: True` 当场 `TypeError: 'bool' object is not iterable`（节点执行失败，栈却停在 execution.py，很难联想到是自己返回的 ui）；字符串更阴：不报错，但被**拆成一个个字符**。**规矩：后端一律 `"key": [value]`，前端 `onExecuted` 拿到的就是值列表、要取 `[0]`**（前端用 `uiScalar/uiList` 兼容标量与列表两种形状）。同轮删掉了没人读的 `ui.counts`/`ui.merged` 与 `_ph_media_count`。
@@ -295,12 +323,14 @@ foreach($f in (Get-ChildItem "$d\web" -Filter *.js -Recurse)){ $tmp=Join-Path $e
 & $py "$t\preview_save_test.py"         #  9 条：存档用原图 + PNG 元数据
 & $py "$t\preview_types_test.py"        # 98 条：每种值类型的识别 + 卡片内容（MESH/SPLAT/VOXEL、CONDITIONING、无裸 repr）
 & $py "$t\prompt_helper_test.py"        # 160 条：卡片合并规则 / 卡片管理 / API 调用参数 / 综合媒体 / 规范编译 / 先合并再整体优化
+& $py "$t\prompt_helper_dock_test.py"   #  61 条：平铺模式接线（CSS/持久化/三处 open/点外守卫/协调器放行/拖动·缩放/跟随画布+随缩放/不夹视口+双击复位/节点默认落点/层叠 900/页签重排/引用自动跟新/去重/动态控件/防重建）
 # 5) Node 套件
 node "$t\import_test.mjs"               # 11 个 registerExtension + NODE_TYPES 一致性
-node "$t\media_index_test.mjs"          # 38 条：编号表（含过期 type / 中转节点穿透）
+node "$t\media_out_prune_test.mjs"      # 14 条：运行期空传 —— 禁用端口在提交前从 prompt 摘掉（混合组/没盖章/找不到节点一律不动）
+node "$t\media_index_test.mjs"          # 48 条：编号表（含过期 type / 非 EzFlex 中转节点穿透 GVC←卡片·GVC←MediaOut / 端口重复去重 / 端口没盖章不冒整张卡片 / EzFlex 节点终止上溯）
 ```
 
-- 实测全绿基线：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、8 个套件全通过（6 个 Python + 2 个 Node）。
+- 实测全绿基线：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、9 个套件全通过（7 个 Python + 2 个 Node）。
 - 测试脚本注意：`_dev_tests/_tmp` 用于临时文件（ComfyUI temp 目录在沙箱外会 `PermissionError`）；PreviewAny 存档测试需要 `folder_paths` shim。
 - ⚠️ **源文件改写不要用 PowerShell `Get-Content`/`Set-Content`**（会毁编码，曾把 `web/prompt_helper.js` 写坏；那份损坏备份已清理）；用编辑器工具或 Python `newline=''`。
 - `_dev_tests/` 里 `extensions/`（web 副本）、`scripts/`（app.js/api.js 桩）、`_tmp/`（素材与存档）**全是跑测试时自动生成的**：两个 `.mjs` 测试开头就 `mkdirSync + readdirSync(web/) + copyFileSync`，Python 套件自己 `makedirs` 写素材。所以这三个目录随时可删，跑测试会重建；反过来说，**改完 `web/*.js` 直接跑测试拿到的就是最新副本，不存在副本过期**。

@@ -24,7 +24,7 @@ const MAX_CARDS = 32;
 const MAX_MEDIA = 16;
 const MEDIA_PORT_COLOR = '#d94848';
 // 加载标记：用于确认浏览器实际加载的是哪一版（改动本文件时请更新）
-const PH_BUILD = '2026-09-12-uifix';
+const PH_BUILD = '2026-09-12-dockv9';
 console.log('[PromptHelper] 模块已加载 · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -47,6 +47,7 @@ document.addEventListener('pointerup', (e) => {
     const open = phLayerIsOpen(el);
     if (!el || !el.isConnected) { _phLayers.splice(i, 1); continue; }
     if (!open) { _phLayers.splice(i, 1); continue; }
+    if (el.classList.contains('ph-dock')) continue;   // 平铺面板：点外侧不关，只能 ✕/取消 关
     if (el.contains(t) && t !== el) break;               // 点在层内内容 → 保留这一层及以下
     el.classList.remove('active'); el.classList.remove('open'); _phLayers.splice(i, 1); _phClosedEl = el;
     // 该层自己的收尾（如引用媒体窗口要停掉里面正在播的视频/音频并关掉放大预览）
@@ -63,6 +64,192 @@ function phLayerWatch() {
   ob.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
 }
 phLayerWatch();
+
+// ===== 平铺模式：卡片弹窗 / 总体编辑 / 引用媒体 三个浮层可切成右侧面板 =====
+// 弹窗模式（默认）：全屏遮罩，点外侧关闭，开着就不能操作画布上其他节点。
+// 平铺模式：只占右侧一块，标题栏可拖动；点外侧不关，只能 ✕ / 取消 关 —— 可以一边看引用媒体一边操作别的节点。
+const _phDockMem = {};      // 各浮层拖动后的落点（本次会话内记住；尺寸默认按窗口比例算）
+const PH_DOCK_ORDER = ['eph-modal', 'eph-all', 'eph-rb'];   // 两个面板同时开着时，默认位置按这个顺序错开
+const PH_DOCK_LS = 'ezflex.phDockMode';   // 全局偏好：新节点默认沿用上次选的模式（节点 config 里的 ui.dock 优先）
+function phDockPref() { try { return window.localStorage.getItem(PH_DOCK_LS) === '1'; } catch (_) { return false; } }
+// 层叠：放在画布/节点之上，但**低于 ComfyUI 自己的菜单与节点列表弹窗**（前端 z-index 分布 999~99999），
+// 否则平铺面板会挡住双击打开的节点列表和顶部工具栏。每次应用/点标题栏在本段内抬到最上。
+const PH_DOCK_Z_BASE = 900, PH_DOCK_Z_MAX = 998;
+let _phDockZ = PH_DOCK_Z_BASE;
+function phDockRaise() { _phDockZ = (_phDockZ >= PH_DOCK_Z_MAX) ? PH_DOCK_Z_BASE : _phDockZ + 1; return _phDockZ; }
+function phDockOn(node) {
+  if (!node) return false;
+  try { const ui = stateFor(node).ui; return !!(ui && ui.dock); } catch (_) { return false; }
+}
+function phDockKey(ov) { return String(ov.className || '').split(' ')[0] || 'eph'; }
+// 画布变换（取法与 modelscombo 一致）：screen = (画布坐标 + offset) * scale，再加画布元素自身的页面偏移
+function phDockXform() {
+  let canvas = null;
+  try { canvas = (app && app.canvas) || null; } catch (_) { canvas = null; }
+  if (!canvas || !canvas.ds) return null;
+  // LGraphCanvas 自身没有 getBoundingClientRect —— 必须拿它包着的 canvas 元素（ds.element / .canvas）
+  const el = canvas.canvas || canvas.canvasEl || canvas.ds.element || null;
+  if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+  let rect = null; try { rect = el.getBoundingClientRect(); } catch (_) { rect = null; }
+  if (!rect) return null;
+  return { rect: rect, scale: canvas.ds.scale || 1, off: canvas.ds.offset || [0, 0] };
+}
+// 把想要的屏幕位置换算成画布坐标存下来（拿不到画布就退回屏幕坐标）
+function phDockAnchorTo(mem, sx, sy) {
+  const t = phDockXform();
+  if (t) { mem.cx = (sx - t.rect.left) / t.scale - t.off[0]; mem.cy = (sy - t.rect.top) / t.scale - t.off[1]; }
+  mem.sx = sx; mem.sy = sy;
+}
+// 按当前画布变换把面板摆到屏幕上（画布平移/缩放都跟着动，跟节点一样「放在哪就在哪」）
+function phDockPlace(ov, mem) {
+  const t = phDockXform();
+  const k = (t && t.scale) || 1;
+  if (t) { mem.sx = t.rect.left + (mem.cx + t.off[0]) * t.scale; mem.sy = t.rect.top + (mem.cy + t.off[1]) * t.scale; }
+  // 尺寸跟着画布缩放一起缩（跟节点一样）；transform-origin 左上角 → 位置锚点不动
+  if (mem.k !== k) { mem.k = k; ov.style.transform = 'scale(' + k + ')'; ov.style.transformOrigin = '0 0'; }
+  // 位置不夹取：允许挪到视窗外（双击标题栏回默认位）
+  ov.style.left = Math.round(mem.sx) + 'px';
+  ov.style.top = Math.round(mem.sy) + 'px';
+}
+// 默认落点（画布坐标）：卡片编辑 / 总体编辑 → PromptHelper 右侧隔 40px（彼此错开一点）；引用媒体 → 节点下方
+function phDockDefaultAnchor(ov, node) {
+  const n = node || ov._dockNode || ov._node;
+  if (!n || !n.pos || !n.size) return null;
+  const gap = 40;
+  if (phDockKey(ov) === 'eph-rb') return [n.pos[0], n.pos[1] + n.size[1] + gap];
+  return [n.pos[0] + n.size[0] + gap, n.pos[1] + Math.max(0, PH_DOCK_ORDER.indexOf(phDockKey(ov))) * 36];
+}
+// 面板尺寸变了要重排页签滑块（默认/优化 那个胶囊），不然它还停在旧宽度上，得点一下才正
+function phDockThumbs(ov) {
+  if (ov === _editModal) { try { moveTabThumb(); } catch (_) {} return; }
+  if (ov === _allModal) { try { moveAllTabThumb(); } catch (_) {} }
+}
+// 画布平移/缩放时把所有开着的平铺面板一起挪（由 ezflex_service 的 setDirty/指针/滚轮泵帧唤醒）
+function phDockTrack() {
+  // 平铺的引用媒体面板开着时，顺带让编号引擎按需重算（签名没变直接返回 → 零额外开销、无新定时器）
+  const rb = _refBrowser;
+  if (rb && rb.classList.contains('active') && rb.classList.contains('ph-dock')) { try { refreshIndexSoon(); } catch (_) {} }
+  const list = [_editModal, _allModal, _refBrowser];
+  for (let i = 0; i < list.length; i++) {
+    const ov = list[i];
+    if (!ov || !ov.classList.contains('ph-dock') || !ov.classList.contains('active')) continue;
+    const mem = _phDockMem[phDockKey(ov)];
+    if (mem && mem.cx !== undefined) phDockPlace(ov, mem);
+  }
+}
+function phDockApply(ov, node) {
+  if (!ov) return;
+  if (node) ov._dockNode = node;
+  const on = phDockOn(ov._dockNode || ov._node);
+  ov.classList.toggle('ph-dock', on);
+  if (!on) { ov.style.left = ov.style.top = ov.style.right = ov.style.bottom = ov.style.width = ov.style.height = ''; ov.style.zIndex = ''; ov.style.transform = ''; ov.style.transformOrigin = ''; return; }
+  const mem = _phDockMem[phDockKey(ov)] || (_phDockMem[phDockKey(ov)] = {});
+  const k0 = (phDockXform() || {}).scale || 1;
+  // 尺寸存**画布单位**：滚轮缩放时面板跟节点一样一起缩；首次打开按窗口比例换算出来
+  if (!mem.w || !mem.h) { mem.w = Math.max(320, Math.round(window.innerWidth * 0.42)) / k0; mem.h = Math.max(240, Math.round(window.innerHeight * 0.6)) / k0; }
+  const ord = Math.max(0, PH_DOCK_ORDER.indexOf(phDockKey(ov)));   // 错开默认位置，露出下面那个面板的拖动把手
+  // 每次打开都回到「PromptHelper 右侧 / 下方」的默认落点（可预期）；拿不到节点位置才退回屏幕右侧
+  const def = phDockDefaultAnchor(ov, node);
+  if (def) { mem.cx = def[0]; mem.cy = def[1]; }
+  else if (mem.cx === undefined) phDockAnchorTo(mem, window.innerWidth - mem.w * k0 - 24 - ord * 44, 96);
+  ov.style.right = 'auto'; ov.style.bottom = 'auto';
+  ov.style.width = mem.w + 'px'; ov.style.height = mem.h + 'px'; ov.style.zIndex = String(phDockRaise());
+  phDockPlace(ov, mem);
+  phDockInstall(ov);
+  scheduleOnRedraw(phDockTrack);   // 画布平移/缩放时面板跟着走（Set 去重，只装一次）
+  requestAnimationFrame(() => phDockThumbs(ov));   // 面板刚铺开/换模式：页签滑块按新宽度重排一次
+}
+function phDockInstall(ov) {   // 平铺面板的两种交互：标题栏拖动 + 右下角缩放，都只装一次
+  if (ov._dockUi) return;
+  const head = ov.querySelector('.eph-modal-hd, .eph-all-hd, .eph-rb-hd');
+  if (!head) return;
+  ov._dockUi = true;
+  const grip = el('span', 'eph-dock-grip'); grip.textContent = '⠿'; grip.title = '拖动移动面板（双击标题栏回到默认位置）';
+  head.insertBefore(grip, head.firstChild);
+  let on = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  const save = () => { const r = ov.getBoundingClientRect(); const m = _phDockMem[phDockKey(ov)] || (_phDockMem[phDockKey(ov)] = {}); const k = (phDockXform() || {}).scale || 1; m.w = r.width / k; m.h = r.height / k; phDockAnchorTo(m, r.left, r.top); };
+  head.addEventListener('pointerdown', (e) => {
+    if (!ov.classList.contains('ph-dock') || e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('button,input,select,.eph-dd-menu,.eph-tools-dropdown,.eph-color-dropdown,.eph-font-list')) return;
+    const r = ov.getBoundingClientRect();
+    on = true; sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top;
+    ov.style.right = 'auto'; ov.style.bottom = 'auto'; ov.style.left = ox + 'px'; ov.style.top = oy + 'px';
+    ov.style.zIndex = String(phDockRaise());
+    try { head.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault();
+  });
+  head.addEventListener('pointermove', (e) => {
+    if (!on) return;
+    // 不夹取：可以拖到视窗外（双击标题栏回默认位）
+    ov.style.left = (ox + e.clientX - sx) + 'px';
+    ov.style.top = (oy + e.clientY - sy) + 'px';
+    e.preventDefault();
+  });
+  const stop = () => { if (!on) return; on = false; save(); };
+  head.addEventListener('pointerup', stop);
+  head.addEventListener('pointercancel', stop);
+  // 双击标题栏：回默认位置（面板允许挪到视窗外，靠这个找回来）
+  head.addEventListener('dblclick', () => {
+    if (!ov.classList.contains('ph-dock')) return;
+    const m = _phDockMem[phDockKey(ov)];
+    if (m) { m.cx = undefined; m.cy = undefined; }
+    phDockApply(ov);
+  });
+  // 右下角缩放：跟 LiteGraph 节点一个用法（只改尺寸，不改结构）
+  const size = el('div', 'eph-dock-size'); size.title = '拖动缩放面板';
+  ov.appendChild(size);
+  let rz = false, rx = 0, ry = 0, rw = 0, rh = 0, rl = 0, rt = 0, rk = 1;
+  size.addEventListener('pointerdown', (e) => {
+    if (!ov.classList.contains('ph-dock') || e.button !== 0) return;
+    const r = ov.getBoundingClientRect();
+    rk = (phDockXform() || {}).scale || 1;
+    rz = true; rx = e.clientX; ry = e.clientY; rw = r.width / rk; rh = r.height / rk; rl = r.left; rt = r.top;
+    ov.style.right = 'auto'; ov.style.bottom = 'auto'; ov.style.left = rl + 'px'; ov.style.top = rt + 'px';
+    ov.style.zIndex = String(phDockRaise());
+    try { size.setPointerCapture(e.pointerId); } catch (_) {}
+    e.preventDefault(); e.stopPropagation();
+  });
+  size.addEventListener('pointermove', (e) => {
+    if (!rz) return;
+    // 最小尺寸按**画布单位**卡（跟节点一样：逻辑最小尺寸固定，屏幕上随缩放变）—— 否则缩小极限会随缩放漂
+    const w = Math.max(320, Math.min(rw + (e.clientX - rx) / rk, (window.innerWidth - rl - 8) / rk));
+    const h = Math.max(240, Math.min(rh + (e.clientY - ry) / rk, (window.innerHeight - rt - 8) / rk));
+    ov.style.width = w + 'px'; ov.style.height = h + 'px';
+    phDockThumbs(ov);   // 跟着新宽度重排页签滑块
+    e.preventDefault();
+  });
+  const rzStop = () => { if (!rz) return; rz = false; save(); };
+  size.addEventListener('pointerup', rzStop);
+  size.addEventListener('pointercancel', rzStop);
+}
+// 面板头部那颗按钮：弹窗 ⇄ 平铺（状态写在节点 config 的 ui.dock）
+function phDockSyncBtn(node) {
+  const b = node && node._ezDockBtn;
+  if (!b) return;
+  const on = phDockOn(node);
+  b.textContent = on ? '🗗 弹窗' : '⧉ 平铺';
+  b.title = on ? '当前：平铺面板（右侧浮层，可拖动；只能点 ✕/取消 关闭，可同时操作其他节点）→ 点这里切回弹窗'
+               : '当前：弹窗模式（全屏遮罩，点外侧关闭）→ 点这里切到平铺面板（不挡其他节点）';
+  b.classList.toggle('on', on);
+}
+// 平铺模式下「引用媒体」面板一直开着：画布上新连/断开素材要自己跟上。
+// 走编号引擎已有的变更通知（Lnode 钩子 → markIndexDirty → refreshIndex → 广播），不加轮询/定时器；
+// 弹窗模式保持原样（打开时刷新），只有平铺模式做这个差异。
+function phRefAutoRefresh() {
+  const m = _refBrowser;
+  if (!m || !m.classList.contains('active') || !m.classList.contains('ph-dock')) return;
+  try { refreshRefBrowser(); } catch (_) {}
+}
+onIndexChange(phRefAutoRefresh);
+function phDockToggle(node) {
+  const st = stateFor(node);
+  st.ui = st.ui || {};
+  st.ui.dock = !st.ui.dock;
+  try { window.localStorage.setItem(PH_DOCK_LS, st.ui.dock ? '1' : '0'); } catch (_) {}   // 下次新建节点也按这个来
+  syncToConfig(node);
+  phDockSyncBtn(node);
+  [_editModal, _allModal, _refBrowser].forEach((ov) => { if (ov) phDockApply(ov, ov._dockNode || ov._node || node); });
+}
 
 const CSS = `
 .eph-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
@@ -119,6 +306,22 @@ const CSS = `
 .eph-modal-hd b{font-size:14px;color:#0f141f;}
 .eph-modal-close{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:inherit;color:#5f6b7a;}
 .eph-modal-close:hover{background:#edf2fa;}
+.eph-btn.on{background:#eef2ff;border-color:#c7d2fe;color:#3730a3;}
+/* ===== 平铺模式：卡片弹窗 / 总体编辑 / 引用媒体 三个浮层改成右侧可拖动面板 =====
+   弹窗模式（默认）：全屏遮罩，点外侧关闭；平铺模式：只占自己那一块，点外侧不关，只能 ✕/取消 关，
+   所以能一边开面板（尤其「引用媒体」）一边操作画布上的其他节点。 */
+.eph-modal.ph-dock,.eph-all.ph-dock,.eph-rb.ph-dock{inset:auto;background:transparent;align-items:stretch;justify-content:stretch;overflow:hidden;box-sizing:border-box;}
+.eph-modal.ph-dock.active,.eph-all.ph-dock.active,.eph-rb.ph-dock.active{display:flex;}
+.eph-modal.ph-dock .eph-modal-box,.eph-all.ph-dock .eph-all-box,.eph-rb.ph-dock .eph-rb-box{width:100%;height:100%;max-width:100%;max-height:100%;box-sizing:border-box;overflow:auto;border-radius:12px;box-shadow:none;}
+.eph-modal.ph-dock .eph-modal-body,.eph-all.ph-dock .eph-all-editor,.eph-rb.ph-dock .eph-rb-body{flex:1 1 auto;min-height:0;}   /* 缩小时先吃中间那块，页脚/工具条不被顶出去 */
+.eph-modal.ph-dock .eph-modal-hd,.eph-all.ph-dock .eph-all-hd,.eph-rb.ph-dock .eph-rb-hd{cursor:move;user-select:none;-webkit-user-select:none;}
+.eph-modal.ph-dock .eph-modal-full,.eph-all.ph-dock .eph-all-full{display:none;}
+.eph-dock-grip{display:none;flex:0 0 auto;color:#9aa7b5;font-size:13px;line-height:1;cursor:move;letter-spacing:1px;}
+.ph-dock .eph-dock-grip{display:inline-flex;}   /* 拖动把手只在平铺模式露出来 */
+.eph-dock-size{display:none;position:absolute;right:2px;bottom:2px;width:16px;height:16px;z-index:6;cursor:nwse-resize;}
+.eph-dock-size::after{content:'';position:absolute;right:2px;bottom:2px;width:9px;height:9px;border-right:2px solid #aab4c2;border-bottom:2px solid #aab4c2;border-radius:1px;}
+.eph-dock-size:hover::after{border-color:#5f6b7a;}
+.ph-dock .eph-dock-size{display:block;}   /* 右下角拖拽缩放（仿节点） */
 .eph-modal-body{display:flex;flex-direction:column;gap:8px;flex:1 1 auto;min-height:0;overflow:auto;padding:10px 14px;}
 .eph-modal-ft{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 16px 0;border-top:1px solid #edf2f8;}
 .eph-btn-cancel{background:#f1f4fa;border:1px solid #e2e8f0;color:#4d5b6d;}
@@ -599,7 +802,7 @@ function alignSVG(type) {
 
 function stateFor(node) {
   if (!node._ezPh) node._ezPh = {
-    cards: [], optimize: {}, rules: {},
+    cards: [], optimize: {}, rules: {}, ui: { dock: phDockPref() },
     // 「总体编辑」那份整体优化内容（所有卡片合并后优化一次）+ 是否用它输出（对应卡片级的 contentOptimized / useOptimized）
     overallOptimized: '', overallOptimizedHTML: '', overallUseOptimized: false,
     editingId: null, currentTab: 'default', dirty: false,
@@ -612,10 +815,12 @@ function loadFromConfig(node) {
   st.cards = Array.isArray(cfg.cards) ? deepClone(cfg.cards) : [];
   st.optimize = (cfg.optimize && typeof cfg.optimize === 'object') ? deepClone(cfg.optimize) : {};
   st.rules = (cfg.rules && typeof cfg.rules === 'object') ? deepClone(cfg.rules) : {};
+  st.ui = (cfg.ui && typeof cfg.ui === 'object') ? deepClone(cfg.ui) : { dock: phDockPref() };
   st.overallOptimized = String(cfg.overallOptimized || '');
   st.overallOptimizedHTML = String(cfg.overallOptimizedHTML || '');
   st.overallUseOptimized = !!cfg.overallUseOptimized;
   st.dirty = false;
+  phDockSyncBtn(node);
 }
 function syncToConfig(node) {
   const st = stateFor(node);
@@ -631,6 +836,7 @@ function syncToConfig(node) {
     optimize: st.optimize || {}, cards: st.cards, rules: st.rules || {},
     overallOptimized: st.overallOptimized || '', overallOptimizedHTML: st.overallOptimizedHTML || '',
     overallUseOptimized: !!st.overallUseOptimized,
+    ui: st.ui || { dock: phDockPref() },
   });
   markDirtyFalse(node);
 }
@@ -1101,7 +1307,7 @@ function editModalEl() {
   // 若不比对按下目标，就会“一次点击连关两层”。
   let _ecStartInBox = false;
   _editModal.addEventListener('mousedown', (e) => { _ecStartInBox = box.contains(e.target); });
-  _editModal.addEventListener('mouseup', (e) => { if (e.target === _editModal && _phDownTarget === _editModal && !_ecStartInBox && (_phClosedEl === null || _phClosedEl === _editModal)) closeEditModal(true); _ecStartInBox = false; });
+  _editModal.addEventListener('mouseup', (e) => { if (!_editModal.classList.contains('ph-dock') && e.target === _editModal && _phDownTarget === _editModal && !_ecStartInBox && (_phClosedEl === null || _phClosedEl === _editModal)) closeEditModal(true); _ecStartInBox = false; });
   return _editModal;
 }
 
@@ -1124,6 +1330,7 @@ function openEditModal(node, cardId) {
   if (m._updMerge) m._updMerge();
   m._indentInput.value = String(card.indent || 0);
   m.classList.add('active');
+  phDockApply(m, node);
   _phActiveEditor = m._editor;
   requestAnimationFrame(moveTabThumb);
   // applyIndent 会重建编辑器 DOM（光标丢失），所以重建完再把光标放到末尾：接着写 / 插引用都在末尾
@@ -1689,8 +1896,10 @@ function renderRefBrowser(node, ed, card) {
     const hd = el('div', 'eph-rb-nhd');
     const num = el('span', 'eph-rb-num'); num.textContent = String(i + 1);
     const nm = el('span', 'eph-rb-name'); nm.textContent = t.title || t.type;
-    const files = t.ports.reduce((n, p) => n + p.files.length, 0);
-    const cnt = el('span', 'eph-rb-cnt'); cnt.textContent = '媒体 ' + files;
+    // 同一素材被同一节点的多个端口引用（端口扇出 / MediaOut 端口复用）时只列一次：按媒体键去重，保留第一个端口的标签
+    const seen = new Set(); const shown = [];
+    t.ports.forEach((p) => p.files.forEach((f) => { const k = mediaKeyOf(f) || (f && f.path); if (k) { if (seen.has(k)) return; seen.add(k); } shown.push({ p: p, f: f }); }));
+    const cnt = el('span', 'eph-rb-cnt'); cnt.textContent = '媒体 ' + shown.length;
     hd.appendChild(num); hd.appendChild(nm); hd.appendChild(cnt);
     // 点卡片面板 = 本卡片引用它；再点一次 = 取消引用（可以都不引用）
     hd.title = on ? '再点一次取消引用（本卡片不引用任何生成节点）' : '点击：本卡片引用这个生成节点';
@@ -1707,7 +1916,7 @@ function renderRefBrowser(node, ed, card) {
     box.addEventListener('contextmenu', ctx);
     box.appendChild(hd);
     const grid = el('div', 'eph-rb-grid');
-    t.ports.forEach((p) => p.files.forEach((f) => grid.appendChild(rbTile(ed, node, card, t, p, f))));
+    shown.forEach((it) => grid.appendChild(rbTile(ed, node, card, t, it.p, it.f)));
     box.appendChild(grid);
     body.appendChild(box);
   });
@@ -1718,6 +1927,7 @@ function openRefBrowser(node, ed, card) {
   const m = refBrowserEl();
   renderRefBrowser(node, ed, card);
   m.classList.add('active');
+  phDockApply(m, node);
   _phActiveEditor = ed;
 }
 // 编号表/节点重命名变化时，若浏览器开着就实时刷新（下拉框里的节点名字同步）。
@@ -3723,7 +3933,7 @@ function allEl() {
   // 点弹窗外空白自动保存关闭；卡片内部拖动到外面松开不关（只在外面点击才关）
   let _allStartInBox = false;
   _allModal.addEventListener('mousedown', (e) => { _allStartInBox = box.contains(e.target); });
-  _allModal.addEventListener('mouseup', (e) => { if (e.target === _allModal && _phDownTarget === _allModal && !_allStartInBox && (_phClosedEl === null || _phClosedEl === _allModal)) saveAllEditor(); _allStartInBox = false; });
+  _allModal.addEventListener('mouseup', (e) => { if (!_allModal.classList.contains('ph-dock') && e.target === _allModal && _phDownTarget === _allModal && !_allStartInBox && (_phClosedEl === null || _phClosedEl === _allModal)) saveAllEditor(); _allStartInBox = false; });
   return _allModal;
 }
 function switchAllTab(tab) {
@@ -3932,6 +4142,7 @@ function openAllEditor(node) {
   renderAllEditor(node);
   requestAnimationFrame(moveAllTabThumb);
   m.classList.add('active');
+  phDockApply(m, node);
 }
 function moveAllTabThumb() {
   const m = _allModal; if (!m) return;
@@ -3997,11 +4208,14 @@ function buildRoot(node) {
   const settingsBtn = el('button', 'eph-btn'); settingsBtn.textContent = '设置';
   const cmBtn = el('button', 'eph-btn'); cmBtn.textContent = '卡片管理'; cmBtn.title = '保存 / 加载提示词卡片（userdata/prompts）';
   const addBtn = el('button', 'eph-btn'); addBtn.textContent = '＋ 新增提示词卡片';
-  hd.appendChild(allBtn); hd.appendChild(settingsBtn); hd.appendChild(cmBtn); hd.appendChild(addBtn);
+  const dockBtn = el('button', 'eph-btn'); dockBtn.style.flex = '0 0 auto';
+  node._ezDockBtn = dockBtn; phDockSyncBtn(node);   // 弹窗 ⇄ 平铺（状态持久化在节点 config 的 ui.dock）
+  hd.appendChild(allBtn); hd.appendChild(dockBtn); hd.appendChild(settingsBtn); hd.appendChild(cmBtn); hd.appendChild(addBtn);
   const list = el('div', 'eph-list');
   root.appendChild(hd); root.appendChild(list);
   root._list = list;
   addBtn.addEventListener('click', () => addCard(node));
+  dockBtn.addEventListener('click', () => phDockToggle(node));
   settingsBtn.addEventListener('click', () => openSettings(node));
   allBtn.addEventListener('click', () => openAllEditor(node));
   cmBtn.addEventListener('click', () => openCardMgr(node));
@@ -4169,6 +4383,7 @@ function installSocketLabels(node) {
         pumpFrames();
     };
     scheduleOnRedraw(update);
+    scheduleOnRedraw(phDockTrack);   // 平铺面板跟着画布平移/缩放
     schedule();
   }
 }

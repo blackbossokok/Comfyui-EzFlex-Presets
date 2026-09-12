@@ -106,10 +106,17 @@ function mediaFilesOfSlot(up, slot) {
     // MediaOut 面板会把该输出端口实际承载的文件盖到 socket 上（拆分口=1 个文件，卡片/分组口=该组全部文件）。
     const stamped = sock && sock._ezFiles;
     if (stamped && stamped.length) { const out = []; stamped.forEach((f) => { if (!off[f.id]) pushMediaFile(out, f); }); return out; }
-    const files = (ezMediaFilesOfNode(up, g) || []).filter((f) => !off[f.id]);
+    // 没盖到章（面板还没铺开 / 链接指向的槽位已失效）：只做能精确对上的兜底 —— 按 _ezMediaId 找那一个文件，
+    // 或拆分模式按槽位序号取。**绝不退回「整张卡片的文件列表」**：那会把 MediaLoader 里没接入生成节点、
+    // 或已被「关」掉的素材一起带进编号表和引用媒体（实测踩过）。
+    const all = ezMediaFilesOfNode(up, g) || [];
     const mid = sock && sock._ezMediaId;
-    if (mid != null) { const hit = files.find((f, i) => String(f.id == null ? 'f' + i : f.id) === String(mid)); if (hit) return [hit]; }
-    return files;
+    if (mid != null) {
+      const hit = all.find((f, i) => String(f.id == null ? 'f' + i : f.id) === String(mid));
+      if (hit) return off[hit.id] ? [] : [hit];
+    }
+    if ((up._ezMode || 'split') === 'split') { const f = all[slot]; if (f) return off[f.id] ? [] : [f]; }
+    return [];
   }
   return widgetMediaOfNode(up);
 }
@@ -151,11 +158,18 @@ function isIndexTarget(n) {
   if (!GEN_TYPE_HINT.test(type) && !(n.inputs || []).some((i) => i && !PORT_SKIP.test(String(i.name || '')) && PORT_STRONG.test(String(i.name || '')))) return false;
   return (n.inputs || []).some((i) => i && !PORT_SKIP.test(String(i.name || '')) && portMediaType(i));
 }
+// 同一端口解析出的文件按媒体键去重：端口扇出 / MediaOut 端口复用时同一素材会被取到两次，
+// 不去重会在「引用媒体」里出现重复卡片，编号表也跟着被撑大。
+function dedupeFiles(arr) {
+  const out = []; const seen = new Set();
+  (arr || []).forEach((f) => { const k = mediaKeyOf(f) || (f && f.path); if (k) { if (seen.has(k)) return; seen.add(k); } out.push(f); });
+  return out;
+}
 function filesOnInput(node, inp) {
   const g = node && node.graph; if (!g) return [];
   const link = (g.links || {})[inp.link]; if (!link) return [];
   const up = (((g._nodes || g.nodes) || [])).find((n) => n && String(n.id) === String(link.origin_id));
-  return filesUpstream(up, link.origin_slot | 0, 0);
+  return dedupeFiles(filesUpstream(up, link.origin_slot | 0, 0));
 }
 // 端口上的媒体：直接找到就用；碰到中转节点（内置 Get Video Components / Reroute 等）就顺着它的输入继续往上找。
 // 视频现在按内置约定走 VIDEO 口，接生成节点的帧输入时中间会垫一个 Get Video Components，所以必须能穿透。
@@ -164,6 +178,11 @@ function filesUpstream(node, slot, depth) {
   let direct = [];
   try { direct = mediaFilesOfSlot(node, slot) || []; } catch (_) { direct = []; }
   if (direct.length) return direct;
+  // ⚠️ EzFlex 自家的加载/输出节点是「端到端定义素材」：这个端口承载什么就是什么，端口空就是空。
+  // 不许再顺着它的输入往上捞 —— 否则会捞到 MediaLoader 整张卡片，把没接入生成节点、或已被关掉的
+  // 素材全带进编号表和引用媒体（用户实测：只要 MediaOut 接进了生成节点就冒全部已加载文件）。
+  const st = String(node.type || '');
+  if (st === 'EzFlex-MediaOut' || st === 'EzFlex-MediaLoader') return [];
   const g = node.graph; if (!g) return [];
   for (const inp of (node.inputs || [])) {
     if (!inp || inp.link == null) continue;
