@@ -4,6 +4,7 @@
 // 参考 AUNPassthroughAnyMulti（onExecuted entries + 固定 ANY 输入槽）。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough,
@@ -84,7 +85,7 @@ function attachFullscreen(host, closeFn, onExit) {
   let fs = false;
   const doExit = () => { if (onExit) { try { onExit(); } catch (_) {} } };
   const btn = document.createElement('button');
-  btn.textContent = '⛶'; btn.title = '全屏';
+  btn.textContent = '⛶'; btn.title = ezT('Fullscreen');
   btn.style.cssText = 'position:absolute;bottom:6px;right:6px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:#f7f9fd;border:1px solid #dce3ec;border-radius:8px;color:#5f6b7a;cursor:pointer;font-size:12px;';
   host.appendChild(btn);
   btn.addEventListener('click', (e) => { e.stopPropagation(); fs = !fs; host.classList.toggle('ezpv-fs', fs); if (!fs) doExit(); });
@@ -225,7 +226,7 @@ function modalEl() {
   const box = document.createElement('div');
   box.style.cssText = 'background:#fff;border-radius:12px;padding:12px 14px;width:92%;max-width:640px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid #eef2f8;box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
-  const title = document.createElement('b'); title.textContent = '预览';
+  const title = document.createElement('b'); title.textContent = ezT('Preview');
   const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const ta = document.createElement('textarea'); ta.readOnly = true; ta.spellcheck = false;
@@ -248,7 +249,7 @@ function kvModalEl() {
   const box = document.createElement('div');
   box.style.cssText = 'background:#fff;border-radius:12px;padding:12px 14px;width:92%;max-width:600px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid #eef2f8;box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
-  const title = document.createElement('b'); title.textContent = '详情';
+  const title = document.createElement('b'); title.textContent = ezT('Details');
   const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const list = document.createElement('div');
@@ -262,72 +263,72 @@ function kvModalEl() {
   return _kv;
 }
 const _META_HINTS = {
-  'modelspec.architecture': '架构：决定加载器/插件兼容性（如 stable_diffusion_xl / diffusion_transformer）',
-  'modelspec.author': '作者 / 来源',
-  'modelspec.title': '模型显示名',
-  'modelspec.description': '简介 / 画风说明',
-  'modelspec.tags': '标签',
-  'modelspec.organization': '组织 / 归属',
-  'modelspec.usage': '用法说明',
-  'modelspec.thumbnail': '预览图',
-  'ss_base_model_version': '基础模型：LoRA 绑定哪个底模（匹配错画风会崩）',
-  'ss_network_dim': '训练维度 dim：模型容量，越大越强',
-  'ss_network_dims': '训练维度 dim（多网络）',
-  'ss_network_alpha': '训练缩放系数 alpha：正则强度',
-  'ss_network_module': '网络结构模块',
-  'ss_tag_frequency': '训练关键词 / 触发词及出现次数（比重）',
-  'ss_optimizer': '优化器',
-  'ss_optimizer_args': '优化器参数',
-  'ss_learning_rate': '学习率',
-  'ss_lr': '学习率',
-  'ss_unet_lr': 'UNet 学习率',
-  'ss_text_encoder_lr': '文本编码器学习率',
-  'ss_train_batch_size': '训练批次大小',
-  'ss_batch_size': '训练批次大小',
-  'ss_num_batches_per_epoch': '每轮批次',
-  'ss_training_steps': '训练步数',
-  'ss_epoch': '训练轮数',
-  'ss_resolution': '训练分辨率',
-  'ss_clip_skip': 'CLIP 跳过层',
-  'ss_mixed_precision': '混合精度',
-  'ss_noise_offset': '噪声偏移（影响明暗动态）',
-  'ss_prior_loss_weight': '先验损失权重',
-  'ss_seed': '随机种子',
-  'ss_gradient_accumulation_steps': '梯度累积步数（影响显存/稳定）',
-  'ss_warmup_steps': '预热步数',
-  'ss_keep_tokens': '保留 token 数',
-  'ss_shuffle_caption': '是否打乱标签顺序',
-  'ss_weighted_captions': '是否支持加权标签',
-  'ss_caption_dropout_rate': '描述丢弃率',
-  'ss_tag_dropout_rate': '标签丢弃率',
-  'ss_enable_bucket': '是否分桶训练',
-  'ss_min_bucket_reso': '分桶最小分辨率',
-  'ss_max_bucket_reso': '分桶最大分辨率',
-  'ss_bucket_info': '分桶分辨率分布：数量最多的桶=最佳出图分辨率',
-  'ss_num_images': '训练图片数',
-  'ss_dataset_repeats': '数据集重复次数',
-  'ss_cache_latents': '是否缓存 latent',
-  'ss_flip_aug': '随机翻转增强',
-  'ss_color_aug': '色彩增强',
-  'ss_face_crop_aug_range': '人脸裁剪增强范围',
-  'ss_output_name': '输出名',
-  'ss_sd_model_hash': '底模哈希',
-  'ss_sd_model_name': '底模名称',
-  'ss_vae_hash': '内置 VAE 哈希（空=需外挂 VAE）',
-  'ss_text_encoder_hash': '文本编码器哈希',
-  'ss_training_comment': '训练备注',
-  'ss_model_description': '模型描述',
-  'ss_caption': '提示词',
-  'ss_creator': '创建者',
-  'ss_network_module': '网络模块',
-  'ss_full_bf16': '全 bf16',
-  'ss_lowram': '低显存模式',
-  'ss_latents_upscaler': 'latent 放大方式',
-  'ss_module': '模块',
-  'ss_sd_model_arch': '底模架构',
-  'ss_resolution': '训练分辨率'
+  'modelspec.architecture': 'Architecture: determines loader/plugin compatibility (e.g. stable_diffusion_xl / diffusion_transformer)',
+  'modelspec.author': 'Author / source',
+  'modelspec.title': 'Model display name',
+  'modelspec.description': 'Description / style notes',
+  'modelspec.tags': 'Tags',
+  'modelspec.organization': 'Organization / affiliation',
+  'modelspec.usage': 'Usage notes',
+  'modelspec.thumbnail': 'Thumbnail',
+  'ss_base_model_version': 'Base model: which base model the LoRA is bound to (a mismatch breaks the style)',
+  'ss_network_dim': 'Training dim: model capacity, larger is stronger',
+  'ss_network_dims': 'Training dims (multiple networks)',
+  'ss_network_alpha': 'Training scaling alpha: regularization strength',
+  'ss_network_module': 'Network structure module',
+  'ss_tag_frequency': 'Training keywords / trigger words and their counts (weight)',
+  'ss_optimizer': 'Optimizer',
+  'ss_optimizer_args': 'Optimizer arguments',
+  'ss_learning_rate': 'Learning rate',
+  'ss_lr': 'Learning rate',
+  'ss_unet_lr': 'UNet learning rate',
+  'ss_text_encoder_lr': 'Text encoder learning rate',
+  'ss_train_batch_size': 'Training batch size',
+  'ss_batch_size': 'Training batch size',
+  'ss_num_batches_per_epoch': 'Batches per epoch',
+  'ss_training_steps': 'Training steps',
+  'ss_epoch': 'Epochs',
+  'ss_resolution': 'Training resolution',
+  'ss_clip_skip': 'CLIP skip layers',
+  'ss_mixed_precision': 'Mixed precision',
+  'ss_noise_offset': 'Noise offset (affects brightness dynamics)',
+  'ss_prior_loss_weight': 'Prior loss weight',
+  'ss_seed': 'Seed',
+  'ss_gradient_accumulation_steps': 'Gradient accumulation steps (affects VRAM/stability)',
+  'ss_warmup_steps': 'Warmup steps',
+  'ss_keep_tokens': 'Keep tokens',
+  'ss_shuffle_caption': 'Shuffle captions',
+  'ss_weighted_captions': 'Weighted captions',
+  'ss_caption_dropout_rate': 'Caption dropout rate',
+  'ss_tag_dropout_rate': 'Tag dropout rate',
+  'ss_enable_bucket': 'Bucket training',
+  'ss_min_bucket_reso': 'Minimum bucket resolution',
+  'ss_max_bucket_reso': 'Maximum bucket resolution',
+  'ss_bucket_info': 'Bucket resolution distribution: the most common bucket = best output resolution',
+  'ss_num_images': 'Training image count',
+  'ss_dataset_repeats': 'Dataset repeats',
+  'ss_cache_latents': 'Cache latents',
+  'ss_flip_aug': 'Random flip augmentation',
+  'ss_color_aug': 'Color augmentation',
+  'ss_face_crop_aug_range': 'Face crop augmentation range',
+  'ss_output_name': 'Output name',
+  'ss_sd_model_hash': 'Base model hash',
+  'ss_sd_model_name': 'Base model name',
+  'ss_vae_hash': 'Built-in VAE hash (empty = external VAE required)',
+  'ss_text_encoder_hash': 'Text encoder hash',
+  'ss_training_comment': 'Training comment',
+  'ss_model_description': 'Model description',
+  'ss_caption': 'Prompt',
+  'ss_creator': 'Creator',
+  'ss_network_module': 'Network module',
+  'ss_full_bf16': 'Full bf16',
+  'ss_lowram': 'Low VRAM mode',
+  'ss_latents_upscaler': 'Latent upscaler',
+  'ss_module': 'Module',
+  'ss_sd_model_arch': 'Base model architecture',
+  'ss_resolution': 'Training resolution'
 };
-function hintKey(k) { return _META_HINTS[String(k)] || ''; }
+function hintKey(k) { return ezT(_META_HINTS[String(k)] || ''); }
 
 function openKeyValueModal(title, obj) {
   const m = kvModalEl();
@@ -388,7 +389,7 @@ function mediaEl() {
   const meta = document.createElement('pre'); meta.className = 'ezpv-media-meta'; meta.style.display = 'none';
   const cap = el('div', 'cap');
   body.appendChild(video); body.appendChild(img); body.appendChild(audio); body.appendChild(meta); body.appendChild(cap);
-  const closeBtn = document.createElement('button'); closeBtn.textContent = '✕'; closeBtn.title = '关闭';
+  const closeBtn = document.createElement('button'); closeBtn.textContent = '✕'; closeBtn.title = ezT('Close');
   closeBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:#f7f9fd;border:1px solid #dce3ec;border-radius:8px;padding:2px 9px;font-size:12px;cursor:pointer;font-family:inherit;z-index:2;';
   _media.appendChild(closeBtn);
   _media.appendChild(body); _media._img = img; _media._audio = audio; _media._meta = meta; _media._cap = cap; _media._video = video;
@@ -456,8 +457,8 @@ function open3DViewer(url, title) {
   const box = document.createElement('div');
   box.style.cssText = 'background:#fff;border-radius:18px;padding:14px;width:96%;max-width:1040px;height:88vh;display:flex;flex-direction:column;gap:12px;font-family:Inter,system-ui,sans-serif;box-sizing:border-box;box-shadow:0 30px 90px rgba(0,0,0,.4);overflow:hidden;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;flex:0 0 auto;';
-  const t = document.createElement('b'); t.style.cssText = 'font-size:14px;color:#0f141f;'; t.textContent = title || '3D 模型';
-  const close = document.createElement('button'); close.textContent = '✕'; close.title = '关闭'; close.style.cssText = 'background:#f1f5f9;border:1px solid #dce3ec;border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:#64748b;';
+  const t = document.createElement('b'); t.style.cssText = 'font-size:14px;color:#0f141f;'; t.textContent = title || ezT('3D Model');
+  const close = document.createElement('button'); close.textContent = '✕'; close.title = ezT('Close'); close.style.cssText = 'background:#f1f5f9;border:1px solid #dce3ec;border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:#64748b;';
   hd.appendChild(t); hd.appendChild(close);
 
   // 主体：左画布 + 右控制面板
@@ -465,7 +466,7 @@ function open3DViewer(url, title) {
   const wrapEl = document.createElement('div'); wrapEl.style.cssText = 'flex:1 1 auto;min-width:0;position:relative;border-radius:14px;overflow:hidden;background:#f7f9fd;border:1px solid #e6edf7;';
   const canvas = document.createElement('canvas'); canvas.tabIndex = 0; canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;outline:none;touch-action:none;cursor:grab;';
   wrapEl.appendChild(canvas);
-  const fsBtn = document.createElement('button'); fsBtn.textContent = '⛶'; fsBtn.title = '全屏 / 退出全屏'; fsBtn.style.cssText = 'position:absolute;right:10px;bottom:10px;z-index:8;width:34px;height:34px;border:none;border-radius:10px;background:rgba(255,255,255,.92);color:#64748b;font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15);';
+  const fsBtn = document.createElement('button'); fsBtn.textContent = '⛶'; fsBtn.title = ezT('Fullscreen / Exit fullscreen'); fsBtn.style.cssText = 'position:absolute;right:10px;bottom:10px;z-index:8;width:34px;height:34px;border:none;border-radius:10px;background:rgba(255,255,255,.92);color:#64748b;font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15);';
   wrapEl.appendChild(fsBtn);
 
   // 右侧控制面板
@@ -476,7 +477,7 @@ function open3DViewer(url, title) {
   }
   const bgInput = document.createElement('input'); bgInput.type = 'color'; bgInput.value = '#f7f9fd'; bgInput.style.cssText = 'width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;';
   const matSel = document.createElement('select'); matSel.style.cssText = 'width:100%;font-size:12px;padding:5px 8px;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;';
-  [['original', '原始'], ['clay', '陶土'], ['glass', '玻璃'], ['plastic', '塑料'], ['metal', '金属'], ['wireframe', '线框']].forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; if (v === 'original') o.selected = true; matSel.appendChild(o); });
+  [['original', ezT('Original')], ['clay', ezT('Clay')], ['glass', ezT('Glass')], ['plastic', ezT('Plastic')], ['metal', ezT('Metal')], ['wireframe', ezT('Wireframe')]].forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; if (v === 'original') o.selected = true; matSel.appendChild(o); });
   const gridChk = document.createElement('input'); gridChk.type = 'checkbox'; gridChk.checked = true; gridChk.style.cssText = 'width:16px;height:16px;';
   const matColor = document.createElement('input'); matColor.type = 'color'; matColor.value = '#ffffff'; matColor.style.cssText = 'width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;';
   function slider(label, min, max, val, step) {
@@ -491,7 +492,7 @@ function open3DViewer(url, title) {
     return { g, r, num };
   }
   // 变换工具：3 个按键（移动/旋转/缩放），点击后拖动模型即按该工具变换；无坐标球/选中框
-  const gizmoBtnDefs = [['move', '移动'], ['rotate', '旋转'], ['scale', '缩放']];
+  const gizmoBtnDefs = [['move', ezT('Move')], ['rotate', ezT('Rotate')], ['scale', ezT('Scale')]];
   const gizmoBtnsWrap = document.createElement('div'); gizmoBtnsWrap.style.cssText = 'display:flex;gap:4px;';
   const gizmoBtns = {};
   gizmoBtnDefs.forEach(([v, l]) => {
@@ -500,60 +501,60 @@ function open3DViewer(url, title) {
     b.dataset.mode = v; gizmoBtns[v] = b; gizmoBtnsWrap.appendChild(b);
   });
   const camSel = document.createElement('select'); camSel.style.cssText = 'width:100%;font-size:12px;padding:5px 8px;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;';
-  [['perspective', '透视'], ['orthographic', '正射']].forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; camSel.appendChild(o); });
+  [['perspective', ezT('Perspective')], ['orthographic', ezT('Orthographic')]].forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; camSel.appendChild(o); });
   const fovRange = document.createElement('input'); fovRange.type = 'range'; fovRange.min = '10'; fovRange.max = '120'; fovRange.value = '45'; fovRange.style.cssText = 'width:100%;';
   const fovNum = document.createElement('span'); fovNum.style.cssText = 'font-size:11px;color:#64748b;'; fovNum.textContent = '45°';
   const lightRange = document.createElement('input'); lightRange.type = 'range'; lightRange.min = '0'; lightRange.max = '3'; lightRange.step = '0.1'; lightRange.value = '0.9'; lightRange.style.cssText = 'width:100%;';
   const lightNum = document.createElement('span'); lightNum.style.cssText = 'font-size:11px;color:#64748b;'; lightNum.textContent = '0.9';
   const lightColor = document.createElement('input'); lightColor.type = 'color'; lightColor.value = '#ffffff'; lightColor.style.cssText = 'width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;';
-  const resetBtn = document.createElement('button'); resetBtn.textContent = '复位视角'; resetBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
+  const resetBtn = document.createElement('button'); resetBtn.textContent = ezT('Reset view'); resetBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
 
-  ctrl.appendChild(grp('背景色', bgInput));
-  ctrl.appendChild(grp('预设材质', matSel));
-  const matResetBtn = document.createElement('button'); matResetBtn.textContent = '重置材质'; matResetBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
+  ctrl.appendChild(grp(ezT('Background'), bgInput));
+  ctrl.appendChild(grp(ezT('Preset material'), matSel));
+  const matResetBtn = document.createElement('button'); matResetBtn.textContent = ezT('Reset material'); matResetBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
   ctrl.appendChild(matResetBtn);
   // 材质参数（可收起）：颜色/滑块只对彩色预设（陶土/玻璃/塑料/金属）生效，原始/线框忽略颜色
   const det = document.createElement('details'); det.style.cssText = 'border:1px solid #e6edf7;border-radius:9px;padding:8px;background:#fff;';
-  const sum = document.createElement('summary'); sum.textContent = '材质参数'; sum.style.cssText = 'cursor:pointer;font-size:12px;font-weight:600;color:#334155;';
+  const sum = document.createElement('summary'); sum.textContent = ezT('Material parameters'); sum.style.cssText = 'cursor:pointer;font-size:12px;font-weight:600;color:#334155;';
   det.appendChild(sum);
-  det.appendChild(grp('材质颜色', matColor));
+  det.appendChild(grp(ezT('Material color'), matColor));
   const mats = {};
-  mats.metal = slider('金属度', 0, 1, 0);
-  mats.rough = slider('粗糙度', 0, 1, 0.85);
-  mats.clear = slider('清漆', 0, 1, 0);
-  mats.clearR = slider('清漆粗糙度', 0, 1, 0.1);
-  mats.trans = slider('透射', 0, 1, 0);
-  mats.opacity = slider('不透明', 0, 1, 1);
-  mats.ior = slider('折射率 (IOR)', 1, 2.5, 1.45);
-  mats.thick = slider('厚度 (次表面/透射)', 0, 3, 0.2);
-  mats.emiss = slider('自发光', 0, 2, 0);
-  mats.sheen = slider('边缘光泽', 0, 1, 0);
-  mats.sheenR = slider('光泽粗糙度', 0, 1, 0.5);
-  mats.iri = slider('薄膜 (彩虹)', 0, 1, 0);
-  mats.iriIOR = slider('薄膜 IOR', 1, 2.5, 1.3);
-  mats.spec = slider('高光强度', 0, 1, 0.5);
+  mats.metal = slider(ezT('Metalness'), 0, 1, 0);
+  mats.rough = slider(ezT('Roughness'), 0, 1, 0.85);
+  mats.clear = slider(ezT('Clearcoat'), 0, 1, 0);
+  mats.clearR = slider(ezT('Clearcoat roughness'), 0, 1, 0.1);
+  mats.trans = slider(ezT('Transmission'), 0, 1, 0);
+  mats.opacity = slider(ezT('Opacity'), 0, 1, 1);
+  mats.ior = slider(ezT('Index of refraction (IOR)'), 1, 2.5, 1.45);
+  mats.thick = slider(ezT('Thickness (subsurface/transmission)'), 0, 3, 0.2);
+  mats.emiss = slider(ezT('Emissive'), 0, 2, 0);
+  mats.sheen = slider(ezT('Sheen'), 0, 1, 0);
+  mats.sheenR = slider(ezT('Sheen roughness'), 0, 1, 0.5);
+  mats.iri = slider(ezT('Iridescence (rainbow)'), 0, 1, 0);
+  mats.iriIOR = slider(ezT('Iridescence IOR'), 1, 2.5, 1.3);
+  mats.spec = slider(ezT('Specular intensity'), 0, 1, 0.5);
   det.appendChild(mats.metal.g); det.appendChild(mats.rough.g); det.appendChild(mats.clear.g); det.appendChild(mats.clearR.g);
   det.appendChild(mats.trans.g); det.appendChild(mats.opacity.g); det.appendChild(mats.ior.g); det.appendChild(mats.thick.g);
   det.appendChild(mats.emiss.g); det.appendChild(mats.sheen.g); det.appendChild(mats.sheenR.g); det.appendChild(mats.iri.g);
   det.appendChild(mats.iriIOR.g); det.appendChild(mats.spec.g);
   ctrl.appendChild(det);
-  ctrl.appendChild(grp('显示网格', gridChk));
+  ctrl.appendChild(grp(ezT('Show grid'), gridChk));
   const toolGrp = document.createElement('div'); toolGrp.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
-  const toolLabel = document.createElement('span'); toolLabel.style.cssText = 'font-size:11px;font-weight:600;color:#64748b;'; toolLabel.textContent = '变换工具（拖模型）';
+  const toolLabel = document.createElement('span'); toolLabel.style.cssText = 'font-size:11px;font-weight:600;color:#64748b;'; toolLabel.textContent = ezT('Transform tool (drag model)');
   toolGrp.appendChild(toolLabel); toolGrp.appendChild(gizmoBtnsWrap);
   ctrl.appendChild(toolGrp);
-  ctrl.appendChild(grp('相机', camSel));
-  const fovGrp = grp('视场', fovRange); fovGrp.appendChild(fovNum); ctrl.appendChild(fovGrp);
-  const lightGrp = grp('灯光强度', lightRange); lightGrp.appendChild(lightNum); ctrl.appendChild(lightGrp);
-  ctrl.appendChild(grp('灯光颜色', lightColor));
+  ctrl.appendChild(grp(ezT('Camera'), camSel));
+  const fovGrp = grp(ezT('Field of view'), fovRange); fovGrp.appendChild(fovNum); ctrl.appendChild(fovGrp);
+  const lightGrp = grp(ezT('Light intensity'), lightRange); lightGrp.appendChild(lightNum); ctrl.appendChild(lightGrp);
+  ctrl.appendChild(grp(ezT('Light color'), lightColor));
   ctrl.appendChild(resetBtn);
-  const resetModelBtn = document.createElement('button'); resetModelBtn.textContent = '复位模型'; resetModelBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
+  const resetModelBtn = document.createElement('button'); resetModelBtn.textContent = ezT('Reset model'); resetModelBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
   ctrl.appendChild(resetModelBtn);
 
   const status = document.createElement('div'); status.style.cssText = 'font-size:12px;color:#64748b;text-align:center;min-height:18px;line-height:1.4;word-break:break-word;';
-  status.textContent = '加载 3D 模型…';
+  status.textContent = ezT('Loading 3D model…');
   const tip = document.createElement('div'); tip.style.cssText = 'font-size:11px;color:#94a3b8;';
-  tip.textContent = '左键拖拽=环绕 · Shift/右键=平移 · 滚轮=缩放';
+  tip.textContent = ezT('Left drag = orbit · Shift/Right drag = pan · Wheel = zoom');
 
   body.appendChild(wrapEl); body.appendChild(ctrl);
   box.appendChild(hd); box.appendChild(body); box.appendChild(status); box.appendChild(tip);
@@ -605,14 +606,14 @@ function open3DViewer(url, title) {
         loader = new objs.OBJLoader();
       } else {
         // 只随包带了 GLTF / FBX / OBJ 三个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
-        throw new Error(`不支持的 3D 格式 .${ext || '?'}（仅支持 glb / gltf / obj / fbx）`);
+        throw new Error(`${ezT('Unsupported 3D format .')}${ext || '?'}${ezT(' (only glb / gltf / obj / fbx are supported)')}`);
       }
       // 让加载器把相对贴图/缓冲 URL 解析到源文件所在目录（外部贴图由此能加载）
       loader.resourcePath = url.slice(0, url.lastIndexOf('/') + 1);
       try {
         const lm = new THREE.LoadingManager();
-        lm.onError = (u) => { try { console.log('[3D 贴图/资源加载失败]', u); } catch (_) {} };
-        lm.onStart = (u, n, t) => { try { console.log('[3D 加载资源]', u); } catch (_) {} };
+        lm.onError = (u) => { try { console.log('[3D texture/resource load failed]', u); } catch (_) {} };
+        lm.onStart = (u, n, t) => { try { console.log('[3D loading resource]', u); } catch (_) {} };
         loader.manager = lm;
       } catch (_) {}
 
@@ -846,11 +847,11 @@ function open3DViewer(url, title) {
           defaultView();
           setTimeout(fit, 60);
         },
-        (ev) => { const pct = (ev && ev.total) ? Math.round(ev.loaded / ev.total * 100) : ''; status.textContent = pct ? `加载中… ${pct}%` : '加载中…'; },
-        (err) => { status.textContent = '加载失败: ' + (((err && err.message) || err) || ''); }
+        (ev) => { const pct = (ev && ev.total) ? Math.round(ev.loaded / ev.total * 100) : ''; status.textContent = pct ? `${ezT('Loading…')} ${pct}%` : ezT('Loading…'); },
+        (err) => { status.textContent = ezT('Load failed: ') + (((err && err.message) || err) || ''); }
       );
     } catch (e) {
-      status.textContent = '3D 初始化失败: ' + (((e && (e.message || e)) || e));
+      status.textContent = ezT('3D init failed: ') + (((e && (e.message || e)) || e));
     }
   })();
 }
@@ -863,8 +864,8 @@ function renderPreview(entry) {
   const full = entry.full_value || val;
   const type = (entry.type || '').toUpperCase();
   if (entry.audio || entry.audio_src) {
-    const box = el('div', 'ezpv-prev'); const ph = el('span', 'ph'); ph.textContent = val || '音频'; box.appendChild(ph);
-    box.title = '点击播放音频';
+    const box = el('div', 'ezpv-prev'); const ph = el('span', 'ph'); ph.textContent = val || ezT('Audio'); box.appendChild(ph);
+    box.title = ezT('Click to play audio');
     box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ audio: entry.audio, audio_src: entry.audio_src, caption: (entry.caption || '') + '  ' + val }); });
     return box;
   }
@@ -873,7 +874,7 @@ function renderPreview(entry) {
     const img = el('img'); if (entry.preview) img.src = 'data:image/png;base64,' + entry.preview; img.alt = val;
     box.appendChild(img);
     const play = el('span', 'ezpv-play'); play.textContent = '▶'; box.appendChild(play);
-    if (entry.frames > 1) { const b = el('span', 'ezpv-badge'); b.textContent = entry.frames + ' 帧'; box.appendChild(b); }
+    if (entry.frames > 1) { const b = el('span', 'ezpv-badge'); b.textContent = entry.frames + ezT(' frames'); box.appendChild(b); }
     box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ video: entry.video, video_src: entry.video_src, poster: entry.preview ? ('data:image/png;base64,' + entry.preview) : null, caption: (entry.caption || '') + '  ' + val }); });
     return box;
   }
@@ -882,11 +883,11 @@ function renderPreview(entry) {
     box.style.position = 'relative';
     const img = el('img'); img.src = 'data:image/png;base64,' + entry.preview; img.alt = val;
     box.appendChild(img);
-    if (entry.frames > 1) { const b = el('span', 'ezpv-badge'); b.textContent = entry.frames + ' 帧'; box.appendChild(b); }
+    if (entry.frames > 1) { const b = el('span', 'ezpv-badge'); b.textContent = entry.frames + ezT(' frames'); box.appendChild(b); }
     if (entry.gen_meta) {
-      const g = el('span', 'ezpv-gen'); g.textContent = '生成信息';
+      const g = el('span', 'ezpv-gen'); g.textContent = ezT('Generation info');
       g.style.cssText = 'position:absolute;top:4px;right:4px;z-index:5;background:rgba(255,255,255,.92);border:1px solid #dce3ec;border-radius:7px;padding:1px 7px;font-size:10px;cursor:pointer;color:#2563eb;box-shadow:0 1px 3px rgba(0,0,0,.12);';
-      g.addEventListener('click', (e) => { e.stopPropagation(); try { openKeyValueModal((entry.caption || '') + ' 生成信息', JSON.parse(entry.gen_meta)); } catch (_) { openTextModal((entry.caption || '') + ' 生成信息', entry.gen_meta); } });
+      g.addEventListener('click', (e) => { e.stopPropagation(); try { openKeyValueModal((entry.caption || '') + ezT(' Generation info'), JSON.parse(entry.gen_meta)); } catch (_) { openTextModal((entry.caption || '') + ezT(' Generation info'), entry.gen_meta); } });
       box.appendChild(g);
     }
     box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ image: img.src, image_src: entry.image_src, caption: (entry.caption || '') + '  ' + val, meta: entry.meta, frames: entry.frames, type }); });
@@ -895,21 +896,21 @@ function renderPreview(entry) {
   if (type === 'MODEL_3D' || type === 'FILE_3D' || type === 'MESH') {   // MESH：顶点/面张量已在后端导成临时 OBJ
     const box = el('div', 'ezpv-prev long');
     box.textContent = val;
-    box.title = '点击打开 3D 查看器（拖拽旋转，滚轮缩放）';
+    box.title = ezT('Click to open the 3D viewer (drag to rotate, wheel to zoom)');
     box.addEventListener('click', (e) => { e.stopPropagation(); if (entry.model3d) open3DViewer(entry.model3d, (entry.caption || '') + '  ' + val); });
     return box;
   }
   if (entry.meta || type === 'MODEL' || type === 'CLIP' || type === 'VAE') {
     const box = el('div', 'ezpv-prev long');
     box.textContent = val;
-    box.title = '点击查看详情（元数据）';
+    box.title = ezT('Click to view details (metadata)');
     box.addEventListener('click', (e) => {
       e.stopPropagation();
       const metaStr = entry.meta || full;
       if (typeof metaStr === 'string' && (metaStr.trim().startsWith('{') || metaStr.trim().startsWith('['))) {
-        try { openKeyValueModal(entry.caption || '详情', JSON.parse(metaStr)); return; } catch (_) {}
+        try { openKeyValueModal(entry.caption || ezT('Details'), JSON.parse(metaStr)); return; } catch (_) {}
       }
-      openTextModal(entry.caption || '详情', typeof metaStr === 'string' ? metaStr : full);
+      openTextModal(entry.caption || ezT('Details'), typeof metaStr === 'string' ? metaStr : full);
     });
     return box;
   }
@@ -917,8 +918,8 @@ function renderPreview(entry) {
     const box = el('div', 'ezpv-prev long');
     box.textContent = val;
     const isKV = type === 'DICT' || type === 'LIST' || type === 'TUPLE';
-    box.title = isKV ? '点击查看键值详情' : '点击查看完整内容';
-    box.addEventListener('click', (e) => { e.stopPropagation(); if (isKV) openKeyValueModal(entry.caption || '详情', full); else openTextModal(entry.caption || '预览', full); });
+    box.title = isKV ? ezT('Click to view key-value details') : ezT('Click to view full content');
+    box.addEventListener('click', (e) => { e.stopPropagation(); if (isKV) openKeyValueModal(entry.caption || ezT('Details'), full); else openTextModal(entry.caption || ezT('Preview'), full); });
     return box;
   }
   const box = el('div', 'ezpv-prev'); return box;
@@ -933,7 +934,7 @@ function renderEntries(node) {
   const linked = (node.inputs || []).filter((i) => i.link != null);
   const conn = linked.length;
   list.innerHTML = '';
-  if (!conn) { list.appendChild(el('div', 'ezpv-empty')).textContent = '从左侧输入端口拖线连接，自动生成预览卡片'; return; }
+  if (!conn) { list.appendChild(el('div', 'ezpv-empty')).textContent = ezT('Drag a wire from an input port on the left to auto-create preview cards'); return; }
   for (let i = 0; i < conn; i++) list.appendChild(renderCard(node, i, (st.entries || [])[i]));
   attachDnD(list, '.ezpv-card', '.ezpv-handle', (from, to) => reorderCard(node, from, to));
   fitNode(node);
@@ -944,9 +945,9 @@ function renderCard(node, index, entry) {
   const handle = el('span', 'ezpv-handle'); handle.textContent = '⠿';
   const body = el('div', 'ezpv-body');
   const crow = el('div', 'ezpv-crow');
-  const name = el('span', 'ezpv-cname'); name.textContent = (entry && entry.caption) || `输入 ${index + 1}`;
+  const name = el('span', 'ezpv-cname'); name.textContent = (entry && entry.caption) || `${ezT('Input')} ${index + 1}`;
   const badge = el('span', 'ezpv-badge'); badge.textContent = (entry && entry.type) || 'ANY';
-  const fldr = el('button', 'ezpv-fldr'); fldr.title = '打开保存位置并选中文件';
+  const fldr = el('button', 'ezpv-fldr'); fldr.title = ezT('Open the save location and select the file');
   fldr.innerHTML = '<svg width="14" height="12" viewBox="0 0 24 20" fill="currentColor"><path d="M2 3h7l2 2h11v12H2z"/></svg>';
   fldr.addEventListener('click', () => { if (entry && entry.saved_path) openSavedFile(entry.saved_path); });
   crow.appendChild(name); crow.appendChild(badge); crow.appendChild(fldr);
@@ -974,16 +975,16 @@ function formatModalEl() {
   const box = document.createElement('div');
   box.style.cssText = 'background:#fff;border-radius:16px;padding:14px 16px;width:92%;max-width:420px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
-  const title = document.createElement('b'); title.textContent = '保存类型';
+  const title = document.createElement('b'); title.textContent = ezT('Save types');
   const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const fields = document.createElement('div'); fields.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto;';
   const opts = { image: ['png', 'jpeg', 'webp', 'bmp', 'tiff'], audio: ['wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac'], video: ['mp4', 'webm', 'mov', 'gif', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'] };
-  const labels = { image: '图像', audio: '音频', video: '视频', text: '文本' };
+  const labels = { image: ezT('Image'), audio: ezT('Audio'), video: ezT('Video'), text: ezT('Text') };
   const subDefs = {
-    image: [{ key: 'quality', label: '质量', values: ['90', '95', '100'] }],
-    audio: [{ key: 'codec', label: '编码器', values: ['aac', 'mp3', 'flac', 'opus'] }, { key: 'bitrate', label: '码率', values: ['128k', '192k', '320k'] }, { key: 'sr', label: '采样Hz', values: ['44100', '48000', '22050'] }],
-    video: [{ key: 'codec', label: '编码器', values: ['h264', 'vp9', 'av1'] }, { key: 'crf', label: '质量CRF', values: ['18', '23', '28'] }, { key: 'fps', label: '帧率', values: ['24', '30'] }],
+    image: [{ key: 'quality', label: ezT('Quality'), values: ['90', '95', '100'] }],
+    audio: [{ key: 'codec', label: ezT('Encoder'), values: ['aac', 'mp3', 'flac', 'opus'] }, { key: 'bitrate', label: ezT('Bitrate'), values: ['128k', '192k', '320k'] }, { key: 'sr', label: ezT('Sample rate (Hz)'), values: ['44100', '48000', '22050'] }],
+    video: [{ key: 'codec', label: ezT('Encoder'), values: ['h264', 'vp9', 'av1'] }, { key: 'crf', label: ezT('Quality CRF'), values: ['18', '23', '28'] }, { key: 'fps', label: ezT('Frame rate'), values: ['24', '30'] }],
     text: []
   };
   const selects = {}; const subSelects = {};
@@ -1011,7 +1012,7 @@ function formatModalEl() {
     selects[cat] = sel;
   });
   const ft = document.createElement('div'); ft.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #f0f4fc;padding-top:10px;';
-  const save = document.createElement('button'); save.textContent = '确定'; save.style.cssText = 'background:#1a1a2e;color:#fff;border:1px solid #1a1a2e;border-radius:9px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const save = document.createElement('button'); save.textContent = ezT('OK'); save.style.cssText = 'background:#1a1a2e;color:#fff;border:1px solid #1a1a2e;border-radius:9px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
   ft.appendChild(save);
   box.appendChild(hd); box.appendChild(fields); box.appendChild(ft);
   _fmtModal.appendChild(box); document.body.appendChild(_fmtModal);
@@ -1051,27 +1052,27 @@ function openDataPreviewModal() {
   const box = document.createElement('div');
   box.style.cssText = 'background:#fff;border-radius:16px;padding:14px 16px;width:94%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
-  const t = document.createElement('b'); t.textContent = '数据预览类型 / 格式';
+  const t = document.createElement('b'); t.textContent = ezT('Data preview types / formats');
   const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(t); hd.appendChild(close);
   const rows = [
-    ['IMAGE', 'PNG / JPEG / WebP / BMP / TIFF（缩放查看）'],
-    ['MASK', '灰度 PNG'],
-    ['AUDIO', 'WAV / MP3 / FLAC / OGG / M4A / AAC（播放）'],
-    ['VIDEO', 'MP4 / WebM / MOV / GIF / AVI / MKV（封面+播放）'],
+    ['IMAGE', ezT('PNG / JPEG / WebP / BMP / TIFF (zoom to view)')],
+    ['MASK', ezT('Grayscale PNG')],
+    ['AUDIO', ezT('WAV / MP3 / FLAC / OGG / M4A / AAC (play)')],
+    ['VIDEO', ezT('MP4 / WebM / MOV / GIF / AVI / MKV (poster + playback)')],
     ['STRING / INT / FLOAT / BOOLEAN', 'TXT / MD / JSON / CSV / LOG / HTML'],
-    ['DICT', '键值树（键:值）'],
-    ['LIST / TUPLE / SET', '索引值树（序号:值）'],
-    ['LATENT / CONDITIONING', 'shape + 说明（无文件）'],
-    ['MODEL(ckpt/unet)', 'safetensors / gguf / onnx / ckpt / pt（名称/架构/归属/作者/触发词）'],
+    ['DICT', ezT('Key-value tree (key:value)')],
+    ['LIST / TUPLE / SET', ezT('Index-value tree (index:value)')],
+    ['LATENT / CONDITIONING', ezT('shape + description (no file)')],
+    ['MODEL(ckpt/unet)', ezT('safetensors / gguf / onnx / ckpt / pt (name/architecture/organization/author/trigger words)')],
     ['CLIP / VAE', 'safetensors / gguf / onnx'],
-    ['MODEL_3D', 'glb / gltf / obj / fbx（three.js 查看器）'],
-    ['FILE_3D', '内置 Load3D 的 FILE_3D 模型（glb / gltf / obj / fbx）'],
-    ['MESH', '顶点/面张量 → 临时 OBJ + three.js 查看器（Hunyuan3D / Trellis / MoGe 等）'],
-    ['SPLAT / VOXEL', '高斯泼溅 / 体素：只给摘要（暂不支持可视化）'],
-    ['CONTROL_NET / CLIP_VISION / STYLE_MODEL / UPSCALE_MODEL / LORA_MODEL / GLIGEN', '文本摘要'],
-    ['SAMPLER / SIGMAS / GUIDER / NOISE / SEGS', '文本摘要'],
-    ['EMPTY', '“(未连接)”'],
+    ['MODEL_3D', ezT('glb / gltf / obj / fbx (three.js viewer)')],
+    ['FILE_3D', ezT('FILE_3D model from the built-in Load3D (glb / gltf / obj / fbx)')],
+    ['MESH', ezT('Vertex/face tensors → temporary OBJ + three.js viewer (Hunyuan3D / Trellis / MoGe, etc.)')],
+    ['SPLAT / VOXEL', ezT('Gaussian splats / voxels: summary only (visualization not supported yet)')],
+    ['CONTROL_NET / CLIP_VISION / STYLE_MODEL / UPSCALE_MODEL / LORA_MODEL / GLIGEN', ezT('Text summary')],
+    ['SAMPLER / SIGMAS / GUIDER / NOISE / SEGS', ezT('Text summary')],
+    ['EMPTY', ezT('"(not connected)"')],
   ];
   const list = document.createElement('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:4px;overflow:auto;';
   rows.forEach(([k, v]) => { const r = document.createElement('div'); r.style.cssText = 'display:flex;gap:8px;font-size:12px;'; const kk = document.createElement('b'); kk.textContent = k; kk.style.cssText = 'flex:0 0 180px;color:#1a1f2b;'; const vv = document.createElement('span'); vv.textContent = v; vv.style.cssText = 'flex:1 1 auto;color:#5f6b7a;word-break:break-all;'; r.appendChild(kk); r.appendChild(vv); list.appendChild(r); });
@@ -1090,9 +1091,9 @@ function buildRoot(node) {
   node._ezRoot = shell;
   const hd = el('div', 'ezpv-hd');
   const saveBtn = el('button', 'ezpv-btn ezpv-save');
-  const locBtn = el('button', 'ezpv-btn ezpv-loc'); locBtn.textContent = '保存位置';
-  const fmtBtn = el('button', 'ezpv-btn'); fmtBtn.textContent = '保存选项';
-  const infoBtn = el('button', 'ezpv-btn'); infoBtn.textContent = '数据预览';
+  const locBtn = el('button', 'ezpv-btn ezpv-loc'); locBtn.textContent = ezT('Save location');
+  const fmtBtn = el('button', 'ezpv-btn'); fmtBtn.textContent = ezT('Save options');
+  const infoBtn = el('button', 'ezpv-btn'); infoBtn.textContent = ezT('Data preview');
   hd.appendChild(saveBtn); hd.appendChild(locBtn); hd.appendChild(fmtBtn); hd.appendChild(infoBtn);
   const list = el('div', 'ezpv-list');
   root.appendChild(hd); root.appendChild(list);
@@ -1116,7 +1117,7 @@ function refreshSaveBtn(btn, save) {
   if (!btn) return;
   btn.classList.toggle('on', !!save);
   btn.classList.toggle('off', !save);
-  btn.title = '是否保存';
+  btn.title = ezT('Whether to save');
   if (!btn._docIcon) {
     // 软盘图标 + 内部小 auto 字样
     btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5a1 1 0 0 1 1-1h11l4 4v11a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><rect x="7" y="3.6" width="7" height="5" rx="1"/><path d="M6 14.5h12v6H6z"/></svg><span class="ezpv-auto">auto</span>';
@@ -1253,6 +1254,11 @@ function hookPrototype(nt) {
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPrevSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }
+// 语言切换后重画同类型节点的面板（ezT 在渲染时求值，重画即换语言）
+onLocaleChange(() => {
+  ((app && app.graph && app.graph._nodes) || []).forEach((n) => { if (n && n.type === NODE) { try { refreshUI(n); } catch (_) {} } });
+});
+
 app.registerExtension({
   name: 'Comfy.EzFlex.PreviewAny',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },

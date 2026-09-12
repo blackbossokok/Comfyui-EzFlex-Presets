@@ -1,0 +1,7 @@
+# 不随节点包发布的内容（gitignore 语法，comfy node publish 用）
+_dev_tests/
+.github/
+user_data/
+__pycache__/
+*.pyc
+*.log

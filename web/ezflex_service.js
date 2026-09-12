@@ -1,6 +1,7 @@
 // EzFlex 控制节点共享模块：节点注册表 / 画布分组匹配 / node.mode 控制 / 预设库 API / 命名弹窗。
 // 参考 rgthree Fast Groups Muter/Bypasser：分组按 颜色+标题正则 匹配，控制 = node.mode 0/2/4。
 import { app } from "../../scripts/app.js";
+import { ezT } from "./ezflex_i18n.js";
 import { api } from "../../scripts/api.js";
 
 // 判断当前是否处于「Nodes 2.0」（Vue 节点编辑器）模式。
@@ -88,12 +89,15 @@ export function scheduleOnRedraw(fn) {
   window.addEventListener('resize', () => pumpFrames(), { passive: true });
   window.addEventListener('scroll', () => pumpFrames(), { passive: true, capture: true });
   on('ezflex:changed', () => _runScheds());   // 注册表变化：立刻刷一次
+  // 语言切换（ezflex_i18n 在 window 上派发）：各面板的 update 都挂在调度集合里，立刻重画一次
+  window.addEventListener('ezflex:locale', () => { _runScheds(); try { app.graph.setDirtyCanvas(true, true); } catch (_) {} }, { passive: true });
   if (EZ_PERF.labelFallbackMs > 0) setInterval(_runScheds, EZ_PERF.labelFallbackMs);
 }
 
 export const MODE_NUM = { on: 0, off: 2, bypass: 4 }; // LiteGraph.ALWAYS / NEVER / BYPASS
-export const BASE_PRESETS = ["全部开启", "全部禁用", "全部绕过"];
-export function isBasePreset(k) { return BASE_PRESETS.indexOf(k) >= 0; }
+export const BASE_PRESETS = ["Enable All", "Disable All", "Bypass All"];
+const BASE_PRESETS_LEGACY = ["全部开启", "全部禁用", "全部绕过"];   // 旧工作流里存的中文预置名，继续认
+export function isBasePreset(k) { return BASE_PRESETS.indexOf(k) >= 0 || BASE_PRESETS_LEGACY.indexOf(k) >= 0; }
 
 // ===== 节点注册表（按类型收集画布上的 EzFlex 控制节点实例）=====
 const _registry = new Map(); // type -> Map<nodeId, node>
@@ -247,8 +251,8 @@ export function installResizeHandles(node, shell) {
   };
   // 只保留竖向(下缘左侧，底部无 socket) + 斜向(右下角)；去掉横向右缘手柄，避免压住输出 socket 拖线。
   // 宽度调整可拖右下角斜向手柄（横向移动即只改宽）。
-  const height = mk('width:26px;height:14px;bottom:-8px;left:0;', 'ns-resize', '拖动调整高度', 30);
-  const both = mk('width:22px;height:22px;right:-10px;bottom:-10px;border-radius:50%;', 'nwse-resize', '拖动调整宽高', 35);
+  const height = mk('width:26px;height:14px;bottom:-8px;left:0;', 'ns-resize', 'Drag to resize height', 30);
+  const both = mk('width:22px;height:22px;right:-10px;bottom:-10px;border-radius:50%;', 'nwse-resize', 'Drag to resize (both)', 35);
   const start = (mode, e) => {
     if (e.button !== 0) return;
     e.preventDefault(); e.stopPropagation();
@@ -354,8 +358,8 @@ export function uiPrompt(msg, def) {
       const input = document.createElement('input'); input.type = 'text';
       input.style.cssText = 'font-family:inherit;font-size:13px;padding:6px 9px;border:1px solid #d0d5dd;border-radius:7px;outline:none;width:100%;box-sizing:border-box;';
       const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:6px;justify-content:flex-end;';
-      const ok = document.createElement('button'); ok.textContent = '确定';
-      const cancel = document.createElement('button'); cancel.textContent = '取消';
+      const ok = document.createElement('button'); ok.textContent = ezT('OK');
+      const cancel = document.createElement('button'); cancel.textContent = ezT('Cancel');
       [ok, cancel].forEach((b) => { b.style.cssText = 'font-family:inherit;font-size:12px;font-weight:500;cursor:pointer;padding:5px 14px;border:1px solid #d0d5dd;border-radius:7px;background:#fff;color:#1a1a2e;'; });
       ok.style.cssText += 'background:#34a853;border-color:#34a853;color:#fff;';
       row.appendChild(ok); row.appendChild(cancel);
@@ -385,8 +389,8 @@ export function uiConfirm(msg) {
       box.style.cssText = 'background:#fff;border:1px solid #d0d5dd;border-radius:12px;padding:16px 18px;box-shadow:0 14px 44px rgba(0,0,0,.24);display:flex;flex-direction:column;gap:14px;min-width:300px;max-width:380px;font-family:Inter,sans-serif;';
       const lab = document.createElement('div'); lab.style.cssText = 'font-size:13px;color:#1a1a2e;line-height:1.5;word-break:break-all;';
       const row = document.createElement('div'); row.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
-      const ok = document.createElement('button'); ok.textContent = '确定';
-      const cancel = document.createElement('button'); cancel.textContent = '取消';
+      const ok = document.createElement('button'); ok.textContent = ezT('OK');
+      const cancel = document.createElement('button'); cancel.textContent = ezT('Cancel');
       [ok, cancel].forEach((b) => { b.style.cssText = 'font-family:inherit;font-size:13px;font-weight:500;cursor:pointer;padding:6px 16px;border:1px solid #dce3ec;border-radius:10px;background:#fff;color:#1a1f2b;transition:all .12s;'; });
       ok.style.cssText += 'background:#ea4335;border-color:#ea4335;color:#fff;';
       cancel.addEventListener('mouseenter', () => { cancel.style.background = '#edf2fa'; });
@@ -461,12 +465,12 @@ export function makeAudioPlayer(url) {
   }
   const wrap = document.createElement('div'); wrap.className = 'ez-ap';
   const audio = document.createElement('audio'); audio.src = url; audio.preload = 'metadata'; audio.style.cssText = 'position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
-  const play = document.createElement('button'); play.type = 'button'; play.textContent = '▶'; play.title = '播放/暂停';
+  const play = document.createElement('button'); play.type = 'button'; play.textContent = '▶'; play.title = ezT('Play / Pause');
   const time = document.createElement('span'); time.className = 'ez-ap-time'; time.textContent = '0:00 / 0:00';
   const track = document.createElement('div'); track.className = 'ez-ap-track';
   const fill = document.createElement('div'); fill.className = 'ez-ap-fill'; track.appendChild(fill);
-  const volBtn = document.createElement('button'); volBtn.type = 'button'; volBtn.className = 'ez-ap-vol'; volBtn.textContent = '🔊'; volBtn.title = '静音/取消静音';
-  const volRange = document.createElement('input'); volRange.type = 'range'; volRange.min = '0'; volRange.max = '100'; volRange.value = '100'; volRange.title = '音量'; volRange.style.cssText = 'width:46px;height:4px;accent-color:#5f6b7a;';
+  const volBtn = document.createElement('button'); volBtn.type = 'button'; volBtn.className = 'ez-ap-vol'; volBtn.textContent = '🔊'; volBtn.title = ezT('Mute / Unmute');
+  const volRange = document.createElement('input'); volRange.type = 'range'; volRange.min = '0'; volRange.max = '100'; volRange.value = '100'; volRange.title = ezT('Volume'); volRange.style.cssText = 'width:46px;height:4px;accent-color:#5f6b7a;';
   const fmt = (s) => { const m = Math.floor((s || 0) / 60), ss = Math.floor((s || 0) % 60); return m + ':' + String(ss).padStart(2, '0'); };
   play.addEventListener('click', () => { if (audio.paused) audio.play(); else audio.pause(); });
   audio.addEventListener('timeupdate', () => { if (isFinite(audio.duration) && audio.duration > 0) fill.style.width = Math.min(100, audio.currentTime / audio.duration * 100) + '%'; time.textContent = fmt(audio.currentTime) + ' / ' + fmt(audio.duration); });

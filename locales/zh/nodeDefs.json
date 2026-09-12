@@ -1,0 +1,48 @@
+{
+  "EzFlex-ModelsCombo": {
+    "description": "模型组合加载器",
+    "inputs": { "config": { "tooltip": "从「模型组合配置器」页面复制的 JSON 配置（加载器数组）。" } }
+  },
+  "EzFlex-FreeLatent": {
+    "description": "分辨率/Latent 选择器",
+    "inputs": {
+      "config": { "tooltip": "「分辨率选择器」面板生成的配置 JSON（宽度/高度/批次/算法/比例等）。" },
+      "width": { "tooltip": "外部宽度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。" },
+      "height": { "tooltip": "外部高度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。" },
+      "batch_size": { "tooltip": "外部批次：>0 时覆盖面板批次（不填/为 0 时用面板值）。" }
+    },
+    "outputs": {
+      "0": { "name": "Latent", "tooltip": "空 latent (batch,4,height/8,width/8)" },
+      "1": { "name": "Width", "tooltip": "像素宽度" },
+      "2": { "name": "Height", "tooltip": "像素高度" },
+      "3": { "name": "Batch", "tooltip": "批次数量" }
+    }
+  },
+  "EzFlex-NodeSwitchGroup": { "description": "节点开关组" },
+  "EzFlex-NodeSwitchMaster": { "description": "节点总控制" },
+  "EzFlex-MainControl": { "description": "总控制节点" },
+  "EzFlex-ParamPresetControl": { "description": "参数预设控制节点" },
+  "EzFlex-ParamPresetOutput": {
+    "description": "参数输出控制节点",
+    "inputs": { "config": { "tooltip": "「参数预设输出」面板生成的配置 JSON（局部启用/禁用参数 id 集合）。" } }
+  },
+  "EzFlex-PreviewAny": {
+    "description": "任意预览",
+    "inputs": { "config": { "tooltip": "「任意预览」配置（是否存档 + 存档相对目录）。" } }
+  },
+  "EzFlex-MediaLoader": {
+    "description": "素材加载器",
+    "inputs": { "config": { "tooltip": "「素材加载器」面板生成的配置 JSON（分组/卡片/文件）。" } }
+  },
+  "EzFlex-MediaOut": {
+    "description": "素材输出",
+    "inputs": {
+      "card": { "tooltip": "来自 EzFlex-MediaLoader 的某张「素材卡片」端口（深红输入）。" },
+      "config": { "tooltip": "「素材输出」面板配置（局部禁用文件 id 集合）。" }
+    }
+  },
+  "EzFlex-PromptHelper": {
+    "description": "提示词助手",
+    "inputs": { "config": { "tooltip": "「提示词卡片」面板生成的配置 JSON（卡片列表）。" } }
+  }
+}

@@ -5,6 +5,7 @@
 // 立即 POST /param_preset_control/outputs 同步类 RETURN_TYPES，并通知已连接的 ParamPresetOutput 刷新）。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig,
@@ -182,7 +183,7 @@ function valueMismatch(pvalue, ptype) {
 function validateParamValue(input, p) {
   const ok = !valueMismatch(input.value, p.type);
   input.classList.toggle('invalid', !ok);
-  input.title = ok ? '' : '类型不匹配';
+  input.title = ok ? '' : ezT('Type mismatch');
 }
 
 // ===== 状态 =====
@@ -229,7 +230,7 @@ async function ensureDefaultPreset() {
 async function setCurrentPreset(node, name) {
   const st = stateFor(node);
   if (st.dirty && name !== st.current) {
-    const save = await uiPrompt(`当前有未保存修改，输入名称保存到「${st.current}」（留空=放弃）`, st.current);
+    const save = await uiPrompt(`${ezT('Unsaved changes. Enter a name to save to "')}${st.current}${ezT('" (empty = discard)')}`, st.current);
     if (save != null && save.trim()) await savePresetToLib(node, save.trim());
   }
   const p = await findPreset(name);
@@ -244,7 +245,7 @@ async function setCurrentPreset(node, name) {
 }
 async function savePresetToLib(node, forcedName) {
   const st = stateFor(node);
-  const name = forcedName != null ? forcedName : await uiPrompt('请输入预设名称', st.current === DEFAULT_PRESET ? '新预设' : st.current);
+  const name = forcedName != null ? forcedName : await uiPrompt(ezT('Enter preset name'), st.current === DEFAULT_PRESET ? ezT('New preset') : st.current);
   if (!name || !name.trim()) return;
   await savePreset(API, { name: name.trim(), label: name.trim(), groups: deepClone(st.groups) });
   st.current = name.trim(); st.dirty = false; syncToConfig(node); refreshUI(node);
@@ -264,7 +265,7 @@ async function resetAll(node) {
 function markDirty(node) { stateFor(node).dirty = true; syncToConfig(node); updatePorts(node); refreshUI(node); }
 function addGroup(node) {
   const st = stateFor(node);
-  st.groups.push({ id: genId(), name: `参数组 ${st.groups.length + 1}`, out: 'all', params: [] });
+  st.groups.push({ id: genId(), name: `${ezT('Parameter group')} ${st.groups.length + 1}`, out: 'all', params: [] });
   markDirty(node);
 }
 function deleteGroup(node, groupId) {
@@ -283,21 +284,21 @@ function modalEl() {
   const box = el('div', 'ezpc-modal-box');
   box.style.cssText = (box.style.cssText || '') + ';pointer-events:auto;user-select:text;-webkit-user-select:text;';
   const hd = el('div', 'ezpc-modal-hd');
-  const title = el('b'); title.textContent = '编辑参数组';
+  const title = el('b'); title.textContent = ezT('Edit group');
   const closeBtn = el('button', 'ezpc-btn danger'); closeBtn.textContent = '✕';
   hd.appendChild(title); hd.appendChild(closeBtn);
   const body = el('div', 'ezpc-modal-body');
-  const nameInput = el('input', 'ezpc-gname-input'); nameInput.placeholder = '参数组名称';
+  const nameInput = el('input', 'ezpc-gname-input'); nameInput.placeholder = ezT('Group name');
   const params = el('div', 'ezpc-params');
-  const addParamBtn = el('button', 'ezpc-btn success'); addParamBtn.textContent = '+ 新增参数';
+  const addParamBtn = el('button', 'ezpc-btn success'); addParamBtn.textContent = ezT('+ Add parameter');
   body.appendChild(nameInput);
   const paramsHd = el('div'); paramsHd.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
-  const paramsLbl = el('span'); paramsLbl.textContent = '参数列表'; paramsLbl.style.cssText = 'font-size:12px;font-weight:500;color:#1a1a2e;';
+  const paramsLbl = el('span'); paramsLbl.textContent = ezT('Parameters'); paramsLbl.style.cssText = 'font-size:12px;font-weight:500;color:#1a1a2e;';
   paramsHd.appendChild(paramsLbl); paramsHd.appendChild(addParamBtn);
   body.appendChild(paramsHd); body.appendChild(params);
   const ft = el('div', 'ezpc-modal-ft');
-  const okBtn = el('button', 'ezpc-btn success'); okBtn.textContent = '确认修改';
-  const cancelBtn = el('button', 'ezpc-btn'); cancelBtn.textContent = '取消';
+  const okBtn = el('button', 'ezpc-btn success'); okBtn.textContent = ezT('Confirm');
+  const cancelBtn = el('button', 'ezpc-btn'); cancelBtn.textContent = ezT('Cancel');
   ft.appendChild(okBtn); ft.appendChild(cancelBtn);
   box.appendChild(hd); box.appendChild(body); box.appendChild(ft);
   _modal.appendChild(box); document.body.appendChild(_modal);
@@ -350,7 +351,7 @@ function renderParamList(node) {
     const container = modalEl()._params;
     if (!group) { container.innerHTML = ''; return; }
     container.innerHTML = '';
-    if (!(group.params || []).length) { const e = el('div', 'ezpc-empty'); e.textContent = '暂无参数，点「+ 新增参数」添加'; container.appendChild(e); }
+    if (!(group.params || []).length) { const e = el('div', 'ezpc-empty'); e.textContent = ezT('No parameters yet. Click "+ Add parameter" to add.'); container.appendChild(e); }
     (group.params || []).forEach((p) => container.appendChild(renderParamItem(node, p)));
     attachDnD(container, '.ezpc-pitem', '.ezpc-handle', (from, to) => {
       const arr = group.params || [];
@@ -368,7 +369,7 @@ function renderParamItem(node, p) {
   const handle = el('span', 'ezpc-handle'); handle.textContent = '⠿';
   const isOn = p.enabled !== false;
   const enable = el('button', 'ezpc-enable ' + (isOn ? 'on' : 'off'));
-  enable.title = isOn ? '使用该参数' : '不使用该参数';
+  enable.title = isOn ? ezT('Enable this parameter') : ezT('Disable this parameter');
   enable.addEventListener('click', () => {
     const st = stateFor(node);
     const grp = st.groups.find((g) => g.id === st.editingId);
@@ -378,16 +379,16 @@ function renderParamItem(node, p) {
     st.dirty = true;
     const on = p.enabled !== false;
     enable.classList.toggle('on', on); enable.classList.toggle('off', !on);
-    enable.title = on ? '使用该参数' : '不使用该参数';
+    enable.title = on ? ezT('Enable this parameter') : ezT('Disable this parameter');
     updatePorts(node);
     refreshUI(node);
   });
-  const name = el('input', 'ezpc-pname'); name.value = p.name || ''; name.placeholder = '参数名';
-  name.addEventListener('input', () => { p.name = name.value || '未命名'; });
+  const name = el('input', 'ezpc-pname'); name.value = p.name || ''; name.placeholder = ezT('Parameter name');
+  name.addEventListener('input', () => { p.name = name.value || ezT('Unnamed'); });
   const type = el('select', 'ezpc-ptype');
   TYPES.forEach((t) => { const o = el('option'); o.value = t; o.textContent = t; if (t === (p.type || 'int')) o.selected = true; type.appendChild(o); });
   type.addEventListener('change', () => { p.type = type.value; });
-  const value = el('textarea', 'ezpc-pvalue'); value.value = (p._raw != null ? p._raw : (p.value != null ? String(p.value) : '')); value.placeholder = '参数值'; value.rows = 1; value.spellcheck = false;
+  const value = el('textarea', 'ezpc-pvalue'); value.value = (p._raw != null ? p._raw : (p.value != null ? String(p.value) : '')); value.placeholder = ezT('Parameter value'); value.rows = 1; value.spellcheck = false;
   const autosize = () => { value.style.height = 'auto'; const h = Math.min(120, Math.max(28, value.scrollHeight + 2)); value.style.height = h + 'px'; value.style.overflowY = value.scrollHeight > 116 ? 'auto' : 'hidden'; };
   const normalizeValue = () => { const raw = value.value; p._raw = raw; p.value = parseParamValue(raw, p.type); };
   value.addEventListener('input', () => { p.value = value.value; autosize(); });
@@ -395,7 +396,7 @@ function renderParamItem(node, p) {
   value.addEventListener('blur', () => { normalizeValue(); validateParamValue(value, p); });
   value.addEventListener('blur', () => validateParamValue(value, p));
   autosize();
-  const del = el('button', 'ezpc-btn danger'); del.textContent = '×'; del.title = '删除参数';
+  const del = el('button', 'ezpc-btn danger'); del.textContent = '×'; del.title = ezT('Delete parameter');
   del.addEventListener('click', () => {
     const st = stateFor(node);
     const group = st.groups.find((g) => g.id === st.editingId);
@@ -410,7 +411,7 @@ function addParamToModal(node) {
   const st = stateFor(node);
   const group = st.groups.find((g) => g.id === st.editingId);
   if (!group) return;
-  (group.params = group.params || []).push({ id: genId(), name: `参数${group.params.length + 1}`, type: 'int', value: '0', enabled: true });
+  (group.params = group.params || []).push({ id: genId(), name: `${ezT('Parameter')} ${group.params.length + 1}`, type: 'int', value: '0', enabled: true });
   st.dirty = true;
   updatePorts(node);
   refreshUI(node);
@@ -483,7 +484,7 @@ function attachDnD(container, itemSel, handleSel, onDrop) {
 
 // ===== 动态输出端口（ModelsCombo 经验）=====
 function wantPorts(node) {
-  return (stateFor(node).groups || []).map((g) => ({ id: g.id, name: (g.name || '参数组'), type: 'EZFLEX_PARAM_GROUP' }));
+  return (stateFor(node).groups || []).map((g) => ({ id: g.id, name: (g.name || ezT('Parameter group')), type: 'EZFLEX_PARAM_GROUP' }));
 }
 function syncOutputTypes(node) {
   try {
@@ -622,11 +623,11 @@ function buildRoot(node) {
   shell.appendChild(root);
   node._ezRoot = shell; // 先挂引用，render()/fitNode 内部要用
   const hd = el('div', 'ezpc-hd');
-  const presetSel = el('select'); presetSel.title = '预设';
-  const saveBtn = el('button', 'ezpc-btn success'); saveBtn.textContent = '保存';
-  const delBtn = el('button', 'ezpc-btn danger'); delBtn.textContent = '删除';
-  const resetBtn = el('button', 'ezpc-btn warn'); resetBtn.textContent = '重置';
-  const addGroupBtn = el('button', 'ezpc-btn'); addGroupBtn.textContent = '+ 新增参数组';
+  const presetSel = el('select'); presetSel.title = ezT('Preset');
+  const saveBtn = el('button', 'ezpc-btn success'); saveBtn.textContent = ezT('Save');
+  const delBtn = el('button', 'ezpc-btn danger'); delBtn.textContent = ezT('Delete');
+  const resetBtn = el('button', 'ezpc-btn warn'); resetBtn.textContent = ezT('Reset');
+  const addGroupBtn = el('button', 'ezpc-btn'); addGroupBtn.textContent = ezT('+ Add group');
   hd.appendChild(presetSel); hd.appendChild(saveBtn); hd.appendChild(delBtn); hd.appendChild(resetBtn); hd.appendChild(addGroupBtn);
   const list = el('div', 'ezpc-list');
   root.appendChild(hd); root.appendChild(list);
@@ -639,7 +640,7 @@ function buildRoot(node) {
     opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
 
     list.innerHTML = '';
-    if (!st.groups.length) { list.appendChild(el('div', 'ezpc-empty')).textContent = '暂无参数组，点「+ 新增参数组」添加'; }
+    if (!st.groups.length) { list.appendChild(el('div', 'ezpc-empty')).textContent = ezT('No groups yet. Click "+ Add group" to add.'); }
     st.groups.forEach((g) => list.appendChild(renderGroupItem(node, g)));
     attachDnD(list, '.ezpc-gitem', '.ezpc-handle', (from, to) => {
       const [it] = st.groups.splice(from, 1);
@@ -676,17 +677,17 @@ function fillGroupOutOptions(sel, g) {
   const enabled = ((g && g.params) || []).filter((p) => p.enabled !== false);
   normalizeGroupOut(g);
   sel.innerHTML = '';
-  const all = el('option'); all.value = 'all'; all.textContent = '全部';
+  const all = el('option'); all.value = 'all'; all.textContent = ezT('All');
   sel.appendChild(all);
-  enabled.forEach((p) => { const o = el('option'); o.value = p.id; o.textContent = p.name || '参数'; sel.appendChild(o); });
+  enabled.forEach((p) => { const o = el('option'); o.value = p.id; o.textContent = p.name || ezT('Parameter'); sel.appendChild(o); });
   sel.value = (g.out && g.out !== 'all' && enabled.some((p) => String(p.id) === String(g.out))) ? g.out : 'all';
 }
 function renderGroupItem(node, g) {
   const row = el('div', 'ezpc-gitem');
   row.dataset.id = g.id;
   const handle = el('span', 'ezpc-handle'); handle.textContent = '⠿';
-  const name = el('span', 'ezpc-gname'); name.textContent = g.name || '未命名'; name.title = g.name || '未命名';
-  const sel = el('select', 'ezpc-gsel'); sel.title = '输出端口参数';
+  const name = el('span', 'ezpc-gname'); name.textContent = g.name || ezT('Unnamed'); name.title = g.name || ezT('Unnamed');
+  const sel = el('select', 'ezpc-gsel'); sel.title = ezT('Output port parameters');
   fillGroupOutOptions(sel, g);
   sel.addEventListener('mousedown', () => fillGroupOutOptions(sel, g));
   sel.addEventListener('change', () => {
@@ -697,12 +698,12 @@ function renderGroupItem(node, g) {
     normalizeGroupOut(grp);
     markDirty(node);
   });
-  const cnt = el('span', 'ezpc-gcnt'); cnt.textContent = `${(g.params || []).length} 个参数`;
-  const editBtn = el('button', 'ezpc-btn'); editBtn.textContent = '编辑';
-  const delBtn = el('button', 'ezpc-btn danger'); delBtn.textContent = '×'; delBtn.title = '删除参数组';
+  const cnt = el('span', 'ezpc-gcnt'); cnt.textContent = `${(g.params || []).length} ${ezT('parameters')}`;
+  const editBtn = el('button', 'ezpc-btn'); editBtn.textContent = ezT('Edit');
+  const delBtn = el('button', 'ezpc-btn danger'); delBtn.textContent = '×'; delBtn.title = ezT('Delete group');
   editBtn.addEventListener('click', () => openEditModal(node, g.id));
   delBtn.addEventListener('click', async () => {
-    if (await uiConfirm(`确定删除参数组「${g.name || ''}」吗？`)) deleteGroup(node, g.id);
+    if (await uiConfirm(`${ezT('Delete group "')}${g.name || ''}${ezT('"?')}`)) deleteGroup(node, g.id);
   });
   row.appendChild(handle); row.appendChild(name); row.appendChild(sel); row.appendChild(cnt); row.appendChild(editBtn); row.appendChild(delBtn);
   return row;
@@ -738,7 +739,7 @@ function refreshUI(node) {
     opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
   });
   list.innerHTML = '';
-  if (!st.groups.length) { list.appendChild(el('div', 'ezpc-empty')).textContent = '暂无参数组，点「+ 新增参数组」添加'; }
+  if (!st.groups.length) { list.appendChild(el('div', 'ezpc-empty')).textContent = ezT('No groups yet. Click "+ Add group" to add.'); }
   st.groups.forEach((g) => list.appendChild(renderGroupItem(node, g)));
   attachDnD(list, '.ezpc-gitem', '.ezpc-handle', (from, to) => {
     const [it] = st.groups.splice(from, 1);
@@ -787,6 +788,11 @@ function hookPrototype(nt) {
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezParamSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }
+// 语言切换后重画同类型节点的面板（ezT 在渲染时求值，重画即换语言）
+onLocaleChange(() => {
+  ((app && app.graph && app.graph._nodes) || []).forEach((n) => { if (n && n.type === NODE) { try { refreshUI(n); } catch (_) {} } });
+});
+
 app.registerExtension({
   name: 'Comfy.EzFlex.ParamPresetControl',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },

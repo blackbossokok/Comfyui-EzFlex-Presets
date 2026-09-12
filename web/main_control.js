@@ -3,6 +3,7 @@
 // EzFlex-NodeSwitchMaster / EzFlex-ParamPresetControl 实例；应用时级联下推（写目标 config.current 并触发其应用）。
 // 前端先按 NodeSwitchMaster 卡片样式实现，后续由用户迭代调整。
 import { app } from "../../scripts/app.js";
+import { ezT, onLocaleChange, ezLocale, ezSetLocale } from "./ezflex_i18n.js";
 import {
   NODE_TYPES, isBasePreset,
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
@@ -23,15 +24,15 @@ const SCAFFOLD_TYPES = [
   NODE_TYPES.PROMPT_HELPER, NODE_TYPES.MEDIA_LOADER, NODE_TYPES.PREVIEW_ANY,
 ];
 const SCAFFOLD_LABEL = {
-  [NODE_TYPES.COMBO]: '模型组合加载器',
-  [NODE_TYPES.LATENT]: '分辨率/Latent 选择器',
-  [NODE_TYPES.MASTER]: '节点总控制',
-  [NODE_TYPES.GROUP]: '节点开关组',
-  [NODE_TYPES.PARAM_CTRL]: '参数预设控制',
-  [NODE_TYPES.PARAM_OUT]: '参数输出控制',
-  [NODE_TYPES.PROMPT_HELPER]: '提示词助手',
-  [NODE_TYPES.MEDIA_LOADER]: '素材加载器',
-  [NODE_TYPES.PREVIEW_ANY]: '任意预览',
+  [NODE_TYPES.COMBO]: 'Models Combo Loader',
+  [NODE_TYPES.LATENT]: 'Resolution / Latent Selector',
+  [NODE_TYPES.MASTER]: 'Node Switch Master',
+  [NODE_TYPES.GROUP]: 'Node Switch Group',
+  [NODE_TYPES.PARAM_CTRL]: 'Param Preset Control',
+  [NODE_TYPES.PARAM_OUT]: 'Param Preset Output',
+  [NODE_TYPES.PROMPT_HELPER]: 'Prompt Helper',
+  [NODE_TYPES.MEDIA_LOADER]: 'Media Loader',
+  [NODE_TYPES.PREVIEW_ANY]: 'Preview Any',
 };
 // 加载全部的排布（以「总控制」自身为基准，间距 30px）：
 //   左列（右缘对齐，右缘 = 总控制左缘 − 30）：素材加载器（底边与总控制平齐）→ 模型组合 → 提示词助手，依次下移 30px
@@ -199,7 +200,7 @@ async function applyPreset(node, name) {
   return true;
 }
 async function savePresetToLib(node) {
-  const name = await uiPrompt('请输入总控制预设名称', '新总控制预设');
+  const name = await uiPrompt(ezT('Enter a master preset name'), ezT('New master preset'));
   if (!name || !name.trim()) return;
   const targets = {};
   TARGET_TYPES.forEach((type) => {
@@ -237,14 +238,30 @@ function buildRoot(node) {
   shell.appendChild(root);
   node._ezRoot = shell;
   const hd = el('div', 'ezc-hd');
-  const masterSel = el('select'); masterSel.title = '总控制预设';
-  const saveBtn = el('button', 'ezc-btn success'); saveBtn.textContent = '保存';
-  const delBtn = el('button', 'ezc-btn danger'); delBtn.textContent = '删除';
-  const loadSel = el('select', 'ezc-hd-load'); loadSel.title = '加载单个节点';
-  const placeholder = el('option'); placeholder.value = ''; placeholder.textContent = '— 加载节点 —'; loadSel.appendChild(placeholder);
-  SCAFFOLD_TYPES.forEach((t) => { const o = el('option'); o.value = t; o.textContent = SCAFFOLD_LABEL[t] || t; loadSel.appendChild(o); });
-  const loadAllBtn = el('button', 'ezc-btn'); loadAllBtn.textContent = '加载全部';
-  hd.appendChild(masterSel); hd.appendChild(saveBtn); hd.appendChild(delBtn); hd.appendChild(loadSel); hd.appendChild(loadAllBtn);
+  const masterSel = el('select'); masterSel.title = ezT('Master preset');
+  const saveBtn = el('button', 'ezc-btn success'); saveBtn.textContent = ezT('Save');
+  const delBtn = el('button', 'ezc-btn danger'); delBtn.textContent = ezT('Delete');
+  const loadSel = el('select', 'ezc-hd-load'); loadSel.title = ezT('Load a single node');
+  const placeholder = el('option'); placeholder.value = ''; placeholder.textContent = ezT('— Load node —'); loadSel.appendChild(placeholder);
+  SCAFFOLD_TYPES.forEach((t) => { const o = el('option'); o.value = t; o.textContent = ezT(SCAFFOLD_LABEL[t] || t); loadSel.appendChild(o); });
+  const loadAllBtn = el('button', 'ezc-btn');
+  // 语言切换：默认跟随 ComfyUI 语言，这里可手动覆盖（存 localStorage，全部面板共用）
+  const langBtn = el('button', 'ezc-btn');
+  langBtn.title = ezT('UI language (follows ComfyUI language by default; manual override is remembered on this machine)');
+  const applyLang = () => {
+    masterSel.title = ezT('Master preset');
+    saveBtn.textContent = ezT('Save');
+    delBtn.textContent = ezT('Delete');
+    loadSel.title = ezT('Load a single node');
+    placeholder.textContent = ezT('— Load node —');
+    loadAllBtn.textContent = ezT('Load all');
+    langBtn.textContent = ezLocale() === 'zh' ? 'EN' : '中文';
+    SCAFFOLD_TYPES.forEach((t, i) => { const o = loadSel.options[i + 1]; if (o) o.textContent = ezT(SCAFFOLD_LABEL[t] || t); });
+  };
+  langBtn.addEventListener('click', () => { ezSetLocale(ezLocale() === 'zh' ? 'en' : 'zh'); applyLang(); });
+  try { window.addEventListener('ezflex:locale', applyLang); } catch (_) {}
+  hd.appendChild(masterSel); hd.appendChild(saveBtn); hd.appendChild(delBtn); hd.appendChild(loadSel); hd.appendChild(loadAllBtn); hd.appendChild(langBtn);
+  applyLang();
   const list = el('div', 'ezc-list');
   root.appendChild(hd); root.appendChild(list);
 
@@ -258,7 +275,7 @@ function buildRoot(node) {
 
     list.innerHTML = '';
     const targets = collectTargets(node);
-    if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = '画布上还没有可控制的节点（模型组合加载器 / 分辨率 / 节点总控制 / 参数预设控制），点右上「加载全部」一键铺开';
+    if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = ezT('No controllable nodes on the canvas yet (Models Combo Loader / Resolution / Node Switch Master / Param Preset Control). Click "Load all" in the top right to lay them out in one click.');
     targets.forEach((t) => { const row = renderRow(node, t.node); row._ezKey = t.key; list.appendChild(row); });
     attachCardDnD(list, node);
     fitNode(node);
@@ -285,8 +302,8 @@ async function refreshPresetOptions(node, sel) {
 
 function renderRow(mainNode, targetNode) {
   const row = el('div', 'ezc-row');
-  const handle = el('span', 'ezc-handle'); handle.textContent = '⠿'; handle.title = '拖动排序';
-  const name = el('span', 'gname'); name.textContent = targetNode.title || '节点'; name.title = targetNode.title || '';
+  const handle = el('span', 'ezc-handle'); handle.textContent = '⠿'; handle.title = ezT('Drag to reorder');
+  const name = el('span', 'gname'); name.textContent = targetNode.title || ezT('Node'); name.title = targetNode.title || '';
   const sel = el('select');
   const api = targetAPI(targetNode);
   const isOptional = nodeTypeOf(targetNode) === NODE_TYPES.COMBO || nodeTypeOf(targetNode) === NODE_TYPES.LATENT;
@@ -297,7 +314,7 @@ function renderRow(mainNode, targetNode) {
     if (sel._ezSig === sig) { if (cur && sel.value !== cur && Array.from(sel.options).some((o) => o.value === cur)) sel.value = cur; return; }
     sel._ezSig = sig;
     sel.innerHTML = '';
-    if (isOptional) { const ph = el('option'); ph.value = ''; ph.textContent = '—— 预设 ——'; if (!cur) ph.selected = true; sel.appendChild(ph); }
+    if (isOptional) { const ph = el('option'); ph.value = ''; ph.textContent = ezT('—— Preset ——'); if (!cur) ph.selected = true; sel.appendChild(ph); }
     names.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === cur) o.selected = true; sel.appendChild(o); });
   };
   fill();
@@ -393,7 +410,7 @@ function fitNode(node) {
     if (!root || typeof node.setSize !== 'function') return;
     const cur = node.size || [0, 96];
     const contentH = root.scrollHeight + 12;
-    if (contentH > cur[1] + 4) node.setSize([Math.max(320, cur[0]), Math.min(420, contentH)]);
+    if (contentH > cur[1] + 4) node.setSize([Math.max(400, cur[0]), Math.min(420, contentH)]);
   } catch (_) {}
 }
 function refreshUI(node) {
@@ -402,7 +419,7 @@ function refreshUI(node) {
   const list = root.querySelector('.ezc-list');
   list.innerHTML = '';
   const targets = collectTargets(node);
-  if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = '画布上还没有可控制的节点（模型组合加载器 / 分辨率 / 节点总控制 / 参数预设控制），点右上「加载全部」一键铺开';
+  if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = ezT('No controllable nodes on the canvas yet (Models Combo Loader / Resolution / Node Switch Master / Param Preset Control). Click "Load all" in the top right to lay them out in one click.');
   targets.forEach((t) => { const row = renderRow(node, t.node); row._ezKey = t.key; list.appendChild(row); });
   attachCardDnD(list, node);
   loadPresets(API).then((lib) => {
@@ -436,7 +453,7 @@ function syncCards(node) {
     const api = targetAPI(target); if (!api) return;
     const cur = api.current() || '';
     const sel = row.querySelector('select'); if (sel && Array.from(sel.options).some((o) => o.value === cur) && sel.value !== cur) sel.value = cur;
-    const name = row.querySelector('.gname'); if (name && name.textContent !== (target.title || '节点')) name.textContent = target.title || '节点';
+    const name = row.querySelector('.gname'); if (name && name.textContent !== (target.title || ezT('Node'))) name.textContent = target.title || ezT('Node');
   });
 }
 function startTitleWatch(node) {
@@ -463,6 +480,7 @@ function startTitleWatch(node) {
     const prevDraw = node.onDrawForeground;
     node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); schedule(); };
     scheduleOnRedraw(schedule);   // resize / 滚动 / 节点注册表变化 都会醒一次
+    onLocaleChange(() => { node._ezTitleSig = ''; try { refreshUI(node); } catch (_) {} });   // 语言切换即时重画
     if (EZ_PERF.mainPollMs > 0) node._ezTitleIv = setInterval(schedule, EZ_PERF.mainPollMs);
     schedule();
   }
@@ -494,7 +512,7 @@ function setupNode(node) {
     makeDomWidgetHitThrough(widget.element || root);
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
-    try { node.setSize([(node.size ? node.size[0] : 320) + 70, (node.size ? node.size[1] : 200) + 70]); } catch (_) {} // MainControl 初始宽度+50px、高度+70px（setupNode 内）
+    try { node.setSize([Math.max(400, (node.size ? node.size[0] : 320) + 110), (node.size ? node.size[1] : 200) + 70]); } catch (_) {} // MainControl 初始加宽（头部多了语言按钮，太窄会挡住）tupNode 内）
     setTimeout(hideConfigWidget, 60, node);
     installResizeHandles(node, root);
     startTitleWatch(node);

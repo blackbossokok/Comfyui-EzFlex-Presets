@@ -328,9 +328,14 @@ foreach($f in (Get-ChildItem "$d\web" -Filter *.js -Recurse)){ $tmp=Join-Path $e
 node "$t\import_test.mjs"               # 11 个 registerExtension + NODE_TYPES 一致性
 node "$t\media_out_prune_test.mjs"      # 14 条：运行期空传 —— 禁用端口在提交前从 prompt 摘掉（混合组/没盖章/找不到节点一律不动）
 node "$t\media_index_test.mjs"          # 48 条：编号表（含过期 type / 非 EzFlex 中转节点穿透 GVC←卡片·GVC←MediaOut / 端口重复去重 / 端口没盖章不冒整张卡片 / EzFlex 节点终止上溯）
+# 6) 安全 / i18n 专项
+& $py "$t\route_security_test.py"       # 27 条：路径逃逸 / 根外转存 / 本机限定 / 出站白名单 / 路由接线
+& $py "$t\i18n_test.py"                 # schema（含多行/位置参数 tooltip）无中文 + locales/zh 覆盖 11 节点 + 代码 ezT 词条 ⊆ 字典 + 各文件字典已并入
+& $py "$t\cjk_scan.py"                  # JS 非注释中文 = 0（注释保持中文）
+& $py "$t\py_ui_audit.py"               # __init__.py 的 schema 文案 + 报错/响应文案无中文
 ```
 
-- 实测全绿基线：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、9 个套件全通过（7 个 Python + 2 个 Node）。
+- 实测全绿基线（13 个套件：10 个 Python + 3 个 Node）：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、9 个套件全通过（7 个 Python + 2 个 Node）。
 - 测试脚本注意：`_dev_tests/_tmp` 用于临时文件（ComfyUI temp 目录在沙箱外会 `PermissionError`）；PreviewAny 存档测试需要 `folder_paths` shim。
 - ⚠️ **源文件改写不要用 PowerShell `Get-Content`/`Set-Content`**（会毁编码，曾把 `web/prompt_helper.js` 写坏；那份损坏备份已清理）；用编辑器工具或 Python `newline=''`。
 - `_dev_tests/` 里 `extensions/`（web 副本）、`scripts/`（app.js/api.js 桩）、`_tmp/`（素材与存档）**全是跑测试时自动生成的**：两个 `.mjs` 测试开头就 `mkdirSync + readdirSync(web/) + copyFileSync`，Python 套件自己 `makedirs` 写素材。所以这三个目录随时可删，跑测试会重建；反过来说，**改完 `web/*.js` 直接跑测试拿到的就是最新副本，不存在副本过期**。
@@ -353,6 +358,41 @@ node "$t\media_index_test.mjs"          # 48 条：编号表（含过期 type / 
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 仓库 `blackbossokok/Comfyui-EzFlex-Presets` 落后于本地（建议提交；github.com API 可达，raw.githubusercontent.com 不可达）。
 - [ ] Python 改动（新节点/路由/类）需完整重启 ComfyUI；前端 JS no-store，刷新页面即生效。
+
+## 10. 安全收口（评审要求，V1.11 后）
+
+> 背景：ComfyUI 注册表评审指出「开放路由用调用方给的路径读文件/列目录/拉起本机程序/出站 SSRF」。收口原则：**路径先落进服务端自己的根目录（realpath + commonpath）**，敏感动作只认本机客户端，出站主机必须显式允许。
+
+| 助手（`__init__.py`） | 作用 |
+|---|---|
+| `_ez_real(p)` | realpath + abspath 规范 |
+| `_ez_roots()` | 根 = input / output / temp / models ＋ 用户登记的扫描目录（全是服务端状态） |
+| `_ez_inside(p, roots?)` | realpath + commonpath 判定；根外返回 ''（含 `..`、绝对路径、兄弟前缀、符号链接） |
+| `_ez_adopt_to_temp(p)` | 根外文件复制进临时目录再服务（保住预览功能） |
+| `_ez_local(req)` | `req.remote ∈ {127.0.0.1, ::1, localhost}` |
+| `_ph_allowed_hosts()` / `_ph_check_outbound(url)` | 出站主机允许列表 = 内置厂商 ＋ 本机自定义厂商 ＋ `userdata/ezflex_api_hosts.json` |
+
+- 已收口路由：`/preview_any/serve_video|serve_3d`（限根＋根外转存）、`/preview_any/fs/{path}`（限根）、`/preview_any/3d/{path}`（插件 web 目录内 realpath）、`/preview_any/folders`（realpath）、`/media_loader/serve|browse|save_as`（限根；browse 限「可浏览根」）、`/preview_any/open`+`/media_loader/open`+`pick_folder`+`pick_skill`（本机限）、`scan_paths`/`model_paths`/`custom_providers`/`prompt_cards` 写入（本机限）、`/prompt_helper/optimize`（出站白名单）。
+- 新路由：`GET/POST /media_loader/roots`（可浏览根，本机写）、`GET/POST /prompt_helper/api_hosts`（主机登记，本机写）。
+- 前端接线：设置保存时登记 apiUrl/llama server 主机（`saveSettings`）；素材浏览器工具栏「＋根」。
+- 回归：`_dev_tests/route_security_test.py`（含 `..` / 绝对路径 / 兄弟前缀 / 符号链接 / 云元数据地址 / 内网地址 / file: 协议 用例）。
+- 注意：JS 语法检查要把副本放进**工作区内的**目录（`_dev_tests/_tmp`）再 `node --check` —— 沙箱下 `%TEMP%` 可能不可读，会静默 exit 1。
+
+### 10.1 发布注册表要求（研究结论）
+
+- `pyproject.toml`：`name`（不可改、别带 "ComfyUI"）、严格 semver `version`、`license = { file = "LICENSE" }`（**裸字符串不合法**）、`[project.urls] Repository`、`[tool.comfy] PublisherId`（必填）+ `DisplayName`/`Icon`/`requires-comfyui`。
+- 建议加 `.comfyignore`（gitignore 语法）排除开发文件；`comfy node validate` 会跑 **ruff**（硬禁：`eval`/`exec`、运行期 pip 安装、代码混淆、干扰别的节点）。
+- i18n：`GET /i18n`（ComfyUI ≥ 0.3.13）读 `locales/<lang>/main.json + nodeDefs.json + settings.json + commands.json`；**只有节点 schema（display_name/description/inputs/outputs/tooltips/combo options）、settings、commands 会被翻译**，自绘面板 DOM 文本不在覆盖范围（官方文档该节仍是 [To be updated]）。
+
+### 10.2 英文 UI 串（已完成，V1.11）
+
+- 形态：**源码用英文**（评审要求），中文进两套字典 —— 节点 schema 走官方 i18n（`locales/zh/nodeDefs.json`），自绘面板走插件自己的 `web/ezflex_i18n.js`（`ezT(key)`，key = 英文原文，中文在 `EZ_ZH`）。语言优先级 `localStorage.ezflex.locale` > `window.Comfy.Locale` > `navigator.language`；MainControl 头部有 `EN / 中文` 开关。
+- 已改完：`__init__.py` 的 `DESCRIPTION` / 输入 tooltip（含 `_control_input_types` 的位置参数）/ 报错与 HTTP 响应文案；`web/` 全部面板 JS（main_control、node_switch_*、param_preset_*、freelatent、modelscombo、preview_any、media_loader、media_out、prompt_helper、ezflex_service）。
+- 不翻（数据/协议/标识符）：注释保持中文；端口 type、config/预设 JSON 键、旧中文预设 id（`BASE_PRESETS_LEGACY` 兼容）、`MEDIA_WORDS` 的 `@图片` token、socket/widget 名、语言开关按钮上那个「中文」。
+- 有意保留的中文（`cjk_scan.py` 的 `ALLOW_MARKERS` / `ALLOW_RANGES` 里逐条注明）：语言自名标签 `[['zh','中'],['en','EN']]`、自定义厂商默认值 `'自定义'`（持久化数据）、`prompt_helper.js` 的规范表 `_PROMPT_RULES`（label/note/模板属规则内容，表自带 base/alt 双语机制，且是模块顶层常量 —— 包 `ezT` 会冻结语言）。
+- Python 侧报错/响应文案（27 处 `raise` + 7 处 `json_response`）也一并改英文；测试里原本按中文断言的 3 处（`media_merge_test`、`prompt_helper_test`）同步改成英文标记。
+- 词典维护：`_dev_tests/_i18n/<文件>.json`（每文件一份）+ `_i18n_base.json`（公共词条）→ `_i18n_merge2.py` 确定性重建 `EZ_ZH`（首现优先，冲突会打印）。
+- 校验：`i18n_test.py`（schema/多行 tooltip 无中文、`locales/zh` 覆盖 11 节点、代码 `ezT` 词条 ⊆ 字典、各文件字典已并入）、`cjk_scan.py`（JS：待翻中文 0 行，放行数据/标识符）、`py_ui_audit.py`（Python：schema + 报错/响应文案 0 中文）。
 
 ## 9. 外部规范核对（已归档）
 

@@ -3,6 +3,7 @@
 // 每行 = 一个画布分组，3 态（开启/禁用/绕过）滑块一键给该分组内节点设 node.mode 0/2/4。
 // 匹配配置存 config（面板可改，序列化保存）；分组预设（全部开启/全部禁用/全部绕过 + 自定义快照）存服务器 user_data。
 import { app } from "../../scripts/app.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
   NODE_TYPES, MODE_NUM, BASE_PRESETS, isBasePreset,
   registerNode, unregisterNode, nodeTypeOf,
@@ -193,7 +194,7 @@ async function setCurrentPreset(node, name) {
   refreshUI(node);
 }
 async function savePresetToLib(node) {
-  const name = await uiPrompt('请输入分组预设名称', '新预设');
+  const name = await uiPrompt(ezT('Enter group preset name'), ezT('New preset'));
   if (!name || !name.trim()) return;
   const st = stateFor(node);
   const states = {};
@@ -221,9 +222,9 @@ function buildRoot(node) {
   node._ezRoot = shell; // 先挂引用，render()/refreshRows 内部要用它定位列表
 
   const hd = el('div', 'ezg-hd');
-  const presetSel = el('select'); presetSel.title = '分组预设';
-  const saveBtn = el('button', 'ezg-btn success'); saveBtn.textContent = '保存预设';
-  const delBtn = el('button', 'ezg-btn danger'); delBtn.textContent = '删除预设';
+  const presetSel = el('select'); presetSel.title = ezT('Group preset');
+  const saveBtn = el('button', 'ezg-btn success'); saveBtn.textContent = ezT('Save preset');
+  const delBtn = el('button', 'ezg-btn danger'); delBtn.textContent = ezT('Delete preset');
   hd.appendChild(presetSel); hd.appendChild(saveBtn); hd.appendChild(delBtn);
 
   // 匹配过滤行（节点级，rgthree 属性式）
@@ -315,7 +316,7 @@ function openColorPalette(node, anchor, current, onPick) {
     d.addEventListener('click', (e) => { e.stopPropagation(); onPick(hex || ''); closePalette(); });
     _palette.appendChild(d);
   };
-  const sep = el('div', 'ezg-psep'); sep.textContent = 'ComfyUI 颜色'; _palette.appendChild(sep);
+  const sep = el('div', 'ezg-psep'); sep.textContent = ezT('ComfyUI colors'); _palette.appendChild(sep);
   comfyColorPalette().forEach((p) => addDot(p.hex, p.name));
   // 当前工作流分组实际颜色（直接可匹配）
   const wfColors = [];
@@ -323,9 +324,9 @@ function openColorPalette(node, anchor, current, onPick) {
     const h = toHexColor(g.color) || toHexColor(g._color);
     if (h && wfColors.indexOf(h) < 0) wfColors.push(h);
   });
-  if (wfColors.length) { const sep2 = el('div', 'ezg-psep'); sep2.textContent = '工作流颜色'; _palette.appendChild(sep2); wfColors.forEach((c) => addDot(c, c)); }
+  if (wfColors.length) { const sep2 = el('div', 'ezg-psep'); sep2.textContent = ezT('Workflow colors'); _palette.appendChild(sep2); wfColors.forEach((c) => addDot(c, c)); }
   const saved = loadColorPresets();
-  if (saved.length) { const sp = el('div', 'ezg-psep'); sp.textContent = '已保存'; _palette.appendChild(sp); saved.forEach((c) => addDot(c, c)); }
+  if (saved.length) { const sp = el('div', 'ezg-psep'); sp.textContent = ezT('Saved'); _palette.appendChild(sp); saved.forEach((c) => addDot(c, c)); }
   document.body.appendChild(_palette);
   setTimeout(() => {
     const onDown = (e) => { if (_palette && !_palette.contains(e.target)) closePalette(); };
@@ -338,34 +339,34 @@ function buildFilters(node, onChange) {
   const st = stateFor(node);
   const wrap = el('div', 'ezg-filters');
   const modeSel = el('select');
-  [['title', '按标题'], ['color', '按颜色']].forEach(([v, l]) => { const o = el('option'); o.value = v; o.textContent = l; if (v === st.filters.mode) o.selected = true; modeSel.appendChild(o); });
+  [['title', ezT('By title')], ['color', ezT('By color')]].forEach(([v, l]) => { const o = el('option'); o.value = v; o.textContent = l; if (v === st.filters.mode) o.selected = true; modeSel.appendChild(o); });
   const rest = el('div', 'ezg-fvalues');
   const sortSel = el('select');
-  [['position', '按位置'], ['alpha', '按字母']].forEach(([v, l]) => { const o = el('option'); o.value = v; o.textContent = l; if (v === (st.filters.sort || 'position')) o.selected = true; sortSel.appendChild(o); });
-  sortSel.title = '排序';
+  [['position', ezT('By position')], ['alpha', ezT('By letter')]].forEach(([v, l]) => { const o = el('option'); o.value = v; o.textContent = l; if (v === (st.filters.sort || 'position')) o.selected = true; sortSel.appendChild(o); });
+  sortSel.title = ezT('Sort');
   sortSel.addEventListener('change', () => { st.filters.sort = sortSel.value; syncToConfig(node); onChange(); });
 
   function buildMode() {
     rest.innerHTML = '';
     if (st.filters.mode === 'color') {
-      const swatch = el('button', 'ezg-swatch'); swatch.title = '颜色预设（点开）';
+      const swatch = el('button', 'ezg-swatch'); swatch.title = ezT('Color presets (click to open)');
       swatch.style.background = st.filters.match || '#a4d399';
       swatch.addEventListener('click', (e) => { e.stopPropagation(); openColorPalette(node, swatch, st.filters.match, (hex) => { st.filters.match = hex; swatch.style.background = st.filters.match || '#a4d399'; wheel.value = toHexColor(st.filters.match) || '#a4d399'; syncToConfig(node); onChange(); }); });
-      const wheel = el('input'); wheel.type = 'color'; wheel.value = toHexColor(st.filters.match) || '#a4d399'; wheel.title = '取色';
+      const wheel = el('input'); wheel.type = 'color'; wheel.value = toHexColor(st.filters.match) || '#a4d399'; wheel.title = ezT('Pick color');
       const applyColor = (hex) => { st.filters.match = hex; syncToConfig(node); swatch.style.background = hex; onChange(); };
       wheel.addEventListener('input', () => applyColor(wheel.value));
       wheel.addEventListener('change', () => applyColor(wheel.value));
-      const save = el('button', 'ezg-btn small'); save.textContent = '保存'; save.title = '保存当前颜色预设';
+      const save = el('button', 'ezg-btn small'); save.textContent = ezT('Save'); save.title = ezT('Save current color preset');
       save.addEventListener('click', () => { const c = st.filters.match || wheel.value; if (c) { const a = loadColorPresets(); if (a.indexOf(c) < 0) { a.push(c); saveColorPresets(a); } } });
-      const del = el('button', 'ezg-btn small'); del.textContent = '删除'; del.title = '从颜色预设删除当前色';
+      const del = el('button', 'ezg-btn small'); del.textContent = ezT('Delete'); del.title = ezT('Remove current color from presets');
       del.addEventListener('click', () => { const c = st.filters.match || wheel.value; saveColorPresets(loadColorPresets().filter((x) => x !== c)); });
       rest.appendChild(swatch); rest.appendChild(wheel); rest.appendChild(save); rest.appendChild(del);
     } else {
-      const txt = el('input'); txt.value = st.filters.match; txt.placeholder = '匹配标题(正则)';
+      const txt = el('input'); txt.value = st.filters.match; txt.placeholder = ezT('Match title (regex)');
       txt.addEventListener('change', () => { st.filters.match = txt.value; syncToConfig(node); onChange(); });
       rest.appendChild(txt);
     }
-    const sub = el('button', 'ezg-sub'); sub.textContent = '子'; sub.title = '子工作流生效';
+    const sub = el('button', 'ezg-sub'); sub.textContent = ezT('Sub'); sub.title = ezT('Apply to subworkflows');
     sub.classList.toggle('on', !!st.filters.showAllGraphs);
     sub.addEventListener('click', () => { st.filters.showAllGraphs = !st.filters.showAllGraphs; sub.classList.toggle('on', !!st.filters.showAllGraphs); syncToConfig(node); onChange(); });
     rest.appendChild(sub);
@@ -379,7 +380,7 @@ function buildFilters(node, onChange) {
 function renderRow(node, group, refresh) {
   const st = stateFor(node);
   const row = el('div', 'ezg-row');
-  const name = el('span', 'gname'); name.textContent = group.title || '未命名分组'; name.title = group.title || '';
+  const name = el('span', 'gname'); name.textContent = group.title || ezT('Unnamed group'); name.title = group.title || '';
   const mode = el('div', 'ezg-mode');
   const cur = groupState(st, group);
   const mk = (v, label) => {
@@ -395,7 +396,7 @@ function renderRow(node, group, refresh) {
     });
     mode.appendChild(b);
   };
-  mk('on', '开启'); mk('off', '禁用'); mk('bypass', '绕过');
+  mk('on', ezT('On')); mk('off', ezT('Off')); mk('bypass', ezT('Bypass'));
   row.appendChild(name); row.appendChild(mode);
   return row;
 }
@@ -408,7 +409,7 @@ function refreshRows(node) {
   const list = node._ezRoot ? node._ezRoot.querySelector('.ezg-list') : null;
   if (!list) return;
   list.innerHTML = '';
-  if (!groups.length) { list.appendChild(el('div', 'ezg-empty')).textContent = '未匹配到分组（请在工作流用 Ctrl+G 建组，或调整上方匹配条件）'; return; }
+  if (!groups.length) { list.appendChild(el('div', 'ezg-empty')).textContent = ezT('No groups matched (create a group with Ctrl+G in the workflow, or adjust the match filters above)'); return; }
   groups.forEach((g) => list.appendChild(renderRow(node, g, null)));
 }
 function refreshUI(node) {
@@ -418,7 +419,7 @@ function refreshUI(node) {
   const list = node && node._ezRoot ? node._ezRoot.querySelector('.ezg-list') : null;
   if (!list) return;
   list.innerHTML = '';
-  if (!st._groups.length) { list.appendChild(el('div', 'ezg-empty')).textContent = '未匹配到分组（请在工作流用 Ctrl+G 建组，或调整上方匹配条件）'; }
+  if (!st._groups.length) { list.appendChild(el('div', 'ezg-empty')).textContent = ezT('No groups matched (create a group with Ctrl+G in the workflow, or adjust the match filters above)'); }
   st._groups.forEach((g) => list.appendChild(renderRow(node, g, null)));
   const presetSel = node._ezRoot.querySelector('.ezg-hd select');
   const opts = presetOptions(node);
@@ -460,6 +461,7 @@ function startAutoScan(node) {
   const prevDraw = node.onDrawForeground;
   node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); scheduleScan(this); };
   scheduleOnRedraw(() => scheduleScan(node));
+  onLocaleChange(() => { try { refreshUI(node); } catch (_) {} scheduleScan(node); });   // 语言切换即时重画
   if (EZ_PERF.groupPollMs > 0) node._ezScanIv = setInterval(() => scheduleScan(node), EZ_PERF.groupPollMs);
 }
 
@@ -485,7 +487,7 @@ function setupNode(node) {
     const root = buildRoot(node);
     node._ezRoot = root;
     makeDomWidgetHitThrough(root);
-    const widget = node.addDOMWidget('分组预设', 'ezg-panel', root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 0, getMinHeight: () => 150, getValue: () => '{}', setValue: () => {} });
+    const widget = node.addDOMWidget(ezT('Group preset'), 'ezg-panel', root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 0, getMinHeight: () => 150, getValue: () => '{}', setValue: () => {} });
     makeDomWidgetHitThrough(widget.element || root);
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}

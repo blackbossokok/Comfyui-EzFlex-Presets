@@ -7,6 +7,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { NODE_TYPES, nodeTypeOf, configWidget, installResizeHandles, makeDomWidgetHitThrough, uiPrompt, uiConfirm, makeAudioPlayer, notifyConfigChanged, scheduleOnRedraw, pumpFrames, EZ_PERF } from "./ezflex_service.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 
 const NODE = NODE_TYPES.MEDIA_LOADER;
 const PRESET_API = "/media_loader/presets";
@@ -146,7 +147,7 @@ function loadFromConfig(node) {
   st.currentPreset = data.currentPreset || 'default';
   st.gridCols = Math.max(1, parseInt(data.gridCols, 10) || 3);
   st.gridRowH = Math.max(0, parseInt(data.gridRowH, 10) || 1);
-  if (!st.groups.length) { st.groups = [{ id: genId(), name: '分组', cards: [{ id: genId(), name: '卡片组1', items: [] }] }]; }
+  if (!st.groups.length) { st.groups = [{ id: genId(), name: ezT('Group'), cards: [{ id: genId(), name: ezT('Card group 1'), items: [] }] }]; }
   st.currentGroupId = data.currentGroupId != null && st.groups.some((g) => g.id === data.currentGroupId) ? data.currentGroupId : st.groups[0].id;
 }
 function currentGroup(node) { const st = stateFor(node); return st.groups.find((g) => g.id === st.currentGroupId) || st.groups[0] || null; }
@@ -160,7 +161,7 @@ function mediaKind(name) {
   if (/^(gltf|glb|obj|fbx|stl|ply|3ds|dae|blend)$/.test(ext)) return 'model_3d';
   return 'other';
 }
-function typeShort(c) { return ({ image: '图像', video: '视频', audio: '音频', model_3d: '模型', other: '文件' })[c] || '文件'; }
+function typeShort(c) { return ({ image: ezT('Image'), video: ezT('Video'), audio: ezT('Audio'), model_3d: ezT('Model'), other: ezT('File') })[c] || ezT('File'); }
 function suffix(name) { const p = (name || '').split('.'); return p.length > 1 ? '.' + p.pop().toLowerCase() : ''; }
 function formatSize(b) { if (b == null) return ''; if (b < 1024) return b + ' B'; if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'; return (b / 1048576).toFixed(1) + ' MB'; }
 
@@ -169,10 +170,10 @@ function mkManagerBar(cfg) {
   const bar = el('div', 'eml-managerbar');
   const cnt = el('span'); cnt.textContent = cfg.label;
   const merge = el('button', 'eml-btn primary', { type: 'button' }); merge.textContent = cfg.merge;
-  const all = el('button', 'eml-btn', { type: 'button' }); all.textContent = '全选';
-  const clear = el('button', 'eml-btn', { type: 'button' }); clear.textContent = '清空选择';
-  const invert = el('button', 'eml-btn', { type: 'button' }); invert.textContent = '反选';
-  const exit = el('button', 'eml-btn', { type: 'button' }); exit.textContent = '退出管理';
+  const all = el('button', 'eml-btn', { type: 'button' }); all.textContent = ezT('Select all');
+  const clear = el('button', 'eml-btn', { type: 'button' }); clear.textContent = ezT('Clear selection');
+  const invert = el('button', 'eml-btn', { type: 'button' }); invert.textContent = ezT('Invert');
+  const exit = el('button', 'eml-btn', { type: 'button' }); exit.textContent = ezT('Exit manager');
   merge.addEventListener('click', cfg.onMerge);
   all.addEventListener('click', cfg.onAll); clear.addEventListener('click', cfg.onClear); invert.addEventListener('click', cfg.onInvert);
   exit.addEventListener('click', cfg.onExit);
@@ -195,20 +196,20 @@ function render(node) {
   presetBtn.addEventListener('click', (e) => { e.stopPropagation(); presetMenu.classList.toggle('open'); });
   presetMenu.addEventListener('click', (e) => { const it = e.target.closest('.eml-preset-item'); if (!it) return; presetSel.value = it.dataset.v; presetMenu.classList.remove('open'); presetSel.dispatchEvent(new Event('change')); });
   document.addEventListener('click', () => { if (presetMenu.classList.contains('open')) presetMenu.classList.remove('open'); });
-  const saveBtn = el('button', 'eml-btn primary', { type: 'button' }); saveBtn.textContent = '保存预设';
-  const delBtn = el('button', 'eml-btn danger', { type: 'button' }); delBtn.textContent = '删除预设';
+  const saveBtn = el('button', 'eml-btn primary', { type: 'button' }); saveBtn.textContent = ezT('Save preset');
+  const delBtn = el('button', 'eml-btn danger', { type: 'button' }); delBtn.textContent = ezT('Delete preset');
   top.appendChild(saveBtn); top.appendChild(delBtn);
-  const gcLabel = el('span'); gcLabel.textContent = '数量'; gcLabel.style.cssText = 'font-size:11px;color:#5f6b7a;';
-  const gcInput = el('input'); gcInput.type = 'number'; gcInput.min = '1'; gcInput.step = '1'; gcInput.value = String(st.gridCols || 3); gcInput.title = '每行卡片数量';
+  const gcLabel = el('span'); gcLabel.textContent = ezT('Columns'); gcLabel.style.cssText = 'font-size:11px;color:#5f6b7a;';
+  const gcInput = el('input'); gcInput.type = 'number'; gcInput.min = '1'; gcInput.step = '1'; gcInput.value = String(st.gridCols || 3); gcInput.title = ezT('Cards per row');
   gcInput.style.cssText = 'width:48px;height:30px;padding:4px 6px;font-size:12px;border:1px solid #dce3ec;border-radius:8px;text-align:center;background:#fff;';
   gcInput.addEventListener('change', () => { const v = Math.max(1, parseInt(gcInput.value, 10) || 3); st.gridCols = v; gcInput.value = String(v); syncToConfig(node); render(node); });
   top.appendChild(gcLabel); top.appendChild(gcInput);
-  const rhLabel = el('span'); rhLabel.textContent = '高度'; rhLabel.style.cssText = 'font-size:11px;color:#5f6b7a;';
-  const rhInput = el('input'); rhInput.type = 'number'; rhInput.min = '0'; rhInput.step = '1'; rhInput.value = String(st.gridRowH || 1); rhInput.title = '卡片高度倍数：0=按 16:9 自适应；>=1=默认高度(192px)×值';
+  const rhLabel = el('span'); rhLabel.textContent = ezT('Row height'); rhLabel.style.cssText = 'font-size:11px;color:#5f6b7a;';
+  const rhInput = el('input'); rhInput.type = 'number'; rhInput.min = '0'; rhInput.step = '1'; rhInput.value = String(st.gridRowH || 1); rhInput.title = ezT('Card height multiplier: 0 = fit 16:9; >= 1 = default height (192px) × value');
   rhInput.style.cssText = 'width:48px;height:30px;padding:4px 6px;font-size:12px;border:1px solid #dce3ec;border-radius:8px;text-align:center;background:#fff;';
   rhInput.addEventListener('change', () => { const v = Math.max(0, parseInt(rhInput.value, 10) || 1); st.gridRowH = v; rhInput.value = String(v); syncToConfig(node); render(node); });
   top.appendChild(rhLabel); top.appendChild(rhInput);
-  const outBtn = el('button', 'eml-btn', { type: 'button' }); outBtn.textContent = '加载输出'; outBtn.title = '在当前素材卡片后新增一个 EzFlex-MediaOut 节点'; outBtn.addEventListener('click', () => addMediaOut(node)); top.appendChild(outBtn);
+  const outBtn = el('button', 'eml-btn', { type: 'button' }); outBtn.textContent = ezT('Load output'); outBtn.title = ezT('Add an EzFlex-MediaOut node after the current card group'); outBtn.addEventListener('click', () => addMediaOut(node)); top.appendChild(outBtn);
   loadPresetsInto(presetSel);
   saveBtn.addEventListener('click', () => saveCurrentPreset(node));
   delBtn.addEventListener('click', () => deletePreset(node));
@@ -221,9 +222,9 @@ function render(node) {
     tab.dataset.gid = grp.id;
     if (node._ezGrpMgr && node._ezGrpSel && node._ezGrpSel.has(String(grp.id))) tab.classList.add('mgr-sel');
     const nm = el('span', 'tname'); nm.textContent = grp.name; nm.spellcheck = false;
-    nm.addEventListener('dblclick', (e) => { e.stopPropagation(); editInline(nm, (v) => { grp.name = v || '新分组'; syncToConfig(node); render(node); }); });
+    nm.addEventListener('dblclick', (e) => { e.stopPropagation(); editInline(nm, (v) => { grp.name = v || ezT('New group'); syncToConfig(node); render(node); }); });
     tab.appendChild(nm);
-    const close = el('span', 'tclose'); close.textContent = '✕'; close.title = '删除分组';
+    const close = el('span', 'tclose'); close.textContent = '✕'; close.title = ezT('Delete this group');
     close.addEventListener('click', (e) => { e.stopPropagation(); deleteGroup(node, grp.id); });
     tab.appendChild(close);
     tab.addEventListener('click', () => { if (tab._grpDrag) { tab._grpDrag = false; return; } if (node._ezGrpMgr) { groupMgrClick(node, st.groups.indexOf(grp)); return; } if (st.currentGroupId !== grp.id) { st.currentGroupId = grp.id; syncToConfig(node); render(node); } });
@@ -231,16 +232,16 @@ function render(node) {
     tab.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); openGroupMenu(e, node, st.groups.indexOf(grp)); });
     tabs.appendChild(tab);
   });
-  const addTab = el('button', 'eml-addtab', { type: 'button' }); addTab.textContent = '➕ 新建';
+  const addTab = el('button', 'eml-addtab', { type: 'button' }); addTab.textContent = ezT('➕ New');
   addTab.addEventListener('click', () => addGroup(node));
   tabs.appendChild(addTab);
 
   // 卡片列表
   const cards = panel.querySelector('.eml-cards'); cards.innerHTML = '';
-  if (node._ezMgr) cards.appendChild(mkManagerBar({ label: '管理模式：已选 ' + (node._ezMgrSel ? node._ezMgrSel.size : 0) + ' 个素材卡片组', merge: '合并所选', onMerge: () => mergeSelected(node, g), onAll: () => selectAllCards(node, g), onClear: () => clearCards(node, g), onInvert: () => invertCards(node, g), onExit: () => toggleManager(node) }));
-  if (node._ezItemMgr) cards.appendChild(mkManagerBar({ label: '管理卡片：已选 ' + (node._ezItemSel ? node._ezItemSel.size : 0) + ' 个单个卡片', merge: '合并为批量卡片', onMerge: () => { const cc = currentGroup(node); if (cc) mergeSelectedItems(node, cc); }, onAll: () => selectAllItems(node, g), onClear: () => clearItems(node, g), onInvert: () => invertItems(node, g), onExit: () => toggleItemManager(node) }));
-  if (node._ezGrpMgr) cards.appendChild(mkManagerBar({ label: '管理分组：已选 ' + (node._ezGrpSel ? node._ezGrpSel.size : 0) + ' 个分组', merge: '合并分组', onMerge: () => mergeGroups(node), onAll: () => selectAllGroups(node), onClear: () => clearGroups(node), onInvert: () => invertGroups(node), onExit: () => toggleGroupManager(node) }));
-  if (!g) { const e = el('div', 'eml-empty'); e.textContent = '暂无可编辑分组'; cards.appendChild(e); }
+  if (node._ezMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage: ') + (node._ezMgrSel ? node._ezMgrSel.size : 0) + ezT(' card groups selected'), merge: ezT('Merge selected'), onMerge: () => mergeSelected(node, g), onAll: () => selectAllCards(node, g), onClear: () => clearCards(node, g), onInvert: () => invertCards(node, g), onExit: () => toggleManager(node) }));
+  if (node._ezItemMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage cards: ') + (node._ezItemSel ? node._ezItemSel.size : 0) + ezT(' cards selected'), merge: ezT('Merge into batch card'), onMerge: () => { const cc = currentGroup(node); if (cc) mergeSelectedItems(node, cc); }, onAll: () => selectAllItems(node, g), onClear: () => clearItems(node, g), onInvert: () => invertItems(node, g), onExit: () => toggleItemManager(node) }));
+  if (node._ezGrpMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage groups: ') + (node._ezGrpSel ? node._ezGrpSel.size : 0) + ezT(' groups selected'), merge: ezT('Merge groups'), onMerge: () => mergeGroups(node), onAll: () => selectAllGroups(node), onClear: () => clearGroups(node), onInvert: () => invertGroups(node), onExit: () => toggleGroupManager(node) }));
+  if (!g) { const e = el('div', 'eml-empty'); e.textContent = ezT('No editable group'); cards.appendChild(e); }
   else g.cards.forEach((card) => cards.appendChild(buildCard(node, g, card)));
 }
 
@@ -261,12 +262,12 @@ function buildCard(node, g, card) {
   cardDiv.dataset.cid = card.id; cardDiv.dataset.gid = g.id;
   if (isMgr) cardDiv.addEventListener('click', (e) => { if (e.target.closest('.eml-grip') || e.target.closest('.cdel') || (e.target.closest('.ctitle') && e.target.closest('.ctitle').isContentEditable)) return; managerCardClick(node, g, card); });
   const head = el('div', 'eml-card-head');
-  const grip = el('span', 'eml-grip'); grip.textContent = '⠿'; grip.title = '拖动素材卡片排序'; head.appendChild(grip);
+  const grip = el('span', 'eml-grip'); grip.textContent = '⠿'; grip.title = ezT('Drag to reorder card groups'); head.appendChild(grip);
   const title = el('span', 'ctitle'); title.textContent = card.name; title.spellcheck = false;
-  title.addEventListener('dblclick', (e) => { e.stopPropagation(); editInline(title, (v) => { card.name = v || '未命名素材卡片'; syncToConfig(node); updatePorts(node, true); render(node); }); });
+  title.addEventListener('dblclick', (e) => { e.stopPropagation(); editInline(title, (v) => { card.name = v || ezT('Unnamed card group'); syncToConfig(node); updatePorts(node, true); render(node); }); });
   head.appendChild(title);
-  const del = el('button', 'cdel', { type: 'button', title: '删除此素材卡片' }); del.textContent = '✕';
-  del.addEventListener('click', (e) => { e.stopPropagation(); if (g.cards.length <= 1) { uiToast('每个分组至少保留一个素材卡片'); return; } g.cards = g.cards.filter((c) => c.id !== card.id); syncToConfig(node); updatePorts(node, true); render(node); });
+  const del = el('button', 'cdel', { type: 'button', title: ezT('Delete this card group') }); del.textContent = '✕';
+  del.addEventListener('click', (e) => { e.stopPropagation(); if (g.cards.length <= 1) { uiToast(ezT('Each group must keep at least one card group')); return; } g.cards = g.cards.filter((c) => c.id !== card.id); syncToConfig(node); updatePorts(node, true); render(node); });
   head.appendChild(del);
   cardDiv.appendChild(head);
   // 只有 ⠿ 拖手才可拖动排序
@@ -293,13 +294,13 @@ function buildMediaCard(node, g, card, item) {
   const pv = el('div', 'pv');
   const rowH = stateFor(node).gridRowH;
   if (rowH > 0) { pv.style.aspectRatio = 'auto'; pv.style.height = Math.max(1, rowH) * 192 + 'px'; }
-  const rm = el('button', 'rm', { type: 'button', title: '移除素材' }); rm.textContent = '✕';
+  const rm = el('button', 'rm', { type: 'button', title: ezT('Remove media') }); rm.textContent = '✕';
   rm.addEventListener('click', (e) => { e.stopPropagation(); card.items = card.items.filter((x) => x.id !== item.id); syncToConfig(node); render(node); });
   pv.appendChild(rm);
   if (first.type === 'image') { const img = el('img'); img.src = first.url || ''; img.alt = first.name || ''; img.draggable = false; img.style.cssText = 'width:100%;height:100%;object-fit:contain;'; pv.appendChild(img); }
   else if (first.type === 'video') {
     const v = el('video'); v.src = first.url || ''; v.muted = true; v.preload = 'metadata'; v.style.cssText = 'width:100%;height:100%;object-fit:contain;'; pv.appendChild(v);
-    const play = el('button', 'eml-play', { type: 'button' }); play.textContent = '▶'; play.title = '播放预览';
+    const play = el('button', 'eml-play', { type: 'button' }); play.textContent = '▶'; play.title = ezT('Play preview');
     play.addEventListener('click', (e) => { e.stopPropagation(); try { v.muted = false; v.controls = true; v.play(); m.classList.add('playing'); } catch (_) {} });
     v.addEventListener('play', () => m.classList.add('playing'));
     v.addEventListener('pause', () => { v.controls = false; m.classList.remove('playing'); });
@@ -333,19 +334,19 @@ function buildMediaCard(node, g, card, item) {
 function buildEmptyCard(node, g, card) {
   const e = el('div', 'eml-empty');
   const big = el('span', 'big'); big.textContent = '+'; e.appendChild(big);
-  const t = el('span'); t.textContent = '添加素材'; e.appendChild(t);
+  const t = el('span'); t.textContent = ezT('Add media'); e.appendChild(t);
   e.addEventListener('click', () => openBrowse(node, g, card));
   return e;
 }
 
 function addGroup(node) {
   const st = stateFor(node);
-  const g = { id: genId(), name: '分组' + (st.groups.length + 1), cards: [{ id: genId(), name: '卡片组1', items: [] }] };
+  const g = { id: genId(), name: ezT('Group') + (st.groups.length + 1), cards: [{ id: genId(), name: ezT('Card group 1'), items: [] }] };
   st.groups.push(g); st.currentGroupId = g.id; syncToConfig(node); render(node);
 }
 function deleteGroup(node, gid) {
   const st = stateFor(node);
-  if (st.groups.length <= 1) { uiToast('至少保留一个分组'); return; }
+  if (st.groups.length <= 1) { uiToast(ezT('Keep at least one group')); return; }
   st.groups = st.groups.filter((g) => g.id !== gid);
   if (st.currentGroupId === gid) st.currentGroupId = st.groups[0].id;
   syncToConfig(node); updatePorts(node, true); render(node);
@@ -364,10 +365,10 @@ async function uploadAndAddFiles(files, node, g, card) {
     const r = await fetch('/media_loader/upload', { method: 'POST', body: fd });
     const d = await r.json();
     const ups = d.files || [];
-    if (!ups.length) { uiToast('没有可上传的文件'); return; }
+    if (!ups.length) { uiToast(ezT('No files to upload')); return; }
     card.items.push({ id: genId(), files: ups.map((f) => ({ id: genId(), name: f.name, path: f.path, subfolder: f.subfolder || '', dir: 'input', type: f.type || mediaKind(f.name), url: f.url, size: f.size, mtime: f.mtime })) });
-    syncToConfig(node); render(node); uiToast('已拖入 ' + ups.length + ' 个素材');
-  } catch (_) { uiToast('上传失败'); }
+    syncToConfig(node); render(node); uiToast(ezT('Dropped ') + ups.length + ezT(' media files'));
+  } catch (_) { uiToast(ezT('Upload failed')); }
 }
 
 // ===== 右键菜单（三级：单个卡片 / 素材卡片组 / 分组）=====
@@ -388,22 +389,22 @@ function buildMenu(e, items) {
 // 单个卡片右键
 function openItemMenu(e, node, g, card, item) {
   buildMenu(e, [
-    { label: '合并', fn: () => toggleItemManager(node) },
-    { label: '拆分', fn: () => splitItem(node, g, card, item) },
-    { label: '打开卡片位置', fn: () => openFileLocation(card) },
-    { label: '另存为…', fn: () => saveAsCard(card) },
+    { label: ezT('Merge'), fn: () => toggleItemManager(node) },
+    { label: ezT('Split'), fn: () => splitItem(node, g, card, item) },
+    { label: ezT('Open card location'), fn: () => openFileLocation(card) },
+    { label: ezT('Save as…'), fn: () => saveAsCard(card) },
   ]);
 }
 // 素材卡片组右键
 function openRowMenu(e, node, g, card) {
   buildMenu(e, [
-    { label: '拆分为多个卡片组', fn: () => splitCardGroup(node, g, card) },
-    { label: '合并卡片组', fn: () => toggleManager(node) },
+    { label: ezT('Split into multiple card groups'), fn: () => splitCardGroup(node, g, card) },
+    { label: ezT('Merge card groups'), fn: () => toggleManager(node) },
   ]);
 }
 // 分组右键
 function openGroupMenu(e, node, gi) {
-  buildMenu(e, [{ label: '合并分组', fn: () => toggleGroupManager(node) }]);
+  buildMenu(e, [{ label: ezT('Merge groups'), fn: () => toggleGroupManager(node) }]);
 }
 function cardFiles(card) {
   const out = [];
@@ -413,22 +414,22 @@ function cardFiles(card) {
 // 素材卡片组级拆分：把一张「素材卡片组」裂成多个素材卡片组（仍在当前分组内）
 async function splitCardGroup(node, g, card) {
   const total = cardFiles(card);
-  if (total.length <= 1) { uiToast('该素材卡片组只有一个文件，无需拆分'); return; }
-  const ok = await uiConfirm('确定把「' + (card.name || '素材卡片组') + '」拆分为 ' + total.length + ' 个素材卡片组吗？');
+  if (total.length <= 1) { uiToast(ezT('This card group has only one file; nothing to split')); return; }
+  const ok = await uiConfirm(ezT('Split "') + (card.name || ezT('Card group')) + ezT('" into ') + total.length + ezT(' card groups?'));
   if (!ok) return;
   const idx = g.cards.indexOf(card);
-  const newCards = total.map((f) => ({ id: genId(), name: (card.name || '素材卡片组') + '_' + (f.name || ''), items: [{ id: genId(), files: [f] }] }));
+  const newCards = total.map((f) => ({ id: genId(), name: (card.name || ezT('Card group')) + '_' + (f.name || ''), items: [{ id: genId(), files: [f] }] }));
   g.cards.splice(idx, 1, ...newCards);
-  syncToConfig(node); updatePorts(node, true); render(node); uiToast('已把「素材卡片组」拆分为 ' + newCards.length + ' 个素材卡片组');
+  syncToConfig(node); updatePorts(node, true); render(node); uiToast(ezT('Split the card group into ') + newCards.length + ezT(' card groups'));
 }
 // 单个卡片级拆分：把选中的「批量卡片」裂成单个卡片（仍在当前素材卡片组内，顶到后面）
 function splitItem(node, g, card, item) {
   const files = item.files || [];
-  if (files.length <= 1) { uiToast('该单个卡片不是批量卡片，无需拆分'); return; }
+  if (files.length <= 1) { uiToast(ezT('This card is not a batch card; nothing to split')); return; }
   const idx = card.items.indexOf(item);
   const splits = files.map((f) => ({ id: genId(), files: [f] }));
   card.items.splice(idx, 1, ...splits);
-  syncToConfig(node); render(node); uiToast('已把批量卡片拆成 ' + splits.length + ' 个单个卡片');
+  syncToConfig(node); render(node); uiToast(ezT('Split the batch card into ') + splits.length + ezT(' cards'));
 }
 function openFileLocation(card) {
   const files = cardFiles(card);
@@ -441,11 +442,11 @@ async function saveAsCard(card) {
   try {
     const d = await fetch('/media_loader/pick_folder', { method: 'POST' });
     const j = await d.json();
-    if (!j.ok || !j.path) { uiToast(j.error ? ('选择目录失败：' + j.error) : '未选择目录'); return; }
+    if (!j.ok || !j.path) { uiToast(j.error ? (ezT('Failed to pick folder: ') + j.error) : ezT('No folder selected')); return; }
     const r = await fetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: files[0].path, dest: j.path }) });
     const res = await r.json();
-    uiToast(res.ok ? ('已另存为 ' + res.dest) : ('另存失败：' + (res.error || '')));
-  } catch (_) { uiToast('另存失败'); }
+    uiToast(res.ok ? (ezT('Saved as ') + res.dest) : (ezT('Save failed: ') + (res.error || '')));
+  } catch (_) { uiToast(ezT('Save failed')); }
 }
 
 // ===== 管理模式（多选「素材卡片组」合并，卡片组级）=====
@@ -453,9 +454,9 @@ function updateMgrCount(node) {
   const root = node && node._emlRoot; if (!root) return;
   const bar = root.querySelector('.eml-managerbar'); if (!bar) return;
   const cnt = bar.querySelector('span'); if (!cnt) return;
-  if (node._ezMgr) cnt.textContent = '管理模式：已选 ' + (node._ezMgrSel ? node._ezMgrSel.size : 0) + ' 个素材卡片组';
-  else if (node._ezItemMgr) cnt.textContent = '管理卡片：已选 ' + (node._ezItemSel ? node._ezItemSel.size : 0) + ' 个单个卡片';
-  else if (node._ezGrpMgr) cnt.textContent = '管理分组：已选 ' + (node._ezGrpSel ? node._ezGrpSel.size : 0) + ' 个分组';
+  if (node._ezMgr) cnt.textContent = ezT('Manage: ') + (node._ezMgrSel ? node._ezMgrSel.size : 0) + ezT(' card groups selected');
+  else if (node._ezItemMgr) cnt.textContent = ezT('Manage cards: ') + (node._ezItemSel ? node._ezItemSel.size : 0) + ezT(' cards selected');
+  else if (node._ezGrpMgr) cnt.textContent = ezT('Manage groups: ') + (node._ezGrpSel ? node._ezGrpSel.size : 0) + ezT(' groups selected');
 }
 function toggleManager(node) {
   node._ezMgr = !node._ezMgr; node._ezMgrSel = node._ezMgrSel || new Set();
@@ -475,12 +476,12 @@ function invertCards(node, g) { const sel = node._ezMgrSel || new Set(); const i
 function mergeSelected(node, g) {
   const sel = node._ezMgrSel || new Set();
   const cards = g.cards.filter((c) => sel.has(String(c.id)));
-  if (cards.length < 2) { uiToast('请先选中 2 个以上素材卡片组'); return; }
+  if (cards.length < 2) { uiToast(ezT('Select at least 2 card groups first')); return; }
   const target = cards[0]; const others = [];
   cards.slice(1).forEach((c) => c.items.forEach((it) => { target.items.push({ id: genId(), files: it.files.slice() }); others.push(c); }));
   g.cards = g.cards.filter((c) => !others.includes(c));
   node._ezMgrSel.clear();
-  syncToConfig(node); updatePorts(node, true); render(node); uiToast('已把 ' + cards.length + ' 个素材卡片组合并到「' + (target.name || '素材卡片组') + '」');
+  syncToConfig(node); updatePorts(node, true); render(node); uiToast(ezT('Merged ') + cards.length + ezT(' card groups into "') + (target.name || ezT('Card group')) + ezT('"'));
 }
 
 // ===== 管理卡片（多选「单个卡片」合并，卡片级）=====
@@ -503,12 +504,12 @@ function mergeSelectedItems(node, g) {
   const sel = node._ezItemSel || new Set();
   const found = [];
   (g.cards || []).forEach((c) => (c.items || []).forEach((it) => { if (sel.has(String(it.id))) found.push({ card: c, item: it }); }));
-  if (found.length < 2) { uiToast('请先选中 2 个以上单个卡片'); return; }
+  if (found.length < 2) { uiToast(ezT('Select at least 2 cards first')); return; }
   const target = found[0].item; const others = [];
   found.slice(1).forEach((x) => { target.files = target.files.concat(x.item.files); others.push(x); });
   others.forEach((x) => { x.card.items = x.card.items.filter((it) => it !== x.item); });
   node._ezItemSel.clear();
-  syncToConfig(node); render(node); uiToast('已把 ' + found.length + ' 个单个卡片合并为批量卡片');
+  syncToConfig(node); render(node); uiToast(ezT('Merged ') + found.length + ezT(' cards into a batch card'));
 }
 
 // ===== 管理分组（多选「分组」合并，分组级）=====
@@ -530,13 +531,13 @@ function invertGroups(node) { const st = stateFor(node); const sel = node._ezGrp
 function mergeGroups(node) {
   const st = stateFor(node); const sel = node._ezGrpSel || new Set();
   const groups = st.groups.filter((gr) => sel.has(String(gr.id)));
-  if (groups.length < 2) { uiToast('请先选中 2 个以上分组'); return; }
+  if (groups.length < 2) { uiToast(ezT('Select at least 2 groups first')); return; }
   const target = groups[0]; const others = [];
   groups.slice(1).forEach((gr) => { gr.cards.forEach((c) => target.cards.push({ id: genId(), name: c.name, items: deepClone(c.items) })); others.push(gr); });
   st.groups = st.groups.filter((gr) => !others.includes(gr));
   if (!st.groups.some((gr) => gr.id === st.currentGroupId)) st.currentGroupId = st.groups[0].id;
   node._ezGrpSel.clear();
-  syncToConfig(node); updatePorts(node, true); render(node); uiToast('已把 ' + groups.length + ' 个分组合并到「' + (target.name || '分组') + '」');
+  syncToConfig(node); updatePorts(node, true); render(node); uiToast(ezT('Merged ') + groups.length + ezT(' groups into "') + (target.name || ezT('Group')) + ezT('"'));
 }
 
 function startCardDrag(e, node, g, card) {
@@ -614,7 +615,7 @@ function beginItemDrag(node, g, card, item, elm) {
       if (targetItem) {
         targetItem.files = targetItem.files.concat(item.files || []);
         (card.items || []).forEach((it, i) => { if (it === item) card.items.splice(i, 1); });
-        syncToConfig(node); render(node); uiToast('已把单个卡片合并到目标卡片（成为批量卡片）');
+        syncToConfig(node); render(node); uiToast(ezT('Merged the card into the target card (now a batch card)'));
       }
     }
   };
@@ -685,30 +686,30 @@ async function loadPresetsInto(sel) {
       dd.btn.textContent = cur;
       dd.menu.innerHTML = '';
       const opts = [...sel.options];
-      if (!opts.length) { const e = el('div', 'eml-preset-item'); e.textContent = '（无预设）'; e.style.cssText = 'padding:6px 12px;font-size:12px;color:#94a3b8;'; dd.menu.appendChild(e); }
+      if (!opts.length) { const e = el('div', 'eml-preset-item'); e.textContent = ezT('(No presets)'); e.style.cssText = 'padding:6px 12px;font-size:12px;color:#94a3b8;'; dd.menu.appendChild(e); }
       opts.forEach((o) => { const it = el('div', 'eml-preset-item' + (o.value === cur ? ' active' : '')); it.textContent = o.value; it.dataset.v = o.value; dd.menu.appendChild(it); });
     }
   } catch (_) {}
 }
 async function saveCurrentPreset(node) {
-  let dft = '预设1';
-  try { const l = await (await fetch(PRESET_API)).json(); dft = '预设' + ((l || []).length + 1); } catch (_) {}
-  const name = await uiPrompt('请输入预设名称：', dft);
+  let dft = ezT('Preset 1');
+  try { const l = await (await fetch(PRESET_API)).json(); dft = ezT('Preset') + ((l || []).length + 1); } catch (_) {}
+  const name = await uiPrompt(ezT('Enter preset name:'), dft);
   if (!name || !name.trim()) return;
   const st = stateFor(node);
   try {
     await fetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), groups: deepClone(st.groups), currentGroupId: st.currentGroupId }) });
     st.currentPreset = name.trim(); syncToConfig(node);
     const sel = node._emlRoot && node._emlRoot.querySelector('.eml-preset'); if (sel) { sel._node = node; loadPresetsInto(sel); }
-    uiToast('预设已保存');
-  } catch (_) { uiToast('保存失败'); }
+    uiToast(ezT('Preset saved'));
+  } catch (_) { uiToast(ezT('Save failed')); }
 }
 function applyPreset(node, name) {
   (async () => {
     try {
       const st = stateFor(node);
       if (name === 'default') {
-        st.groups = [{ id: genId(), name: '分组', cards: [{ id: genId(), name: '卡片组1', items: [] }] }];
+        st.groups = [{ id: genId(), name: ezT('Group'), cards: [{ id: genId(), name: ezT('Card group 1'), items: [] }] }];
         st.currentPreset = 'default'; st.currentGroupId = st.groups[0].id;
         syncToConfig(node); updatePorts(node, true); render(node);
         return;
@@ -717,42 +718,86 @@ function applyPreset(node, name) {
       const p = (list || []).find((x) => x.name === name); if (!p) return;
       st.groups = deepClone(p.groups || []); st.currentPreset = name;
       st.currentGroupId = p.currentGroupId && st.groups.some((g) => g.id === p.currentGroupId) ? p.currentGroupId : (st.groups[0] && st.groups[0].id);
-      if (!st.groups.length) { st.groups = [{ id: genId(), name: '分组', cards: [{ id: genId(), name: '卡片组1', items: [] }] }]; }
+      if (!st.groups.length) { st.groups = [{ id: genId(), name: ezT('Group'), cards: [{ id: genId(), name: ezT('Card group 1'), items: [] }] }]; }
       syncToConfig(node); updatePorts(node, true); render(node);
     } catch (_) {}
   })();
 }
 async function deletePreset(node) {
   const sel = node._emlRoot && node._emlRoot.querySelector('.eml-preset'); const name = sel && sel.value;
-  if (!name) { uiToast('没有可删除的预设'); return; }
-  if (name === 'default') { uiToast('不能删除默认预设'); return; }
-  try { await fetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); stateFor(node).currentPreset = 'default'; syncToConfig(node); if (sel) { sel._node = node; loadPresetsInto(sel); } uiToast('预设已删除'); } catch (_) { uiToast('删除失败'); }
+  if (!name) { uiToast(ezT('No preset to delete')); return; }
+  if (name === 'default') { uiToast(ezT('The default preset cannot be deleted')); return; }
+  try { await fetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); stateFor(node).currentPreset = 'default'; syncToConfig(node); if (sel) { sel._node = node; loadPresetsInto(sel); } uiToast(ezT('Preset deleted')); } catch (_) { uiToast(ezT('Delete failed')); }
 }
 
 // ===== 文件浏览（可导航任意路径：path bar + 左侧目录 + 底部图标工具栏 + ctrl/shift 多选）=====
 async function fetchBrowse(path) {
-  try { const r = await fetch('/media_loader/browse?path=' + encodeURIComponent(path || '')); const d = await r.json(); if (d && ((d.files && d.files.length) || (d.dirs && d.dirs.length) || d.path)) return { path: d.path || '', parent: d.parent || '', name: d.name || '', dirs: d.dirs || [], files: d.files || [] }; } catch (_) {}
+  try { const r = await fetch('/media_loader/browse?path=' + encodeURIComponent(path || '')); const d = await r.json(); if (d && d.error) uiToast(ezT('Browse failed: ') + d.error); if (d && ((d.files && d.files.length) || (d.dirs && d.dirs.length) || d.path)) return { path: d.path || '', parent: d.parent || '', name: d.name || '', dirs: d.dirs || [], files: d.files || [], roots: d.roots || [], mine: d.mine || [] }; } catch (_) {}
   try { const r = await fetch('/media_loader/files'); const d = await r.json(); const fl = d.files || []; return { path: '', parent: '', name: 'input', dirs: [], files: fl, _legacy: true }; } catch (_) {}
   return { path: '', parent: '', name: '', dirs: [], files: [] };
 }
 function openBrowse(node, g, card) {
   const ov = el('div');
   ov.style.cssText = 'position:fixed;inset:0;z-index:9998;background:#f5f6f8;color:#1a1f2b;font-family:Inter,sans-serif;display:flex;flex-direction:column;';
-  ov.innerHTML = '<div class="eml-toolbar" style="display:flex;align-items:center;gap:6px;padding:10px 18px 10px 46px;background:#fff;border-bottom:1px solid #e6e9ef;flex-shrink:0;flex-wrap:wrap;position:relative;"><b style="font-size:15px;white-space:nowrap;">素材浏览</b>' +
-    '<button class="eml-navb" title="后退" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">←</button>' +
-    '<button class="eml-navf" title="前进" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">→</button>' +
-    '<button class="eml-navup" title="上级目录" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↑</button>' +
-    '<button class="eml-navr" title="刷新" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↻</button>' +
-    '<input class="eml-path" placeholder="输入路径…" title="输入盘符/路径后回车跳转" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:6px 10px;font-size:12px;outline:none;max-width:150px;min-width:120px;" />' +
-    '<input class="eml-bbsearch" placeholder="搜索当前目录…" style="width:160px;padding:6px 10px;font-size:12px;border:1px solid #dce3ec;border-radius:7px;outline:none;">' +
+  ov.innerHTML = '<div class="eml-toolbar" style="display:flex;align-items:center;gap:6px;padding:10px 18px 10px 46px;background:#fff;border-bottom:1px solid #e6e9ef;flex-shrink:0;flex-wrap:wrap;position:relative;"><b style="font-size:15px;white-space:nowrap;">' + ezT('Media browser') + '</b>' +
+    '<button class="eml-navb" title="' + ezT('Back') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">←</button>' +
+    '<button class="eml-navf" title="' + ezT('Forward') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">→</button>' +
+    '<button class="eml-navup" title="' + ezT('Parent directory') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↑</button>' +
+    '<button class="eml-navr" title="' + ezT('Refresh') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↻</button>' +
+    '<input class="eml-bbsearch" placeholder="' + ezT('Search this folder…') + '" style="flex:1 1 auto;max-width:360px;min-width:120px;padding:6px 10px;font-size:12px;border:1px solid #dce3ec;border-radius:7px;background:#fff;outline:none;font-family:inherit;">' +
+    '<input class="eml-path" placeholder="' + ezT('Enter a path…') + '" title="' + ezT('Type a drive/path and press Enter to go') + '" style="flex:0 1 auto;max-width:260px;min-width:130px;background:#fff;border:1px solid #dce3ec;border-radius:7px;padding:6px 10px;font-size:12px;outline:none;font-family:inherit;" />' +
     '<button class="eml-bbclose" style="position:absolute;top:8px;right:14px;width:28px;height:28px;border-radius:50%;border:1px solid rgba(220,38,38,.32);background:rgba(220,38,38,.1);color:#dc2626;font-size:15px;cursor:pointer;">✕</button></div>' +
-    '<div style="flex:1;display:flex;min-height:0;"><div class="eml-bbtree" style="width:240px;flex-shrink:0;background:#fff;border-right:1px solid #e6e9ef;overflow:auto;padding:6px 0;"></div><div style="flex:1;display:flex;flex-direction:column;min-width:0;"><div class="eml-panebar" style="display:flex;align-items:center;gap:6px;padding:6px 14px;background:#fff;border-bottom:1px solid #eef1f6;flex-shrink:0;flex-wrap:wrap;"><span class="eml-viewbar" style="display:flex;gap:2px;background:#f1f4fa;border-radius:8px;padding:2px;border:1px solid #e2e8f0;"><button data-v="list" title="列表">☰</button><button data-v="big" title="大图标">▦</button><button data-v="small" title="小图标">▤</button><button data-v="detail" title="详细信息">≡</button></span>' +
-    '<button class="eml-selall" title="全选" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">全选</button>' +
-    '<button class="eml-selinv" title="反选" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">反选</button>' +
-    '<button class="eml-selclr" title="清除选择" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">清除</button>' +
-    '<span class="eml-bbcount" style="font-size:12px;color:#6b7a8e;">已选 0 个</span></div><div class="eml-bblist" style="flex:1;overflow:auto;padding:12px 18px;"></div></div></div>' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 18px;background:#fff;border-top:1px solid #e6e9ef;flex-shrink:0;"><span style="font-size:11px;color:#94a3b8;">可拖文件到此处上传 / 拖文件到卡片</span><button class="eml-bbadd" style="background:#2b3a4a;border:1px solid #2b3a4a;color:#fff;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;">添加到素材卡片</button></div>';
+    '<div style="flex:1;display:flex;min-height:0;"><div class="eml-bbtree" style="width:240px;flex-shrink:0;background:#fff;border-right:1px solid #e6e9ef;overflow:auto;padding:6px 0;"></div><div style="flex:1;display:flex;flex-direction:column;min-width:0;"><div class="eml-panebar" style="display:flex;align-items:center;gap:6px;padding:6px 14px;background:#fff;border-bottom:1px solid #eef1f6;flex-shrink:0;flex-wrap:wrap;"><span class="eml-viewbar" style="display:flex;gap:2px;background:#f1f4fa;border-radius:8px;padding:2px;border:1px solid #e2e8f0;"><button data-v="list" title="' + ezT('List') + '">☰</button><button data-v="big" title="' + ezT('Large icons') + '">▦</button><button data-v="small" title="' + ezT('Small icons') + '">▤</button><button data-v="detail" title="' + ezT('Detail view') + '">≡</button></span>' +
+    '<button class="eml-selall" title="' + ezT('Select all') + '" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Select all') + '</button>' +
+    '<button class="eml-selinv" title="' + ezT('Invert') + '" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Invert') + '</button>' +
+    '<button class="eml-selclr" title="' + ezT('Deselect') + '" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Clear') + '</button>' +
+    '<span class="eml-bbcount" style="font-size:12px;color:#6b7a8e;">' + ezT('Selected ') + 0 + ezT(' item(s)') + '</span></div><div class="eml-bblist" style="flex:1;overflow:auto;padding:12px 18px;"></div></div></div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 18px;background:#fff;border-top:1px solid #e6e9ef;flex-shrink:0;"><span style="font-size:11px;color:#94a3b8;">' + ezT('Drag files here to upload / drag files onto cards') + '</span><button class="eml-bbadd" style="background:#2b3a4a;border:1px solid #2b3a4a;color:#fff;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;">' + ezT('Add to card group') + '</button></div>';
   document.body.appendChild(ov);
+  // 「＋根」：把输入框/当前目录登记为「可浏览根目录」（后端只允许本机登记；浏览器只能在根目录内导航）
+  try {
+    const pb = ov.querySelector('.eml-path');
+    if (pb && pb.parentNode) {
+      const rb = el('button', 'eml-addroot'); rb.style.flex = '0 0 auto';
+      rb.textContent = ezT('Save root');
+      rb.title = ezT('Add the folder in the field above as a browsable root and enter it (local only). To limit unauthorized reads, the browser can only navigate inside roots.');
+      rb.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:6px 10px;font-size:12px;color:#4d5b6d;cursor:pointer;white-space:nowrap;';
+      rb.addEventListener('click', async () => {
+        const v = (pb.value || '').trim() || cur;
+        if (!v) { uiToast(ezT('Enter a folder in the path field first')); return; }
+        try {
+          const r = await fetch('/media_loader/roots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: v }) });
+          const d = await r.json().catch(() => ({}));
+          if (d && d.ok) { uiToast((d.note ? ezT('Already a root: ') : ezT('Added as browsable root: ')) + v); await refreshRoots(v); navigate(v, false); }
+          else uiToast(ezT('Failed to add root: ') + ((d && d.error) || ('HTTP ' + r.status)));
+        } catch (err) { uiToast(ezT('Failed to add root: ') + (err && err.message || err)); }
+      });
+      const rs = el('select', 'eml-roots');
+      const rph = el('option'); rph.value = ''; rph.textContent = ezT('— Root —'); rs.appendChild(rph);
+      rs.title = ezT('Browsable roots: remote/web sessions can only see inside roots; locally you can use "Add as root" on the right to add other folders');
+      rs.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:5px 8px;font-size:12px;color:#4d5b6d;max-width:230px;min-width:130px;flex:0 0 auto;';
+      rs.addEventListener('change', () => { pinnedRoot = rs.value; syncDelBtn(); if (rs.value) navigate(rs.value, false); });
+      const host = pb.parentNode || ov.querySelector('.eml-toolbar') || ov;
+      const rx = el('button', 'eml-rmroot'); rx.style.flex = '0 0 auto';
+      rx.textContent = ezT('Delete root');
+      rx.title = ezT('Delete the root selected in the dropdown (built-in roots are always available)');
+      rx.style.cssText = 'background:#fff;border:1px solid #dce3ec;border-radius:7px;padding:6px 10px;font-size:12px;color:#b3352f;cursor:pointer;white-space:nowrap;';
+      rx.addEventListener('click', async () => {
+        const v = (rs.value || '').trim() || (pb.value || '').trim() || cur;
+        if (!v) return;
+        try {
+          const r = await fetch('/media_loader/roots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remove: v }) });
+          const d = await r.json().catch(() => ({}));
+          uiToast((d && d.ok) ? (ezT('Removed from browsable roots: ') + v) : (ezT('Failed to remove root: ') + ((d && d.error) || ('HTTP ' + r.status))));
+          if (d && d.ok) await refreshRoots('');
+          navigate(cur || '', false);
+        } catch (err) { uiToast(ezT('Failed to remove root: ') + (err && err.message || err)); }
+      });
+      host.insertBefore(rs, pb);
+      host.insertBefore(rb, pb.nextSibling);
+      host.insertBefore(rx, rb.nextSibling);
+    }
+  } catch (_) {}
   const closeBrowse = () => { document.removeEventListener('mousedown', onDown); if (ov.parentNode) ov.parentNode.removeChild(ov); };
   const onDown = (e) => { if (!ov.contains(e.target)) closeBrowse(); };
   document.addEventListener('mousedown', onDown);
@@ -765,8 +810,38 @@ function openBrowse(node, g, card) {
   let cur = ''; let curData = { files: [], dirs: [], parent: '', path: '' };
   let selFolder = ''; let paneFiles = [];
   let selected = new Set(); let lastAnchor = -1; let view = 'big';
-  let hist = []; let histIdx = -1;
+  let hist = []; let histIdx = -1; let mineRoots = []; let pinnedRoot = '';
   const fileUrl = (f) => { if (f.url) return f.url; return '/media_loader/serve?path=' + encodeURIComponent(f.path || ''); };
+  // 用后端刚返回的 roots 立刻重建下拉（保存/删除根目录后不用再手点一次）
+  const rootLabel = (p) => { const s = String(p || ''); const parts = s.split(s.indexOf('\\') >= 0 ? '\\' : '/').filter(Boolean); return parts.pop() || s; };
+  const applyRoots = (roots, pick, mine) => {
+    const rs = ov.querySelector('.eml-roots');
+    if (!rs) return;
+    if (Array.isArray(mine)) mineRoots = mine;
+    const list = roots || [];
+    const sig = list.join('|');
+    if (rs.dataset.sig !== sig) {
+      rs.dataset.sig = sig;
+      rs.innerHTML = '';
+      if (!list.length) { const ph = el('option'); ph.value = ''; ph.textContent = ezT('— Root (backend not ready) —'); rs.appendChild(ph); }
+      list.forEach((p) => { const o = el('option'); o.value = p; o.textContent = rootLabel(p); o.title = p; rs.appendChild(o); });
+    }
+    if (pick) rs.value = pick;
+    syncDelBtn();
+  };
+  // 删除按钮只对「自己登记的根」可用：内置 input/output 与扫描目录不可删（灰掉而不是点了没反应）
+  const syncDelBtn = () => {
+    const rs = ov.querySelector('.eml-roots'), rx = ov.querySelector('.eml-rmroot');
+    if (!rs || !rx) return;
+    const on = mineRoots.indexOf(String(rs.value || '')) >= 0;
+    rx.disabled = !on;
+    rx.style.opacity = on ? '' : '.45';
+    rx.style.cursor = on ? 'pointer' : 'default';
+    rx.style.color = on ? '#b3352f' : '#8a94a3';
+  };
+  const refreshRoots = async (pick) => {
+    try { const r = await fetch('/media_loader/roots'); const d = await r.json(); applyRoots(d.roots || [], pick || '', d.mine || []); } catch (_) {}
+  };
   const navigate = async (path, push = true) => {
     if (push && path !== cur) { hist = hist.slice(0, histIdx + 1); hist.push(path); histIdx = hist.length - 1; }
     const d = await fetchBrowse(path);
@@ -774,6 +849,15 @@ function openBrowse(node, g, card) {
     selFolder = cur; paneFiles = (d.files || []).slice();
     selected = new Set(); lastAnchor = -1;
     treeCache[cur] = (d.dirs || []).map((x) => ({ name: x.name, path: x.path }));
+    // 根目录下拉 + 「上级」可用状态（到根就是底，不再往上爬）
+    try {
+      const rp = String(d.path || '');
+    const inPin = !!pinnedRoot && (rp === pinnedRoot || (rp.indexOf(pinnedRoot) === 0 && (rp[pinnedRoot.length] === '\\' || rp[pinnedRoot.length] === '/')));
+    if (!inPin) pinnedRoot = '';
+    applyRoots(d.roots || [], inPin ? pinnedRoot : (d.root || (d.roots || [])[0] || ''), d.mine || []);
+      const up = ov.querySelector('.eml-navup');
+      if (up) { up.style.opacity = d.parent ? '' : '.45'; up.title = d.parent ? ezT('Parent directory') : ezT('Already at the root (to go to a parent folder, click "Add as root")'); }
+    } catch (_) {}
     drawTree(); drawPane();
   };
   const _fSVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>';
@@ -786,12 +870,12 @@ function openBrowse(node, g, card) {
     const home = el('div', 'eml-bbtrow' + (selFolder === '' ? ' sel' : ''));
     const htw = el('div', 'eml-bbtwist leaf'); htw.innerHTML = _chevSVG;
     const hic = el('span', 'eml-bbficon'); hic.innerHTML = _homeSVG;
-    const hnm = el('div', 'eml-bbfname'); hnm.textContent = '全部素材';
+    const hnm = el('div', 'eml-bbfname'); hnm.textContent = ezT('All media');
     home.appendChild(htw); home.appendChild(hic); home.appendChild(hnm);
     home.addEventListener('click', () => navigate(''));
     tree.appendChild(home);
     const dirs = treeCache[cur] || curData.dirs || [];
-    if (!dirs.length) { const e = el('div'); e.textContent = '(无子目录)'; e.style.cssText = 'padding:8px 12px;font-size:11px;color:#94a3b8;'; tree.appendChild(e); }
+    if (!dirs.length) { const e = el('div'); e.textContent = ezT('(No subfolders)'); e.style.cssText = 'padding:8px 12px;font-size:11px;color:#94a3b8;'; tree.appendChild(e); }
     const mkNode = (d, depth) => {
       const row = el('div', 'eml-bbtrow' + (selFolder === d.path ? ' sel' : '')); row.style.paddingLeft = (10 + depth * 26) + 'px';
       const twist = el('div', 'eml-bbtwist' + (treeExpanded[d.path] ? ' expanded' : '')); twist.innerHTML = _chevSVG;
@@ -804,7 +888,7 @@ function openBrowse(node, g, card) {
     };
     dirs.forEach((d) => mkNode(d, 0));
   };
-  const refreshSel = () => { list.querySelectorAll('.eml-bb-item').forEach((x) => x.classList.toggle('sel', selected.has(x.dataset.path))); count.textContent = '已选 ' + selected.size + ' 个'; };
+  const refreshSel = () => { list.querySelectorAll('.eml-bb-item').forEach((x) => x.classList.toggle('sel', selected.has(x.dataset.path))); count.textContent = ezT('Selected ') + selected.size + ezT(' item(s)'); };
   // 卡片右上角 +/− 按钮（ModelsCombo 同款）：把一个素材加入/移出当前素材卡片。
   const fileEntryOf = (f) => ({ id: genId(), name: f.name, path: f.path || f.name, subfolder: '', dir: 'input', type: f.type || mediaKind(f.name), url: fileUrl(f), size: f.size, mtime: f.mtime });
   const cardHasFile = (f) => (card.items || []).some((it) => (it.files || []).some((x) => (x.path || x.name) === (f.path || f.name)));
@@ -820,7 +904,7 @@ function openBrowse(node, g, card) {
   const mkAddBtn = (f) => {
     const b = el('button'); b.type = 'button';
     b.style.cssText = 'position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.55);color:#1a1f2b;font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;font-family:inherit;padding:0;';
-    const refresh = () => { const on = cardHasFile(f); b.textContent = on ? '−' : '+'; b.title = on ? '从素材卡片移除' : '添加到素材卡片'; b.style.background = on ? 'rgba(74,106,90,.85)' : 'rgba(255,255,255,.55)'; b.style.color = on ? '#fff' : '#1a1f2b'; };
+    const refresh = () => { const on = cardHasFile(f); b.textContent = on ? '−' : '+'; b.title = on ? ezT('Remove from card group') : ezT('Add to card group'); b.style.background = on ? 'rgba(74,106,90,.85)' : 'rgba(255,255,255,.55)'; b.style.color = on ? '#fff' : '#1a1f2b'; };
     refresh();
     b.addEventListener('mouseenter', () => { b.style.transform = 'scale(1.05)'; });
     b.addEventListener('mouseleave', () => { b.style.transform = ''; });
@@ -831,7 +915,7 @@ function openBrowse(node, g, card) {
     const q = (search.value || '').toLowerCase();
     let listF = (paneFiles || []).filter((f) => !q || (f.name || '').toLowerCase().indexOf(q) >= 0);
     list.innerHTML = '';
-    if (!listF.length) { const e = el('div'); e.textContent = '未找到媒体文件'; e.style.cssText = 'color:#8a9aa8;text-align:center;padding:40px 12px;font-size:13px;'; list.appendChild(e); return; }
+    if (!listF.length) { const e = el('div'); e.textContent = ezT('No media files found'); e.style.cssText = 'color:#8a9aa8;text-align:center;padding:40px 12px;font-size:13px;'; list.appendChild(e); return; }
     const toggleSel = (i, ev) => {
       const f = listF[i]; const p = f.path || f.name;
       if (ev.shiftKey && lastAnchor >= 0) {
@@ -865,10 +949,13 @@ function openBrowse(node, g, card) {
     else if (view === 'detail') { list.style.display = 'flex'; list.style.flexDirection = 'column'; list.style.gap = '2px'; listF.forEach((f) => { const row = renderRow(f); const sz = el('span'); sz.textContent = formatSize(f.size); sz.style.cssText = 'color:#6b7a8e;font-size:10px;min-width:64px;'; row.appendChild(sz); const mt = el('span'); mt.textContent = f.mtime || ''; mt.style.cssText = 'color:#94a3b8;font-size:10px;min-width:120px;'; row.appendChild(mt); list.appendChild(row); }); }
     else { list.style.display = 'flex'; list.style.flexDirection = 'column'; list.style.gap = '2px'; listF.forEach((f) => list.appendChild(renderRow(f))); }
   };
-  try { drawTree(); drawPane(); } catch (err) { try { list.innerHTML = ''; const e = el('div'); e.textContent = '浏览渲染出错：' + (err && err.message || err); e.style.cssText = 'color:#c0392b;text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
+  try { drawTree(); drawPane(); } catch (err) { try { list.innerHTML = ''; const e = el('div'); e.textContent = ezT('Failed to render browser: ') + (err && err.message || err); e.style.cssText = 'color:#c0392b;text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
   ov.querySelector('.eml-navb').addEventListener('click', () => { if (histIdx > 0) { histIdx--; navigate(hist[histIdx], false); } });
   ov.querySelector('.eml-navf').addEventListener('click', () => { if (histIdx < hist.length - 1) { histIdx++; navigate(hist[histIdx], false); } });
-  ov.querySelector('.eml-navup').addEventListener('click', () => { if (curData.parent) navigate(curData.parent); });
+  ov.querySelector('.eml-navup').addEventListener('click', () => {
+    if (curData.parent) navigate(curData.parent);
+    else uiToast(ezT('Already inside a browsable root; to go up, enter that parent folder in the path field above and click "Add as root"'));
+  });
   ov.querySelector('.eml-navr').addEventListener('click', () => { navigate(cur, false); });
   ov.querySelector('.eml-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); const v = (e.target.value || '').trim(); if (v) navigate(v); } });
   ov.querySelectorAll('.eml-viewbar button').forEach((b) => { b.style.cssText = 'background:transparent;border:none;padding:2px 8px;font-size:12px;color:#4d5b6d;cursor:pointer;border-radius:6px;'; if (b.dataset.v === view) b.style.background = '#fff'; b.addEventListener('click', () => { view = b.dataset.v; ov.querySelectorAll('.eml-viewbar button').forEach((x) => x.style.background = 'transparent'); b.style.background = '#fff'; drawPane(); }); });
@@ -882,15 +969,15 @@ function openBrowse(node, g, card) {
     const fl = e.dataTransfer && e.dataTransfer.files;
     if (!fl || !fl.length) return;
     const fd = new FormData(); Array.from(fl).forEach((f) => fd.append('files', f));
-    try { await fetch('/media_loader/upload', { method: 'POST', body: fd }); await navigate(cur, false); uiToast('已上传 ' + fl.length + ' 个文件到 input 目录'); } catch (_) { uiToast('上传失败'); }
+    try { await fetch('/media_loader/upload', { method: 'POST', body: fd }); await navigate(cur, false); uiToast(ezT('Uploaded ') + fl.length + ezT(' files to the input folder')); } catch (_) { uiToast(ezT('Upload failed')); }
   });
   ov.querySelector('.eml-bbadd').addEventListener('click', () => {
     const picked = (paneFiles||[]).filter((f) => selected.has(f.path || f.name));
-    if (!picked.length) { uiToast('请先选择文件'); return; }
+    if (!picked.length) { uiToast(ezT('Select files first')); return; }
     card.items.push({ id: genId(), files: picked.map((f) => fileEntryOf(f)) });
-    syncToConfig(node); render(node); closeBrowse(); uiToast('已添加 ' + picked.length + ' 个素材');
+    syncToConfig(node); render(node); closeBrowse(); uiToast(ezT('Added ') + picked.length + ezT(' media files'));
   });
-  try { navigate(''); } catch (err) { try { const e = el('div'); e.textContent = '浏览加载出错：' + (err && err.message || err); e.style.cssText = 'color:#c0392b;text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
+  try { navigate(''); } catch (err) { try { const e = el('div'); e.textContent = ezT('Failed to load browser: ') + (err && err.message || err); e.style.cssText = 'color:#c0392b;text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
 }
 
 // ===== 预览模态框 =====
@@ -918,15 +1005,15 @@ function openPreview(node, item, card) {
   const prev = () => { if (files.length > 1) idx = (idx - 1 + files.length) % files.length; draw(); };
   const next = () => { if (files.length > 1) idx = (idx + 1) % files.length; draw(); };
   const openLoc = (f) => { try { fetch('/media_loader/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path }) }); } catch (_) {} };
-  const openSave = async (f) => { if (!f) return; try { const d = await fetch('/media_loader/pick_folder', { method: 'POST' }); const j = await d.json(); if (!j.ok || !j.path) { uiToast(j.error || '未选择目录'); return; } const r = await fetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path, dest: j.path }) }); const res = await r.json(); uiToast(res.ok ? ('已另存为 ' + res.dest) : ('另存失败：' + (res.error || ''))); } catch (_) { uiToast('另存失败'); } };
+  const openSave = async (f) => { if (!f) return; try { const d = await fetch('/media_loader/pick_folder', { method: 'POST' }); const j = await d.json(); if (!j.ok || !j.path) { uiToast(j.error || ezT('No folder selected')); return; } const r = await fetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path, dest: j.path }) }); const res = await r.json(); uiToast(res.ok ? (ezT('Saved as ') + res.dest) : (ezT('Save failed: ') + (res.error || ''))); } catch (_) { uiToast(ezT('Save failed')); } };
   const buildMenu = (e, f, i) => {
     const menu = el('div'); menu.style.cssText = 'position:fixed;z-index:10000;background:#fff;border:1px solid #dce3ec;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.16);padding:4px;min-width:170px;';
     const mk = (label, fn) => { const b = el('button'); b.textContent = label; b.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:none;padding:6px 12px;font-size:12px;color:#1a1f2b;cursor:pointer;border-radius:6px;font-family:inherit;'; b.addEventListener('click', () => { menu.remove(); fn(); }); menu.appendChild(b); };
     const fi = i != null ? i : idx;
-    mk('拆分', () => { const ff = files[fi]; if (!ff) return; if (files.length <= 1) { uiToast('仅一个文件，无需拆分'); return; } const splits = [{ id: genId(), files: [ff] }]; files.splice(fi, 1); const i0 = card.items.indexOf(item); if (i0 >= 0) card.items.splice(i0 + 1, 0, ...splits); if (!files.length) card.items = card.items.filter((it) => it !== item); syncToConfig(node); render(node); ov.remove(); });
-    mk('批量拆分', () => { batch = true; selSet = new Set(); renderMode(); draw(); });
-    mk('打开文件位置', () => openLoc(f));
-    mk('另存为…', () => openSave(f));
+    mk(ezT('Split'), () => { const ff = files[fi]; if (!ff) return; if (files.length <= 1) { uiToast(ezT('Only one file; nothing to split')); return; } const splits = [{ id: genId(), files: [ff] }]; files.splice(fi, 1); const i0 = card.items.indexOf(item); if (i0 >= 0) card.items.splice(i0 + 1, 0, ...splits); if (!files.length) card.items = card.items.filter((it) => it !== item); syncToConfig(node); render(node); ov.remove(); });
+    mk(ezT('Batch split'), () => { batch = true; selSet = new Set(); renderMode(); draw(); });
+    mk(ezT('Open file location'), () => openLoc(f));
+    mk(ezT('Save as…'), () => openSave(f));
     document.body.appendChild(menu);
     const close = (ev) => { if (!menu.contains(ev.target)) menu.remove(); };
     document.addEventListener('mousedown', close, { once: true });
@@ -935,17 +1022,17 @@ function openPreview(node, item, card) {
   const renderMode = () => {
     mode.innerHTML = '';
     const mkBtn = (label, cls, fn) => { const b = el('button'); b.textContent = label; b.className = cls || ''; b.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:8px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;'; b.addEventListener('click', fn); mode.appendChild(b); };
-    if (!batch) { mkBtn('批量拆分', 'eml-btn', () => { batch = true; selSet = new Set(); renderMode(); draw(); }); }
+    if (!batch) { mkBtn(ezT('Batch split'), 'eml-btn', () => { batch = true; selSet = new Set(); renderMode(); draw(); }); }
     else {
-      mkBtn('执行拆分', 'eml-btn', () => doBatchSplit());
-      mkBtn('反选', 'eml-btn', () => { selSet = new Set(files.map((x, i) => i).filter((i) => !selSet.has(i))); draw(); });
-      mkBtn('清除选择', 'eml-btn', () => { selSet = new Set(); draw(); });
-      mkBtn('退出批量拆分', 'eml-btn', () => { batch = false; selSet = new Set(); renderMode(); draw(); });
+      mkBtn(ezT('Run split'), 'eml-btn', () => doBatchSplit());
+      mkBtn(ezT('Invert'), 'eml-btn', () => { selSet = new Set(files.map((x, i) => i).filter((i) => !selSet.has(i))); draw(); });
+      mkBtn(ezT('Deselect'), 'eml-btn', () => { selSet = new Set(); draw(); });
+      mkBtn(ezT('Exit batch split'), 'eml-btn', () => { batch = false; selSet = new Set(); renderMode(); draw(); });
     }
   };
   const doBatchSplit = () => {
     const parts = [...selSet].sort((a, b) => a - b);
-    if (!parts.length) { uiToast('请先选择要拆分的文件'); return; }
+    if (!parts.length) { uiToast(ezT('Select the files to split first')); return; }
     const splits = parts.map((i) => ({ id: genId(), files: [files[i]] }));
     const remain = files.filter((x, i) => !selSet.has(i));
     const idx0 = card.items.indexOf(item);
@@ -953,7 +1040,7 @@ function openPreview(node, item, card) {
     splits.forEach((s) => insert.push(s));
     if (remain.length) insert.push({ id: genId(), files: remain });
     card.items.splice(idx0, 1, ...insert);
-    syncToConfig(node); render(node); ov.remove(); uiToast('已批量拆分 ' + parts.length + ' 个文件');
+    syncToConfig(node); render(node); ov.remove(); uiToast(ezT('Batch split ') + parts.length + ezT(' files'));
   };
   let _pvMedia = null, _pvType = '';
   const draw = () => {
@@ -965,9 +1052,9 @@ function openPreview(node, item, card) {
       if (t === 'image') { const m = el('img'); m.src = d.url; m.style.cssText = 'max-width:100%;max-height:52vh;object-fit:contain;background:#fff;'; return m; }
       if (t === 'video') { const m = el('video'); m.src = d.url; m.controls = true; m.style.cssText = 'max-width:100%;max-height:52vh;background:#fff;'; return m; }
       if (t === 'audio') { const m = makeAudioPlayer(d.url); m.style.cssText = 'width:100%;max-width:100%;'; return m; }
-      if (t === 'model_3d') { const m = el('div'); m.textContent = '🧊 3D 模型预览'; m.style.cssText = 'font-size:54px;color:#9099a5;'; return m; }
-      const m = el('div'); m.style.cssText = 'width:100%;min-height:120px;max-height:52vh;overflow:auto;background:#fff;border-radius:8px;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:#1a1f2b;'; m.textContent = '加载中…';
-      fetch(fileUrl(d)).then((r) => { if (!r.ok) throw new Error('bad'); return r.text(); }).then((txt) => { if (m.isConnected) m.textContent = (txt || '(空文件)').slice(0, 60000); }).catch(() => { if (m.isConnected) m.textContent = '无法预览内容'; });
+      if (t === 'model_3d') { const m = el('div'); m.textContent = ezT('🧊 3D model preview'); m.style.cssText = 'font-size:54px;color:#9099a5;'; return m; }
+      const m = el('div'); m.style.cssText = 'width:100%;min-height:120px;max-height:52vh;overflow:auto;background:#fff;border-radius:8px;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:#1a1f2b;'; m.textContent = ezT('Loading…');
+      fetch(fileUrl(d)).then((r) => { if (!r.ok) throw new Error('bad'); return r.text(); }).then((txt) => { if (m.isConnected) m.textContent = (txt || ezT('(empty file)')).slice(0, 60000); }).catch(() => { if (m.isConnected) m.textContent = ezT('Cannot preview content'); });
       return m;
     };
     const same = _pvMedia && _pvMedia.parentNode && (_pvType === t) && (t === 'image' || t === 'video');
@@ -979,14 +1066,14 @@ function openPreview(node, item, card) {
     } else {
       _pvMedia.src = d.url; main.style.paddingLeft = main.style.paddingRight = '0';
     }
-    tt.textContent = d.name || '预览';
-    foot.textContent = [d.size ? ('大小：' + formatSize(d.size)) : '', '类型：' + typeShort(d.type)].filter(Boolean).join('   ');
+    tt.textContent = d.name || ezT('Preview');
+    foot.textContent = [d.size ? (ezT('Size: ') + formatSize(d.size)) : '', ezT('Type: ') + typeShort(d.type)].filter(Boolean).join('   ');
     strip.innerHTML = '';
     files.forEach((x, i) => {
       const sel = batch && selSet.has(i);
       const th = el('div'); th.style.cssText = 'position:relative;width:56px;height:56px;border-radius:6px;overflow:hidden;cursor:pointer;border:2px solid ' + (sel ? '#34a853' : (i === idx ? '#2b3a4a' : 'transparent')) + ';background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:18px;color:#94a3b8;flex-shrink:0;';
       if (x.type === 'image') { const im = el('img'); im.src = x.url; im.style.cssText = 'width:100%;height:100%;object-fit:cover;'; th.appendChild(im); } else th.textContent = ({ image: '🖼', video: '🎬', audio: '🎵', model_3d: '🧊' })[x.type] || '📄';
-      const del = el('button'); del.textContent = '✕'; del.title = '从该素材卡片中删除'; del.style.cssText = 'position:absolute;top:0;right:0;width:16px;height:16px;line-height:16px;font-size:10px;background:rgba(0,0,0,.62);color:#fff;border:none;border-radius:0 5px 0 9px;cursor:pointer;padding:0;';
+      const del = el('button'); del.textContent = '✕'; del.title = ezT('Delete from this card group'); del.style.cssText = 'position:absolute;top:0;right:0;width:16px;height:16px;line-height:16px;font-size:10px;background:rgba(0,0,0,.62);color:#fff;border:none;border-radius:0 5px 0 9px;cursor:pointer;padding:0;';
       del.addEventListener('click', (e) => { e.stopPropagation(); files.splice(i, 1); if (!files.length) { card.items = card.items.filter((it) => it.id !== item.id); syncToConfig(node); render(node); ov.remove(); } else syncToConfig(node); draw(); });
       th.appendChild(del);
       th.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); buildMenu(e, x, i); });
@@ -1020,24 +1107,24 @@ function open3d(node, item, card) {
   const ov = el('div'); ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,14,20,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:9999;';
   const box = el('div'); box.style.cssText = 'background:#fff;border-radius:14px;padding:12px;width:95%;max-width:1040px;height:86vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 30px 90px rgba(0,0,0,.4);overflow:hidden;';
   const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;flex:0 0 auto;';
-  const t = el('b'); t.style.cssText = 'font-size:14px;color:#0f141f;'; t.textContent = f.name || '3D 模型'; hd.appendChild(t);
-  const close = el('button'); close.textContent = '✕'; close.title = '关闭'; close.style.cssText = 'background:#f1f5f9;border:1px solid #dce3ec;border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:#64748b;'; hd.appendChild(close);
+  const t = el('b'); t.style.cssText = 'font-size:14px;color:#0f141f;'; t.textContent = f.name || ezT('3D model'); hd.appendChild(t);
+  const close = el('button'); close.textContent = '✕'; close.title = ezT('Close'); close.style.cssText = 'background:#f1f5f9;border:1px solid #dce3ec;border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:#64748b;'; hd.appendChild(close);
   const bodyWrap = el('div'); bodyWrap.style.cssText = 'flex:1 1 auto;min-height:0;display:flex;gap:10px;';
   const body = el('div'); body.style.cssText = 'flex:1 1 auto;position:relative;border-radius:12px;overflow:hidden;background:#f7f9fd;border:1px solid #e6edf7;';
   const canvas = el('canvas'); canvas.tabIndex = 0; canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;outline:none;touch-action:none;cursor:grab;';
   body.appendChild(canvas);
   const panel = el('div'); panel.style.cssText = 'width:170px;flex:0 0 170px;display:flex;flex-direction:column;gap:8px;background:#f8fafc;border:1px solid #e6edf7;border-radius:12px;padding:10px;overflow:auto;font-size:12px;color:#334155;';
-  panel.innerHTML = '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">显示</div>' +
-    '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" class="pvwf"> 线框</label>' +
-    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">材质</div><select class="pvmat" style="width:100%;font-size:12px;padding:5px 8px;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;">' +
-    '<option value="original">原始</option><option value="clay">陶土</option><option value="glass">玻璃</option><option value="plastic">塑料</option><option value="metal">金属</option><option value="wire">线框</option></select>' +
-    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">背景</div><input type="color" class="pvbg" value="#f7f9fd" style="width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;">' +
-    '<button class="pvreset" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:#334155;">复位视角</button>' +
-    '<button class="pvshot" style="background:#2b3a4a;border:1px solid #2b3a4a;color:#fff;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;">生成预览图</button>' +
-    '<button class="pvfs" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:#334155;">全屏</button>';
+  panel.innerHTML = '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">' + ezT('Display') + '</div>' +
+    '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" class="pvwf"> ' + ezT('Wireframe') + '</label>' +
+    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">' + ezT('Material') + '</div><select class="pvmat" style="width:100%;font-size:12px;padding:5px 8px;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;">' +
+    '<option value="original">' + ezT('Original') + '</option><option value="clay">' + ezT('Clay') + '</option><option value="glass">' + ezT('Glass') + '</option><option value="plastic">' + ezT('Plastic') + '</option><option value="metal">' + ezT('Metal') + '</option><option value="wire">' + ezT('Wireframe') + '</option></select>' +
+    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">' + ezT('Background color') + '</div><input type="color" class="pvbg" value="#f7f9fd" style="width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;">' +
+    '<button class="pvreset" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:#334155;">' + ezT('Reset view') + '</button>' +
+    '<button class="pvshot" style="background:#2b3a4a;border:1px solid #2b3a4a;color:#fff;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;">' + ezT('Generate preview image') + '</button>' +
+    '<button class="pvfs" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:#334155;">' + ezT('Fullscreen') + '</button>';
   bodyWrap.appendChild(body); bodyWrap.appendChild(panel);
-  const status = el('div'); status.style.cssText = 'font-size:12px;color:#64748b;text-align:center;min-height:16px;'; status.textContent = '加载 3D 模型…';
-  const tip = el('div'); tip.style.cssText = 'font-size:11px;color:#94a3b8;'; tip.textContent = '左键拖拽=环绕 · 滚轮=缩放 · Shift/右键=平移';
+  const status = el('div'); status.style.cssText = 'font-size:12px;color:#64748b;text-align:center;min-height:16px;'; status.textContent = ezT('Loading 3D model…');
+  const tip = el('div'); tip.style.cssText = 'font-size:11px;color:#94a3b8;'; tip.textContent = ezT('Left drag = orbit · wheel = zoom · Shift/right drag = pan');
   box.appendChild(hd); box.appendChild(bodyWrap); box.appendChild(status); box.appendChild(tip);
   ov.appendChild(box); document.body.appendChild(ov);
   let cleanup = () => {};
@@ -1064,7 +1151,7 @@ function open3d(node, item, card) {
       else if (ext === 'fbx') { const fbx = await import(THREE_BASE + 'FBXLoader.js'); loader = new fbx.FBXLoader(); }
       else if (ext === 'obj') { const objs = await import(THREE_BASE + 'OBJLoader.js'); loader = new objs.OBJLoader(); }
       // 只随包带了 GLTF / FBX / OBJ 三个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
-      else { throw new Error(`不支持的 3D 格式 .${ext || '?'}（仅支持 glb / gltf / obj / fbx）`); }
+      else { throw new Error(ezT('Unsupported 3D format .') + (ext || '?') + ezT(' (only glb / gltf / obj / fbx are supported)')); }
       loader.load(url, (obj) => {
         status.textContent = '';
         const wrap = new THREE.Group(); wrap.add(obj);
@@ -1085,7 +1172,7 @@ function open3d(node, item, card) {
         canvas.addEventListener('pointerup', up); canvas.addEventListener('pointerleave', up); canvas.addEventListener('pointercancel', up);
         let raf = 0;
         if (EZ_PERF.render3d === 'loop') { const loop = () => { render(); raf = requestAnimationFrame(loop); }; loop(); } else { apply(); }
-        const doShot = (silent) => { try { apply(); renderer.render(scene, camera); const u2 = renderer.domElement.toDataURL('image/png'); _mlPreview[item.id] = u2; if (node) render(node); if (!silent) uiToast('已生成 3D 预览图'); } catch (_) { if (!silent) uiToast('生成预览失败'); } };
+        const doShot = (silent) => { try { apply(); renderer.render(scene, camera); const u2 = renderer.domElement.toDataURL('image/png'); _mlPreview[item.id] = u2; if (node) render(node); if (!silent) uiToast(ezT('Generated 3D preview image')); } catch (_) { if (!silent) uiToast(ezT('Failed to generate preview')); } };
         if (!_mlPreview[item.id]) { const autoShot = () => { theta = 0; phi = 1.0; radius = maxD * 3 || 4; target.set(0, maxD * 0.2, 0); apply(); doShot(true); }; setTimeout(autoShot, 320); }
         wfCb.addEventListener('change', () => { wrap.traverse((o) => { if (o.isMesh && o.material) o.material.wireframe = wfCb.checked; }); render(); });
         matSel.addEventListener('change', () => {
@@ -1105,8 +1192,8 @@ function open3d(node, item, card) {
         resetBtn.addEventListener('click', () => { theta = 0.6; phi = 1.0; radius = maxD * 3 || 4; target.set(0, maxD * 0.2, 0); apply(); });
         shotBtn.addEventListener('click', () => doShot());
         cleanup = () => { cancelAnimationFrame(raf); try { ro.disconnect(); } catch (_) {} try { renderer.dispose(); } catch (_) {} ov.remove(); };
-      }, undefined, (err) => { status.textContent = '加载失败：' + (err && err.message || err); });
-    } catch (e) { status.textContent = '3D 查看器初始化失败：' + (e && e.message || e); }
+      }, undefined, (err) => { status.textContent = ezT('Load error: ') + (err && err.message || err); });
+    } catch (e) { status.textContent = ezT('3D viewer failed to initialize: ') + (e && e.message || e); }
   })();
 }
 
@@ -1199,6 +1286,7 @@ function installOutsideLabels(node) {
         pumpFrames();
       };
     scheduleOnRedraw(update);
+    onLocaleChange(() => { try { render(node); } catch (_) {} });   // 语言切换即时重画
     schedule();
   }
 }
@@ -1215,27 +1303,27 @@ function buildRoot(node) {
   const shell = el('div', 'eml-shell');
   const root = el('div', 'eml-root');
   shell.appendChild(root);
-  root.innerHTML = '<div class="eml-top"></div><div class="eml-tabs"></div><div class="eml-cards"></div><div class="eml-addbar">▼ 添加卡片组</div>';
+  root.innerHTML = '<div class="eml-top"></div><div class="eml-tabs"></div><div class="eml-cards"></div><div class="eml-addbar">' + ezT('▼ Add card group') + '</div>';
   root.querySelector('.eml-addbar').addEventListener('click', () => addCard(node));
   return shell;
 }
 function addCard(node) {
   const g = currentGroup(node); if (!g) return;
-  g.cards.push({ id: genId(), name: '卡片组' + (g.cards.length + 1), items: [] });
+  g.cards.push({ id: genId(), name: ezT('Card group ') + (g.cards.length + 1), items: [] });
   syncToConfig(node); updatePorts(node, true); render(node);
 }
 function addMediaOut(node) {
   try {
     let n = null;
     try { const L = (typeof window !== 'undefined' && window.LiteGraph) || (typeof LiteGraph !== 'undefined' ? LiteGraph : null); if (L && L.createNode) n = L.createNode('EzFlex-MediaOut'); } catch (_) { n = null; }
-    if (!n) { uiToast('未找到 EzFlex-MediaOut 节点类型'); return; }
+    if (!n) { uiToast(ezT('EzFlex-MediaOut node type not found')); return; }
     if (!n.pos) n.pos = [0, 0];
     const np = (node && node.pos) || [0, 0]; const nw = (node && node.size && node.size[0]) || 300;
     n.pos = [np[0] + nw + 60, np[1]];
     if (app && app.graph) app.graph.add(n);
     try { const o0 = node && node.outputs && node.outputs[0]; if (n.inputs && n.inputs[0] && o0 && node.connect) node.connect(0, n, 0); } catch (_) {}
-    uiToast('已加载 EzFlex-MediaOut');
-  } catch (_) { uiToast('加载输出失败'); }
+    uiToast(ezT('Loaded EzFlex-MediaOut'));
+  } catch (_) { uiToast(ezT('Failed to load output')); }
 }
 function fitNode(node) {
   try { const root = node && node._emlRoot && node._emlRoot.querySelector('.eml-root'); if (!root || typeof node.setSize !== 'function') return; const cur = node.size || [MIN_WIDTH, 170]; const contentH = root.scrollHeight + 12; if (contentH > cur[1] + 4) node.setSize([Math.max(MIN_WIDTH, cur[0]), Math.min(900, contentH)]); } catch (_) {}
@@ -1243,13 +1331,13 @@ function fitNode(node) {
 function setupNode(node) {
   if (!node || node._emlSetup) return;
   try {
-    if (typeof node.addDOMWidget !== 'function') { console.warn('[MediaLoader] 该前端不支持 addDOMWidget'); return; }
+    if (typeof node.addDOMWidget !== 'function') { console.warn('[MediaLoader] addDOMWidget is not supported by this frontend'); return; }
     node._emlSetup = true;
     loadFromConfig(node);
     const root = buildRoot(node);
     node._emlRoot = root;
     makeDomWidgetHitThrough(root);
-    const widget = node.addDOMWidget('素材加载器', nextWidgetType(), root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 4, getMinHeight: () => 170, getValue: () => '{}', setValue: () => {} });
+    const widget = node.addDOMWidget(ezT('Media Loader'), nextWidgetType(), root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 4, getMinHeight: () => 170, getValue: () => '{}', setValue: () => {} });
     makeDomWidgetHitThrough(widget.element || root);
     try { node.widgets_start_y = 0; } catch (_) {}
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}

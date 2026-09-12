@@ -30,6 +30,9 @@ _prompt_spec_audit.md
 提示词规范对照_官方与社区.txt
 性能优化方案_改动前后对比.txt
 
+# ===== 运行时缓存 =====
+torchinductor_*/
+
 # ===== 打包 / 发布产物 =====
 release.ps1
 *.tgz

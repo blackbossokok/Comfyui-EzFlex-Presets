@@ -13,6 +13,7 @@ import {
   configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, uiConfirm, uiPrompt, TYPE_ICONS, makeAudioPlayer,
   scheduleOnRedraw, pumpFrames,
 } from "./ezflex_service.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
   mediaKeyOf, mediaIndex, indexTargets, indexTargetById, activeIndexTarget,
   mediaSizeText, mediaFormatOf, startIndexWatcher, onIndexChange, nodeInputMedia,
@@ -24,8 +25,19 @@ const MAX_CARDS = 32;
 const MAX_MEDIA = 16;
 const MEDIA_PORT_COLOR = '#d94848';
 // 加载标记：用于确认浏览器实际加载的是哪一版（改动本文件时请更新）
+// 轻量提示条：不用 window.alert（原生模态抢焦点，关掉后 ComfyUI 的 DOM 面板会短暂点不动）
+function phTip(msg, ms) {
+  try {
+    const t = document.createElement('div');
+    t.textContent = String(msg == null ? '' : msg);
+    t.style.cssText = 'position:fixed;left:50%;bottom:64px;transform:translateX(-50%);z-index:100120;max-width:70vw;background:rgba(24,30,42,.92);color:#fff;font-family:Inter,sans-serif;font-size:12px;line-height:1.5;padding:8px 14px;border-radius:9px;box-shadow:0 8px 24px rgba(0,0,0,.28);pointer-events:none;white-space:pre-wrap;';
+    document.body.appendChild(t);
+    setTimeout(() => { if (t.parentNode) t.parentNode.removeChild(t); }, ms || 2800);
+  } catch (_) {}
+}
+
 const PH_BUILD = '2026-09-12-dockv9';
-console.log('[PromptHelper] 模块已加载 · build ' + PH_BUILD);
+console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
 const _phLayers = [];
@@ -164,7 +176,7 @@ function phDockInstall(ov) {   // 平铺面板的两种交互：标题栏拖动 
   const head = ov.querySelector('.eph-modal-hd, .eph-all-hd, .eph-rb-hd');
   if (!head) return;
   ov._dockUi = true;
-  const grip = el('span', 'eph-dock-grip'); grip.textContent = '⠿'; grip.title = '拖动移动面板（双击标题栏回到默认位置）';
+  const grip = el('span', 'eph-dock-grip'); grip.textContent = '⠿'; grip.title = ezT('Drag to move panel (double-click title bar to restore default position)');
   head.insertBefore(grip, head.firstChild);
   let on = false, sx = 0, sy = 0, ox = 0, oy = 0;
   const save = () => { const r = ov.getBoundingClientRect(); const m = _phDockMem[phDockKey(ov)] || (_phDockMem[phDockKey(ov)] = {}); const k = (phDockXform() || {}).scale || 1; m.w = r.width / k; m.h = r.height / k; phDockAnchorTo(m, r.left, r.top); };
@@ -196,7 +208,7 @@ function phDockInstall(ov) {   // 平铺面板的两种交互：标题栏拖动 
     phDockApply(ov);
   });
   // 右下角缩放：跟 LiteGraph 节点一个用法（只改尺寸，不改结构）
-  const size = el('div', 'eph-dock-size'); size.title = '拖动缩放面板';
+  const size = el('div', 'eph-dock-size'); size.title = ezT('Drag to resize panel');
   ov.appendChild(size);
   let rz = false, rx = 0, ry = 0, rw = 0, rh = 0, rl = 0, rt = 0, rk = 1;
   size.addEventListener('pointerdown', (e) => {
@@ -227,9 +239,9 @@ function phDockSyncBtn(node) {
   const b = node && node._ezDockBtn;
   if (!b) return;
   const on = phDockOn(node);
-  b.textContent = on ? '🗗 弹窗' : '⧉ 平铺';
-  b.title = on ? '当前：平铺面板（右侧浮层，可拖动；只能点 ✕/取消 关闭，可同时操作其他节点）→ 点这里切回弹窗'
-               : '当前：弹窗模式（全屏遮罩，点外侧关闭）→ 点这里切到平铺面板（不挡其他节点）';
+  b.textContent = on ? '🗗 ' + ezT('Popup') : '⧉ ' + ezT('Dock');
+  b.title = on ? ezT('Current: docked panel (right-side overlay, draggable; closes only via ✕/Cancel, other nodes stay usable) → click to switch back to popup')
+               : ezT('Current: popup mode (full-screen backdrop, click outside to close) → click to switch to the docked panel (does not block other nodes)');
   b.classList.toggle('on', on);
 }
 // 平铺模式下「引用媒体」面板一直开着：画布上新连/断开素材要自己跟上。
@@ -860,7 +872,7 @@ function markDirtyFalse(node) { /* kept for clarity; no untracked dirty on confi
 function addCard(node) {
   const st = stateFor(node);
   st.cards.push({
-    id: genId(), title: `第${st.cards.length + 1}幕`,
+    id: genId(), title: ezT('Act {n}').replace('{n}', String(st.cards.length + 1)),
     content: '', contentHTML: '', contentOptimized: '', contentOptimizedHTML: '',
     timelineStart: '', timelineEnd: '', modelType: 'text', model: '', provider: '', apiUrl: '', indent: 0, useOptimized: false,
   });
@@ -887,7 +899,7 @@ function removeConfigInput(node) {
 }
 function deferSync(node) {
   if (node._ezPhSyncTimer) clearTimeout(node._ezPhSyncTimer);
-  node._ezPhSyncTimer = setTimeout(() => { node._ezPhSyncTimer = null; try { updatePorts(node); refreshUI(node); } catch (e) { console.error('[PromptHelper] 端口同步失败（面板可能不显示）:', e); } }, 120);
+  node._ezPhSyncTimer = setTimeout(() => { node._ezPhSyncTimer = null; try { updatePorts(node); refreshUI(node); } catch (e) { console.error('[PromptHelper] port sync failed (panel may not render):', e); } }, 120);
 }
 function linksOf(o) {
   const ids = [];
@@ -923,7 +935,7 @@ function updatePorts(node, noRedraw) {
     if (sock._ezMedia !== mi) sock._ezMedia = mi;
     if (sock.name !== `media_in_${mi + 1}`) sock.name = `media_in_${mi + 1}`;
     try {
-      const lab = `综合媒体 ${mi + 1}`;
+      const lab = ezT('Combined media') + ' ' + (mi + 1);
       sock.label = lab; sock.hideName = true; sock.hidden = false; sock._ezLabel = lab;
       if (sock.color_on !== MEDIA_PORT_COLOR || sock.color_off !== MEDIA_PORT_COLOR || sock.color !== MEDIA_PORT_COLOR) {
         sock.color_on = MEDIA_PORT_COLOR; sock.color_off = MEDIA_PORT_COLOR; sock.color = MEDIA_PORT_COLOR;
@@ -945,7 +957,7 @@ function updatePorts(node, noRedraw) {
     if (oi >= 0) used.add(oi);
     if (sock._ezCardId !== card.id) { sock._ezCardId = card.id; }
     if (sock.name !== `card_in_${idx + 1}`) { sock.name = `card_in_${idx + 1}`; }
-    try { sock.label = ''; sock.hideName = true; sock.hidden = false; sock._ezLabel = (card.title || `提示词 ${idx + 1}`); } catch (_) {}
+    try { sock.label = ''; sock.hideName = true; sock.hidden = false; sock._ezLabel = (card.title || (ezT('Prompt') + ' ' + (idx + 1))); } catch (_) {}
     cardSeq.push(sock);
   });
   // 删除未被复用的旧卡片输入 socket
@@ -970,11 +982,11 @@ function updatePorts(node, noRedraw) {
 
   // ---- 输出：固定「合并提示词」红色圆点在首位 + 卡片输出按序 ----
   let mergedSock = (node.outputs || []).find((o) => o && o._ezMerged);
-  if (!mergedSock && (node.outputs || [])[0] && (node.outputs || [])[0].name === '合并提示词') {
+  if (!mergedSock && (node.outputs || [])[0] && (node.outputs || [])[0].name === 'Merged prompt') {
     mergedSock = (node.outputs || [])[0]; mergedSock._ezMerged = true;
   }
-  if (!mergedSock) { node.addOutput('合并提示词', 'STRING', {}); mergedSock = node.outputs[node.outputs.length - 1]; mergedSock._ezMerged = true; }
-  try { mergedSock.label = ''; mergedSock.hideName = true; mergedSock.hidden = false; mergedSock._ezLabel = '合并提示词'; } catch (_) {}
+  if (!mergedSock) { node.addOutput('Merged prompt', 'STRING', {}); mergedSock = node.outputs[node.outputs.length - 1]; mergedSock._ezMerged = true; }
+  try { mergedSock.label = ''; mergedSock.hideName = true; mergedSock.hidden = false; mergedSock._ezLabel = ezT('Merged prompt'); } catch (_) {}
   if (mergedSock.color_on !== '#d94848') { mergedSock.color_on = '#d94848'; mergedSock.color_off = '#d94848'; mergedSock.color = '#d94848'; }
 
   const oldOuts = (node.outputs || []).filter((o) => o !== mergedSock);
@@ -983,12 +995,12 @@ function updatePorts(node, noRedraw) {
   st.cards.forEach((card, idx) => {
     let sock = oldOuts.find((o, i) => !usedOut.has(i) && o._ezCardId != null && String(o._ezCardId) === String(card.id));
     if (!sock) sock = oldOuts.find((o, i) => !usedOut.has(i));
-    if (!sock) { node.addOutput(`卡片 ${idx + 1}`, 'STRING', {}); sock = node.outputs[node.outputs.length - 1]; }
+    if (!sock) { node.addOutput(`Card ${idx + 1}`, 'STRING', {}); sock = node.outputs[node.outputs.length - 1]; }
     const oi = oldOuts.indexOf(sock);
     if (oi >= 0) usedOut.add(oi);
     if (sock._ezCardId !== card.id) sock._ezCardId = card.id;
-    if (sock.name !== `卡片 ${idx + 1}`) sock.name = `卡片 ${idx + 1}`;
-    try { sock.label = ''; sock.hideName = true; sock.hidden = false; sock._ezLabel = (card.title || `卡片 ${idx + 1}`); } catch (_) {}
+    if (sock.name !== `Card ${idx + 1}`) sock.name = `Card ${idx + 1}`;
+    try { sock.label = ''; sock.hideName = true; sock.hidden = false; sock._ezLabel = (card.title || (ezT('Card') + ' ' + (idx + 1))); } catch (_) {}
     outSeq.push(sock);
   });
   oldOuts.forEach((o, i) => {
@@ -1070,10 +1082,10 @@ function buildCardRow(node, card, index) {
   const handle = el('span', 'eph-handle'); handle.textContent = '⠿';
   const idx = el('span', 'eph-index'); idx.textContent = String(index + 1);
   const ctitle = el('div', 'eph-ctitle');
-  const title = el('span', 'eph-ctitle-input'); title.contentEditable = 'true'; title.setAttribute('data-ph', '标题'); title.title = '卡片标题';
+  const title = el('span', 'eph-ctitle-input'); title.contentEditable = 'true'; title.setAttribute('data-ph', ezT('Title')); title.title = ezT('Card title');
   title.textContent = card.title || '';
   // 输入即更新（实时刷新黑框标签文字，类似 ModelsCombo）；失焦再重排/刷新列表。
-  title.addEventListener('input', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updateSocketLabels(node, card.id, card.title || '提示词'); });
+  title.addEventListener('input', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updateSocketLabels(node, card.id, card.title || ezT('Prompt')); });
   title.addEventListener('blur', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updatePorts(node); refreshUI(node); });
   ctitle.appendChild(title);
   let badge = null;
@@ -1082,20 +1094,20 @@ function buildCardRow(node, card, index) {
   if (badge) ctitle.appendChild(badge);
   // 「优 / 默」跟随该卡滑块：在「优化提示词」页签显示优，在「默认」页签显示默
   const ob = el('span', 'eph-badge' + (card.useOptimized ? ' eph-badge-opt' : ''));
-  ob.textContent = card.useOptimized ? '优' : '默';
+  ob.textContent = card.useOptimized ? ezT('Opt') : ezT('Def');
   ob.title = card.useOptimized
-    ? '输出用「优化提示词」页签' + (card.contentOptimized ? '：' + String(card.contentOptimized).slice(0, 200) : '（还是空的）')
-    : '输出用「默认」页签';
+    ? ezT('Output uses the "Optimized prompt" tab: ') + (card.contentOptimized ? String(card.contentOptimized).slice(0, 200) : ezT(' (still empty)'))
+    : ezT('Output uses the "Default" tab');
   ctitle.appendChild(ob);
   // 预览文字跟随该卡滑块：在「优化提示词」页签显示优化后的正文，在「默认」页签显示默认正文
   const preview = el('span', 'eph-preview'); preview.textContent = (card.useOptimized ? card.contentOptimized : card.content) || '';
   const time = el('span', 'eph-time'); time.textContent = (card.timelineStart && card.timelineEnd) ? `${card.timelineStart}-${card.timelineEnd}s` : '';
-  const mg = el('button', 'eph-merge-btn' + (card.mergeOff ? '' : ' on')); mg.textContent = '合'; mg.title = '合并进「合并提示词」：绿=合并，灰=不合并';
+  const mg = el('button', 'eph-merge-btn' + (card.mergeOff ? '' : ' on')); mg.textContent = ezT('Merge'); mg.title = ezT('Merge into "Merged prompt": green = merged, gray = not merged');
   mg.addEventListener('click', (e) => { e.stopPropagation(); card.mergeOff = !card.mergeOff; syncToConfig(node); refreshUI(node); });
-  const del = el('button', 'eph-del'); del.textContent = '×'; del.title = '删除卡片';
+  const del = el('button', 'eph-del'); del.textContent = '×'; del.title = ezT('Delete card');
   del.addEventListener('click', async (e) => {
     e.stopPropagation();
-    if (await uiConfirm(`确定删除提示词卡片「${card.title || ''}」吗？`)) deleteCard(node, card.id);
+    if (await uiConfirm(`${ezT('Delete prompt card "')}${card.title || ''}${ezT('"?')}`)) deleteCard(node, card.id);
   });
   //  只有「单点」卡片（无拖动位移）才打开编辑弹窗，避免在标题里拖动误触。
     let _rowDown = null;
@@ -1122,7 +1134,7 @@ function renderCards(node) {
   const list = root.querySelector('.eph-list');
   if (!list) return;
   list.innerHTML = '';
-  if (!st.cards.length) { const e = el('div', 'eph-empty'); e.textContent = '暂无提示词卡片，点「＋ 新增提示词卡片」添加'; list.appendChild(e); return; }
+  if (!st.cards.length) { const e = el('div', 'eph-empty'); e.textContent = ezT('No prompt cards yet. Click "+ Add prompt card" to add.'); list.appendChild(e); return; }
   st.cards.forEach((c, i) => list.appendChild(buildCardRow(node, c, i)));
   attachDnD(list, '.eph-card', '.eph-handle', (from, to) => reorderCard(node, from, to));
   fitNode(node);
@@ -1152,9 +1164,9 @@ function editModalEl() {
   _editModal = el('div', 'eph-modal');
   const box = el('div', 'eph-modal-box');
   const hd = el('div', 'eph-modal-hd');
-  const t = el('b'); t.textContent = '编辑提示词';
+  const t = el('b'); t.textContent = ezT('Edit prompt');
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
-  const fullBtn = el('button', 'eph-btn eph-modal-full'); fullBtn.type = 'button'; fullBtn.textContent = '全屏'; fullBtn.title = '全屏 / 退出全屏';
+  const fullBtn = el('button', 'eph-btn eph-modal-full'); fullBtn.type = 'button'; fullBtn.textContent = ezT('Fullscreen'); fullBtn.title = ezT('Fullscreen / exit fullscreen');
   const hdRight = el('div', 'eph-modal-hd-right');
   hdRight.appendChild(fullBtn); hdRight.appendChild(close);
   hd.appendChild(t); hd.appendChild(hdRight);
@@ -1162,20 +1174,20 @@ function editModalEl() {
     e.stopPropagation();
     const m = _editModal; if (!m) return;
     m.classList.toggle('full');
-    fullBtn.textContent = m.classList.contains('full') ? '退出全屏' : '全屏';
+    fullBtn.textContent = m.classList.contains('full') ? ezT('Exit fullscreen') : ezT('Fullscreen');
     requestAnimationFrame(() => { try { moveTabThumb(); } catch (_) {} });
   });
   // 工具条
     const toolbar = el('div', 'eph-toolbar');
   const tb = (cls, title, cmd, inner) => { const b = el('button', 'eph-tb-btn ' + (cls || '')); b.title = title; b.dataset.cmd = cmd; b.innerHTML = inner; toolbar.appendChild(b); return b; };
-  tb('word-glyph bold-glyph', '加粗', 'bold', '<span>B</span>');
-  tb('word-glyph italic-glyph', '斜体', 'italic', '<span>I</span>');
-  tb('word-glyph underline-glyph', '下划线', 'underline', '<span>U</span>');
-  tb('word-glyph strike-glyph', '删除线', 'strikeThrough', '<span>S</span>');
-  tb('', '左对齐', 'justifyLeft', alignSVG('left'));
-  tb('', '居中对齐', 'justifyCenter', alignSVG('center'));
-  tb('', '右对齐', 'justifyRight', alignSVG('right'));
-  tb('', '两端对齐', 'justifyFull', alignSVG('justify'));
+  tb('word-glyph bold-glyph', ezT('Bold'), 'bold', '<span>B</span>');
+  tb('word-glyph italic-glyph', ezT('Italic'), 'italic', '<span>I</span>');
+  tb('word-glyph underline-glyph', ezT('Underline'), 'underline', '<span>U</span>');
+  tb('word-glyph strike-glyph', ezT('Strikethrough'), 'strikeThrough', '<span>S</span>');
+  tb('', ezT('Align left'), 'justifyLeft', alignSVG('left'));
+  tb('', ezT('Align center'), 'justifyCenter', alignSVG('center'));
+  tb('', ezT('Align right'), 'justifyRight', alignSVG('right'));
+  tb('', ezT('Justify'), 'justifyFull', alignSVG('justify'));
 
   const fontGroup = el('div', 'eph-tb-group');
   const fontCombo = el('div', 'eph-font-combo');
@@ -1196,24 +1208,24 @@ function editModalEl() {
   toolbar.appendChild(colorGroup);
 
   const indentGroup = el('div', 'eph-indent-group');
-  indentGroup.appendChild(el('label')).textContent = '缩进';
-  const indentInput = el('input', 'eph-indent-input'); indentInput.value = '0'; indentInput.title = '首行缩进量（em，对每段首行生效）';
+  indentGroup.appendChild(el('label')).textContent = ezT('Indent');
+  const indentInput = el('input', 'eph-indent-input'); indentInput.value = '0'; indentInput.title = ezT('First-line indent amount (em, applies to the first line of each paragraph)');
   indentGroup.appendChild(indentInput);
   toolbar.appendChild(indentGroup);
 
   const toolsGroup = el('div', 'eph-tb-group');
-  const toolsBtn = el('button', 'eph-btn'); toolsBtn.textContent = '工具';
+  const toolsBtn = el('button', 'eph-btn'); toolsBtn.textContent = ezT('Tools');
   const toolsDD = el('div', 'eph-tools-dropdown');
   toolsGroup.appendChild(toolsBtn); toolsGroup.appendChild(toolsDD);
   toolbar.appendChild(toolsGroup);
 
   const refGroup = el('div', 'eph-tb-group');
-  const refBtn = el('button', 'eph-btn'); refBtn.textContent = '引用媒体';
+  const refBtn = el('button', 'eph-btn'); refBtn.textContent = ezT('Reference media');
   refGroup.appendChild(refBtn);
   toolbar.appendChild(refGroup);
 
-  const tabDefault = el('button', 'eph-tab active'); tabDefault.textContent = '默认提示词';
-  const tabOptimized = el('button', 'eph-tab'); tabOptimized.textContent = '优化提示词';
+  const tabDefault = el('button', 'eph-tab active'); tabDefault.textContent = ezT('Default prompt');
+  const tabOptimized = el('button', 'eph-tab'); tabOptimized.textContent = ezT('Optimized prompt');
 
   const body = el('div', 'eph-modal-body');
   body.appendChild(toolbar);
@@ -1226,7 +1238,7 @@ function editModalEl() {
   attachMention(editor, () => ({ node: _editModal._node, card: sameNodeCard(_editModal._node) }));
   toolbar.appendChild(skillButton(editor));
   // 「合」放在 skill 后面：绿=合并进「合并提示词」，灰=不进（例如这张卡片是负面提示词/备选）
-  const mergeBtn = el('button', 'eph-merge-btn'); mergeBtn.type = 'button'; mergeBtn.textContent = '合'; mergeBtn.title = '合并进「合并提示词」：绿=合并，灰=不合并';
+  const mergeBtn = el('button', 'eph-merge-btn'); mergeBtn.type = 'button'; mergeBtn.textContent = ezT('Merge'); mergeBtn.title = ezT('Merge into "Merged prompt": green = merged, gray = not merged');
   const updMerge = () => { const c = sameNodeCard(_editModal && _editModal._node); mergeBtn.classList.toggle('on', !(c && c.mergeOff)); };
   mergeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1242,7 +1254,7 @@ function editModalEl() {
   const ruleRow = el('div', 'eph-rule-row');
   const ruleDD = makeDropdown(ruleDropdownItems(null, false));
   ruleDD.el.classList.add('eph-rule-dd');
-  const hintBtn = el('button', 'eph-rule-hint'); hintBtn.type = 'button'; hintBtn.textContent = '提示'; hintBtn.title = '看该规范的书写规则 / 引用写法';
+  const hintBtn = el('button', 'eph-rule-hint'); hintBtn.type = 'button'; hintBtn.textContent = ezT('Hint'); hintBtn.title = ezT('See writing rules / reference syntax for this spec');
   ruleRow.appendChild(ruleDD.el); ruleRow.appendChild(hintBtn);
   timeline.appendChild(ruleRow);
   ruleDD.addEventListener('change', (v) => {
@@ -1259,8 +1271,8 @@ function editModalEl() {
   });
   _editModal._ruleDD = ruleDD; _editModal._hintBtn = hintBtn; _editModal._updMerge = updMerge;
   ft.appendChild(timeline);
-  const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = '取消';
-  const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = '保存';
+  const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = ezT('Cancel');
+  const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = ezT('Save');
   ft.appendChild(timeline);
   const ftBtns = el('div'); ftBtns.style.cssText = 'display:flex;gap:8px;';
   ftBtns.appendChild(cancelBtn); ftBtns.appendChild(saveBtn); ft.appendChild(ftBtns);
@@ -1287,8 +1299,8 @@ function editModalEl() {
   // 颜色下拉 / 工具下拉 / 引用下拉
   initColorDropdown(hlDD, 'highlight');
   initColorDropdown(fcDD, 'font');
-  const toolsItems = [['查找替换', 'find'], ['全角符号转半角', 'fullToHalf'], ['半角符号转全角', 'halfToFull'],
-    ['优化提示词 (API)', 'optimize'], ['优化提示词 (TextGenerate)', 'textgen'], ['优化提示词 (llama)', 'llama']];
+  const toolsItems = [[ezT('Find / Replace'), 'find'], [ezT('Full-width to half-width'), 'fullToHalf'], [ezT('Half-width to full-width'), 'halfToFull'],
+    [ezT('Optimize prompt (API)'), 'optimize'], [ezT('Optimize prompt (TextGenerate)'), 'textgen'], [ezT('Optimize prompt (llama)'), 'llama']];
   toolsItems.forEach(([label, id]) => {
     const b = el('button', 'eph-tool-item'); b.textContent = label;
     b.addEventListener('click', () => { toolsDD.classList.remove('active'); if (id === 'find') openFindModal('find', _editModal && _editModal._editor); else runTool(id); });
@@ -1394,7 +1406,7 @@ function moveTabThumb() {
 function execCmd(cmd, val = null) { const ed = _editModal && _editModal._editor; if (ed) { ed.focus(); document.execCommand(cmd, false, val); saveSelection(); } }
 function populateFontList(list) {
   if (!list || list._populated) return; list._populated = true;
-  const sizeMap = { 初号: '48px', 小初: '36px',  一号:  '26pt', 小一: '24pt', 二号: '22pt', 小二: '18pt', 三号: '16pt', 小三: '15pt', 四号: '14pt', 小四: '12pt', 五号: '10.5pt', 小五: '9pt' };
+  const sizeMap = { [ezT('Chuhao')]: '48px', [ezT('Xiaochu')]: '36px', [ezT('No. 1')]: '26pt', [ezT('No. 1 Small')]: '24pt', [ezT('No. 2')]: '22pt', [ezT('No. 2 Small')]: '18pt', [ezT('No. 3')]: '16pt', [ezT('No. 3 Small')]: '15pt', [ezT('No. 4')]: '14pt', [ezT('No. 4 Small')]: '12pt', [ezT('No. 5')]: '10.5pt', [ezT('No. 5 Small')]: '9pt' };
   Object.keys(sizeMap).forEach((label) => { const li = el('li'); li.textContent = label; li.dataset.value = sizeMap[label]; list.appendChild(li); });
   [5, 6.5, 8, 9, 10.5, 12, 14, 16, 18, 22, 26, 36, 48, 72].forEach((n) => { const li = el('li'); li.textContent = String(n); li.dataset.value = n + 'px'; list.appendChild(li); });
 }
@@ -1517,9 +1529,9 @@ function phProgEl(node) {
   if (_phProg && _phProg.parentNode) return _phProg;
   _phProg = el('div', 'eph-prog');
   const hd = el('div', 'eph-prog-hd');
-  const title = el('span', 'eph-prog-title'); title.textContent = '设置';
+  const title = el('span', 'eph-prog-title'); title.textContent = ezT('Settings');
   const count = el('span', 'eph-prog-count'); count.textContent = '';
-  const close = el('button', 'eph-prog-close'); close.textContent = '✕'; close.title = '关闭进度';
+  const close = el('button', 'eph-prog-close'); close.textContent = '✕'; close.title = ezT('Close progress');
   hd.appendChild(title); hd.appendChild(count); hd.appendChild(close);
   const bar = el('div', 'eph-prog-bar'); const fill = el('div', 'eph-prog-fill'); bar.appendChild(fill);
   const detail = el('div', 'eph-prog-detail');
@@ -1538,7 +1550,7 @@ function phProgShow(node, total, method) {
   const m = phProgEl(node);
   m._total = Math.max(1, total | 0);
   m._done = 0;
-  m._title.textContent = (method ? method + ' · ' : '') + '优化中';
+  m._title.textContent = (method ? method + ' · ' : '') + ezT('Optimizing');
   m._count.textContent = m._total > 1 ? ('0/' + m._total) : '';
   m._fill.style.width = '0%';
   m._fill.className = 'eph-prog-fill' + (m._total > 1 ? '' : ' indeterminate');
@@ -1557,7 +1569,7 @@ function phProgTick(node, done, label) {
 }
 function phProgErr(node, msg) {
   const m = phProgEl(node);
-  m._title.textContent = '调用失败';
+  m._title.textContent = ezT('Call failed');
   m._fill.style.width = '100%'; m._fill.className = 'eph-prog-fill'; m._fill.style.background = '#e34d4d';
   const line = el('div', 'eph-prog-line err'); line.textContent = '✕ ' + msg; m._detail.appendChild(line);
   // 失败信息留 6 秒后自动收起：否则它一直浮在卡片弹窗上层，挡住编辑器点不进去
@@ -1568,7 +1580,7 @@ function phProgDone(node) {
   const m = phProgEl(node);
   m._fill.className = 'eph-prog-fill'; m._fill.style.width = '100%';
   if (m._total > 1) { m._count.textContent = m._total + '/' + m._total; }
-  m._title.textContent = '完成';
+  m._title.textContent = ezT('Done');
   if (m._hideTimer) clearTimeout(m._hideTimer);
   m._hideTimer = setTimeout(() => { m._hideTimer = null; phProgHide(); }, 1200);
 }
@@ -1606,7 +1618,7 @@ function refreshMediaChips() {
     if (!hit || (lab ? lab.textContent : sp.textContent) === hit.label) return;
     sp.dataset.n = String(hit.n);
     if (lab) lab.textContent = hit.label; else sp.textContent = hit.label;
-    if (hit.tag) { sp.dataset.tag = hit.tag; sp.title = '目标节点引用标签：' + hit.tag; }
+    if (hit.tag) { sp.dataset.tag = hit.tag; sp.title = ezT('Target node reference tag: ') + hit.tag; }
     const ed = sp.closest ? sp.closest('.eph-editor, .eph-all-editor') : null;
     if (ed) editors.add(ed);
   });
@@ -1687,7 +1699,7 @@ function refBrowserEl() {
   _refBrowser = el('div', 'eph-rb');
   const box = el('div', 'eph-rb-box');
   const hd = el('div', 'eph-rb-hd');
-  const t = el('b'); t.textContent = '引用媒体';
+  const t = el('b'); t.textContent = ezT('Reference media');
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
   hd.appendChild(t); hd.appendChild(close);
   const body = el('div', 'eph-rb-body');
@@ -1701,7 +1713,7 @@ function refBrowserEl() {
   phLayerPush(_refBrowser);
   return _refBrowser;
 }
-const MEDIA_SHORT = { image: '图像', video: '视频', audio: '音频', model: '模型' };
+const MEDIA_SHORT = { image: 'Image', video: 'Video', audio: 'Audio', model: 'Model' };
 // 素材卡片：预览效果对齐 EzFlex-MediaLoader（左上类型角标 / 悬停信息条 / 视频播放 / 音频播放器），
 // 引用数量变化后刷新所有卡片上的计数/按钮状态（同一个素材可能插了多份）
 function refreshRefTiles() {
@@ -1717,7 +1729,7 @@ function rbTile(ed, node, card, target, port, m) {
     const im = el('img'); im.src = m.url; im.alt = m.name || ''; im.loading = 'lazy'; im.draggable = false; pv.appendChild(im);
   } else if (type === 'video') {
     const v = document.createElement('video'); v.src = m.url; v.muted = true; v.preload = 'metadata'; pv.appendChild(v);
-    const play = el('button', 'eph-rb-play'); play.textContent = '▶'; play.title = '播放预览';
+    const play = el('button', 'eph-rb-play'); play.textContent = '▶'; play.title = ezT('Play preview');
     v.addEventListener('play', () => { v.controls = true; tile.classList.add('playing'); play.textContent = '❚❚'; });
     v.addEventListener('pause', () => { v.controls = false; tile.classList.remove('playing'); play.textContent = '▶'; });
     play.addEventListener('click', (e) => { e.stopPropagation(); try { if (v.paused) { v.muted = false; v.play(); } else v.pause(); } catch (_) {} });
@@ -1729,7 +1741,7 @@ function rbTile(ed, node, card, target, port, m) {
   }
   const badge = el('span', 'eph-rb-type');
   const bico = el('span', 'eph-rb-type-ico'); bico.innerHTML = mediaIcon(type); badge.appendChild(bico);
-  badge.appendChild(document.createTextNode(MEDIA_SHORT[type] || '文件')); pv.appendChild(badge);
+  badge.appendChild(document.createTextNode(ezT(MEDIA_SHORT[type] || 'File'))); pv.appendChild(badge);
   const addBtn = el('button', 'eph-rb-add');
   const info = el('div', 'eph-rb-info');
   const fn = el('div', 'eph-rb-fname'); fn.textContent = m.name || m.path || ''; fn.title = m.path || '';
@@ -1742,14 +1754,14 @@ function rbTile(ed, node, card, target, port, m) {
   const foot = el('div', 'eph-rb-foot');
   const lab = el('span', 'eph-rb-lab'); lab.textContent = port.label;
   const cnt = el('span', 'eph-rb-cnt'); cnt.style.display = 'none';
-  const minus = el('button', 'eph-rb-minus'); minus.textContent = '−'; minus.title = '移除一份该引用';
+  const minus = el('button', 'eph-rb-minus'); minus.textContent = '−'; minus.title = ezT('Remove one reference');
   foot.appendChild(lab);
   // 本卡片的引用目标不是这个生成节点时，插进去的号会按目标节点算：把「实际插入的号」也标出来，免得看着对不上。
   const insLabel = (cardRefId(card) && cardRefId(card) !== String(target.id))
     ? (mediaIndex(mediaKeyOf(m), cardRefId(card)) || {}).label || '' : '';
   if (insLabel && insLabel !== port.label) {
     const ins = el('span', 'eph-rb-ins'); ins.textContent = '→ ' + insLabel;
-    ins.title = '本卡片的引用目标不是「' + (target.title || target.type) + '」，点 + 插入的是目标节点上的编号 ' + insLabel;
+    ins.title = ezT('The reference target of this card is not "') + (target.title || target.type) + ezT('"; clicking + inserts the number from the target node ') + insLabel;
     foot.appendChild(ins);
   }
   foot.appendChild(cnt); foot.appendChild(minus);
@@ -1758,7 +1770,7 @@ function rbTile(ed, node, card, target, port, m) {
     const n = mediaChipsOf(ed, m).length;
     addBtn.textContent = '+';
     addBtn.classList.toggle('added', n > 0);
-    addBtn.title = n ? ('再插入一份引用（已引用 ' + n + ' 次）') : '插入该引用';
+    addBtn.title = n ? (ezT('Insert another reference (already referenced ') + n + ezT(' times)')) : ezT('Insert this reference');
     tile.classList.toggle('added', n > 0);
     cnt.style.display = n ? '' : 'none';
     cnt.textContent = '×' + n;
@@ -1772,8 +1784,8 @@ function rbTile(ed, node, card, target, port, m) {
     const want = cardRefId(card) || target.id;
     if (!insertMediaRefOnce(ed, m, want)) {
       const tn = indexTargetById(want);
-      rbHint('「' + (m.name || m.path || '') + '」不在本卡片引用目标「' + ((tn && tn.title) || want) + '」的输入端口上，插进去的 @编号 对不上：'
-        + '把素材接到该生成节点上，或右键「' + (target.title || target.type) + '」把它设为本卡片的引用目标。');
+      rbHint(ezT('Media "') + (m.name || m.path || '') + ezT('" is not on an input port of the reference target "') + ((tn && tn.title) || want) + ezT('" of this card, so the inserted @number will not match: connect the media to that generator node, or right-click "')
+        + (target.title || target.type) + ezT('" to set it as the reference target of this card.'));
       return;
     }
     refreshRefTiles();
@@ -1800,7 +1812,7 @@ function rbTile(ed, node, card, target, port, m) {
     phMediaViewer(m.url, type, m.name);
   });
   refresh();
-  tile.title = port.name + (port.tag ? ' → ' + port.tag : '') + (insLabel ? '（点 + 插入 ' + insLabel + '：按本卡片的引用目标编号）' : '');
+  tile.title = port.name + (port.tag ? ' → ' + port.tag : '') + (insLabel ? ezT(' (click + to insert ') + insLabel + ezT(': numbered by the reference target of this card)') : '');
   pv.appendChild(addBtn);
   // 别的卡片/端口插入后，本卡的计数也要跟着变
   if (!_refBrowser._refreshers) _refBrowser._refreshers = [];
@@ -1855,15 +1867,15 @@ function openRbMenu(x, y, node, card, target, ed) {
   };
   const sep = (text) => { const d = el('div', 'eph-tools-sep'); d.textContent = text; menu.appendChild(d); };
   sep((target.title || target.type) + ' · #' + target.id);
-  item('设为全体引用库（' + total + ' 张卡片都用它）', () => {
+  item(ezT('Set as global reference source (all ') + total + ezT(' cards use it)'), () => {
     setGlobalRefTarget(node, target.id);
     renderRefBrowser(node, ed, card);
-  }, '所有提示词卡片的引用目标都改成本节点');
-  if (allSet) item('取消全体引用（所有卡片都不引用）', () => {
+  }, ezT('Set the reference target of every prompt card to this node'));
+  if (allSet) item(ezT('Clear global reference (no card references anything)'), () => {
     setGlobalRefTarget(node, '');
     renderRefBrowser(node, ed, card);
-  }, '所有卡片都不指定引用目标（编号退回自动：画布上第一个接入素材的生成节点）');
-  item(cardRefId(card) === String(target.id) ? '本卡片取消引用它' : '仅本卡片引用它', () => {
+  }, ezT('No card sets a reference target (numbering falls back to automatic: the first generator node with media on the canvas)'));
+  item(cardRefId(card) === String(target.id) ? ezT('This card stops referencing it') : ezT('Only this card references it'), () => {
     if (card) { card.refTarget = cardRefId(card) === String(target.id) ? '' : String(target.id); syncToConfig(node); }
     renderRefBrowser(node, ed, card);
   });
@@ -1886,7 +1898,7 @@ function renderRefBrowser(node, ed, card) {
   const targets = indexTargets().filter((t) => t.ports.length);
   if (!targets.length) {
     const e = el('div', 'eph-rb-empty');
-    e.innerHTML = '画布上还没有接入素材的生成节点。<br>把素材接到生成节点（视频 / 音频 / 模型）的媒体输入端口，例如 MiniMax H3 的 first_frame / ref_image_1，这里就会实时列出编号与编译标签。';
+    e.innerHTML = ezT('No generator node with media on the canvas yet.<br>Connect media to the media input ports of a generator node (video / audio / model), for example the first_frame / ref_image_1 ports of MiniMax H3, and the numbers and compile tags will be listed here in real time.');
     body.appendChild(e);
   }
   const cur = cardRefId(card);
@@ -1899,10 +1911,10 @@ function renderRefBrowser(node, ed, card) {
     // 同一素材被同一节点的多个端口引用（端口扇出 / MediaOut 端口复用）时只列一次：按媒体键去重，保留第一个端口的标签
     const seen = new Set(); const shown = [];
     t.ports.forEach((p) => p.files.forEach((f) => { const k = mediaKeyOf(f) || (f && f.path); if (k) { if (seen.has(k)) return; seen.add(k); } shown.push({ p: p, f: f }); }));
-    const cnt = el('span', 'eph-rb-cnt'); cnt.textContent = '媒体 ' + shown.length;
+    const cnt = el('span', 'eph-rb-cnt'); cnt.textContent = ezT('Media') + ' ' + shown.length;
     hd.appendChild(num); hd.appendChild(nm); hd.appendChild(cnt);
     // 点卡片面板 = 本卡片引用它；再点一次 = 取消引用（可以都不引用）
-    hd.title = on ? '再点一次取消引用（本卡片不引用任何生成节点）' : '点击：本卡片引用这个生成节点';
+    hd.title = on ? ezT('Click again to clear the reference (this card references no generator node)') : ezT('Click: this card references this generator node');
     hd.addEventListener('click', (e) => {
       e.stopPropagation();
       if (!card) return;
@@ -2063,8 +2075,8 @@ async function mentionShow(ctx, q, startNode, startOff, rng, ed) {
   const all = cardRefFiles(card);
   const matched = all.filter((x) => ((x.m.name || x.m.path || '').toLowerCase().indexOf(q.toLowerCase()) >= 0));
   const menu = mentionMenuEl(); menu.innerHTML = '';
-  if (matched.length) menu.appendChild(el('div', 'eph-tools-sep')).textContent = '媒体';
-  else menu.appendChild(el('div', 'eph-dd-empty')).textContent = q ? '无匹配媒体' : '画布上没有可作为素材引用的媒体';
+  if (matched.length) menu.appendChild(el('div', 'eph-tools-sep')).textContent = ezT('Media');
+  else menu.appendChild(el('div', 'eph-dd-empty')).textContent = q ? ezT('No matching media') : ezT('No media on the canvas can be used as a reference');
   matched.forEach((x) => {
     const m = x.m;
     // 编号按本卡片的引用目标算（素材可能同时接在多个生成节点上，都编 @图片1）；卡片没设目标时用素材所在节点。
@@ -2079,8 +2091,8 @@ async function mentionShow(ctx, q, startNode, startOff, rng, ed) {
       // 不在本卡片的引用目标端口上：插进去的编号对不上，标灰不给点（先用「引用媒体」把引用目标改过来）
       b.classList.add('eph-mref-off');
       const tn = indexTargetById(want);
-      b.title = '不在本卡片引用目标「' + ((tn && tn.title) || want) + '」的输入端口上，无法引用；' +
-        '把素材接到该生成节点上，或在「引用媒体」里把引用目标改成「' + (x.from.title || x.from.type) + '」。';
+      b.title = ezT('Not on an input port of the reference target of this card "') + ((tn && tn.title) || want) + ezT('": cannot be referenced; connect the media to that generator node, or change the reference target in "Reference media" to "') +
+        (x.from.title || x.from.type) + ezT('".');
     }
     b.addEventListener('mouseenter', () => refPreviewShow(b, m));
     b.addEventListener('mouseleave', refPreviewHide);
@@ -2187,23 +2199,23 @@ async function runOptimize(id, ed) {
   // 源固定取「默认提示词」页签（与滑块无关，也不退回编辑器里当前那份 —— 默认是空的就没有可优化的东西）。
   const src = card ? (card.contentHTML || card.content || '') : '';
   const plain = plainTextOf(src);
-  if (!plain.trim()) { window.alert('当前卡片没有可优化的提示词内容。'); return; }
+  if (!plain.trim()) { phTip(ezT('This card has no prompt content to optimize.')); return; }
   const cfg = optimizeFor(nd);
   const method = id === 'optimize' ? 'api' : id;
   const keyOptional = (cfg.provider === 'Ollama');
-  if (method === 'api' && !keyOptional && !cfg.apiKey) { window.alert('调用「优化提示词 (API)」需要先在「设置·API设置」里填写该厂商的 API Key（模型提供方/API 主机也请确认）。'); return; }
+  if (method === 'api' && !keyOptional && !cfg.apiKey) { phTip(ezT('To call "Optimize prompt (API)", fill in the provider API Key under "Settings · API settings" first (also check the model provider / API host).')); return; }
   const payload = { method, prompt: plain, provider: cfg.provider || '', model: cfg.model || '', apiUrl: cfg.apiUrl || '', apiKey: cfg.apiKey || '', proxy: cfg.proxy || '', textgen: cfg.textgen || {}, llama: cfg.llama || {}, apiParams: cfg.apiParams || {}, clearCache: !!cfg.clearCache };
-  phProgShow(nd, 1, '优化提示词');
-  phProgTick(nd, 0, (card  ?  card.title : '') + ' 调用中…');
+  phProgShow(nd, 1, ezT('Optimized prompt'));
+  phProgTick(nd, 0, (card  ?  card.title : '') + ezT(' calling…'));
   const imgs = await cardImageDataUrls(nd, card);
   if (imgs.length) payload.images = imgs;
   const medias = cardMediaRefs(nd, card);
   if (medias.length) payload.media = medias;
-  if (imgs.length || medias.length) phProgTick(nd, 0, (card  ?  card.title : '') + ' 已附带 ' + (imgs.length ? imgs.length + ' 张图' : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' 个视频/音频' : '') + '，调用中…');
+  if (imgs.length || medias.length) phProgTick(nd, 0, (card  ?  card.title : '') + ' ' + ezT('attached ') + (imgs.length ? imgs.length + ' ' + ezT('images') : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' ' + ezT('video/audio') : '') + ezT(', calling…'));
   try {
     const res = await (async () => { const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); return r; })();
-    const data = await res.json().catch(() => ({ error: '响应解析失败' }));
-    if (!res.ok || data.error) { phProgErr(nd, (data.error || ('HTTP ' + res.status))); window.alert('优化失败：'  + (data.error || ('HTTP ' + res.status))); return; }
+    const data = await res.json().catch(() => ({ error: ezT('Failed to parse response') }));
+    if (!res.ok || data.error) { phProgErr(nd, (data.error || ('HTTP ' + res.status))); phTip(ezT('Optimization failed: ')  + (data.error || ('HTTP ' + res.status))); return; }
     const outText = data.text || '';
     // 切到「优化提示词」页签并写入结果
     if (card) {
@@ -2220,7 +2232,7 @@ async function runOptimize(id, ed) {
       refreshUI(nd);   // 列表里的预览文字 / 优默标记立刻切到优化版
     }
     phProgDone(nd);
-  } catch (e) { phProgErr(nd, (e && e.message  ?  e.message : e)); window.alert('优化请求失败：'  + (e && e.message  ?  e.message : e)); }
+  } catch (e) { phProgErr(nd, (e && e.message  ?  e.message : e)); phTip(ezT('Optimization request failed: ')  + (e && e.message  ?  e.message : e)); }
 }
 function plainTextToHtml(text) {
   const d = document.createElement('div');
@@ -2266,20 +2278,20 @@ async function insertSkillFile(ed) {
   const range = phInsertRange(ed);
   try {
     const r = await fetchApi('/prompt_helper/pick_skill', { method: 'POST' });
-    const data = await r.json().catch(() => ({ error: '解析失败' }));
-    if (data.error) { window.alert('插入 skill 失败：'  + data.error); return; }
+    const data = await r.json().catch(() => ({ error: ezT('Failed to parse') }));
+    if (data.error) { phTip(ezT('Failed to insert skill: ')  + data.error); return; }
     if (!data.ok) return;   // 用户取消选择
     const text = String(data.text || '');
-    if (!text.trim()) { window.alert('该 skill 文件没有内容。'); return; }
+    if (!text.trim()) { phTip(ezT('This skill file has no content.')); return; }
     const html = plainTextToHtml(text.replace(/\r\n/g, '\n'));
     ed.focus();
     const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
     document.execCommand('insertHTML', false, html);
-  } catch (e) { window.alert('插入 skill 失败：'  + (e && e.message  ?  e.message : e)); }
+  } catch (e) { phTip(ezT('Failed to insert skill: ')  + (e && e.message  ?  e.message : e)); }
 }
 function skillButton(ed) {
   const group = el('div', 'eph-tb-group');
-  const b = el('button', 'eph-btn'); b.textContent = 'skill'; b.title = '选择 skill 文件（md，默认 models/skills），把内容插入当前光标处';
+  const b = el('button', 'eph-btn'); b.textContent = 'skill'; b.title = ezT('Pick a skill file (md, defaults to models/skills) and insert it at the cursor');
   b.addEventListener('mousedown', (e) => e.preventDefault());   // 保住编辑区光标
     b.addEventListener('click', () => insertSkillFile(ed));
   group.appendChild(b);
@@ -2304,14 +2316,14 @@ function skillButton(ed) {
       const data = await r.json().catch(() => ({}));
       const models = data.models || [];
       menu.innerHTML = '';
-      if (!models.length) menu.appendChild(el('div', 'eph-dd-empty')).textContent = '（无）';
+      if (!models.length) menu.appendChild(el('div', 'eph-dd-empty')).textContent = ezT('(none)');
       models.forEach((m) => {
         const b = el('button', 'eph-dd-item'); b.type = 'button'; b.textContent = m.path; b.title = m.path;
         b.addEventListener('mousedown', (e) => e.preventDefault());
         b.addEventListener('click', (e) => { e.stopPropagation(); input.value = m.path; menu.classList.remove('active'); try { input.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {} });
         menu.appendChild(b);
       });
-    } catch (_) { menu.innerHTML = ''; menu.appendChild(el('div', 'eph-dd-empty')).textContent = '（加载失败）'; }
+    } catch (_) { menu.innerHTML = ''; menu.appendChild(el('div', 'eph-dd-empty')).textContent = ezT('(load failed)'); }
     const rect = input.getBoundingClientRect();
     menu.style.left = rect.left + 'px'; menu.style.top = (rect.bottom + 6) + 'px';
     menu.style.minWidth = Math.max(rect.width, 140) + 'px'; menu.style.width = Math.max(rect.width, 140) + 'px';
@@ -2333,13 +2345,13 @@ function initColorDropdown(dd, target) {
   // 高亮保留「无颜色」以快捷清除高亮（hiliteColor  传 transparent 会把高亮折叠为透明）。
     // 文字颜色不提供无颜色（foreColor  的 transparent 无效）。
     if (target === 'highlight') {
-    const noColor = el('div', 'eph-color-item eph-no-color'); noColor.dataset.color = 'transparent'; noColor.title = '清除高亮';
+    const noColor = el('div', 'eph-color-item eph-no-color'); noColor.dataset.color = 'transparent'; noColor.title = ezT('Clear highlight');
     grid.appendChild(noColor);
   }
   (target === 'highlight' ? _STD_COLORS : _THEME_COLORS).forEach((c) => grid.appendChild(colorItem(c, target, dd)));
-  const title2 = el('div', 'eph-color-title'); title2.textContent = '标准色';
+  const title2 = el('div', 'eph-color-title'); title2.textContent = ezT('Standard colors');
   _STD_COLORS.forEach((c) => gridSm.appendChild(colorItem(c, target, dd)));
-  const more = el('button', 'eph-dropdown-btn'); more.textContent = '其他颜色(M)...';
+  const more = el('button', 'eph-dropdown-btn'); more.textContent = ezT('More colors (M)...');
   dd.appendChild(grid); dd.appendChild(title2); dd.appendChild(gridSm); dd.appendChild(more);
   more.addEventListener('click', (e) => { e.stopPropagation(); openColorPicker(target); dd.classList.remove('active'); });
 }
@@ -2371,8 +2383,8 @@ function pickerEl() {
   const hexInput = el('input', 'eph-picker-hex'); hexInput.maxLength = 7; hexInput.value = '#000000';
   const rows = el('div'); rows.style.cssText = 'display:flex;flex-direction:column;';
   const ft = el('div', 'eph-picker-ft');
-  const cancel = el('button', 'eph-picker-cancel'); cancel.textContent = '取消';
-  const confirm = el('button', 'eph-picker-confirm'); confirm.textContent = '确定';
+  const cancel = el('button', 'eph-picker-cancel'); cancel.textContent = ezT('Cancel');
+  const confirm = el('button', 'eph-picker-confirm'); confirm.textContent = ezT('OK');
   ft.appendChild(hexInput); ft.appendChild(cancel); ft.appendChild(confirm);
   box.appendChild(preview); box.appendChild(area); box.appendChild(hue); box.appendChild(modes); box.appendChild(rows); box.appendChild(ft);
   _pickerModal.appendChild(box); document.body.appendChild(_pickerModal);
@@ -2534,19 +2546,19 @@ function frEl() {
   if (_frModal && _frModal.parentNode) return _frModal;
   _frModal = el('div', 'eph-fr');
   const header = el('div', 'eph-fr-header');
-  const findTab = el('button', 'eph-fr-tab active'); findTab.textContent = '查找';
-  const replaceTab = el('button', 'eph-fr-tab'); replaceTab.textContent = '替换';
+  const findTab = el('button', 'eph-fr-tab active'); findTab.textContent = ezT('Find');
+  const replaceTab = el('button', 'eph-fr-tab'); replaceTab.textContent = ezT('Replace');
   const close = el('button', 'eph-fr-close'); close.textContent = '✕';
   header.appendChild(findTab); header.appendChild(replaceTab); header.appendChild(close);
   const body = el('div', 'eph-fr-body');
-  const findSec = el('div'); const findRow = el('div', 'eph-fr-row'); const fi = el('input'); fi.placeholder = '查找内容';
-  const fbtn = el('button', 'eph-fr-btn'); fbtn.textContent = '查找'; findRow.appendChild(fi); findRow.appendChild(fbtn);
-  const fhint = el('p', 'eph-fr-hint'); fhint.textContent = '回车=查找全部并列出';
+  const findSec = el('div'); const findRow = el('div', 'eph-fr-row'); const fi = el('input'); fi.placeholder = ezT('Find text');
+  const fbtn = el('button', 'eph-fr-btn'); fbtn.textContent = ezT('Find'); findRow.appendChild(fi); findRow.appendChild(fbtn);
+  const fhint = el('p', 'eph-fr-hint'); fhint.textContent = ezT('Enter = find all and list');
   findSec.appendChild(findRow); findSec.appendChild(fhint);
   const replaceSec = el('div'); replaceSec.style.display = 'none';
-  const rr1 = el('div', 'eph-fr-row'); const fi2 = el('input'); fi2.placeholder = '查找内容'; const fb2 = el('button', 'eph-fr-btn'); fb2.textContent = '查找'; rr1.appendChild(fi2); rr1.appendChild(fb2);
-  const rr2 = el('div', 'eph-fr-row'); const ri = el('input'); ri.placeholder = '替换为'; const rb = el('button', 'eph-fr-btn'); rb.textContent = '替换'; rr2.appendChild(ri); rr2.appendChild(rb);
-  const rhint = el('p', 'eph-fr-hint'); rhint.textContent = '点下方列表项跳到对应位置';
+  const rr1 = el('div', 'eph-fr-row'); const fi2 = el('input'); fi2.placeholder = ezT('Find text'); const fb2 = el('button', 'eph-fr-btn'); fb2.textContent = ezT('Find'); rr1.appendChild(fi2); rr1.appendChild(fb2);
+  const rr2 = el('div', 'eph-fr-row'); const ri = el('input'); ri.placeholder = ezT('Replace with'); const rb = el('button', 'eph-fr-btn'); rb.textContent = ezT('Replace'); rr2.appendChild(ri); rr2.appendChild(rb);
+  const rhint = el('p', 'eph-fr-hint'); rhint.textContent = ezT('Click a list item below to jump to it');
   replaceSec.appendChild(rr1); replaceSec.appendChild(rr2); replaceSec.appendChild(rhint);
   body.appendChild(findSec); body.appendChild(replaceSec);
   const matches = el('div', 'eph-fr-matches');
@@ -2687,7 +2699,7 @@ function setNodeLang(node, lang) {
 // 卡片/总体编辑下拉的选项：新建自定义 | 默认规范 | 分隔线 | 自定义规范
 function ruleDropdownItems(node, withNew) {
   const items = [];
-  if (withNew) items.push({ value: '__new__', label: '＋ 新建自定义规范…' });   // 只有设置页有
+  if (withNew) items.push({ value: '__new__', label: ezT('+ New custom spec…') });   // 只有设置页有
   const ovs = _ruleOverrides(node);
   _PROMPT_RULES.forEach((r) => items.push({ value: r.id, label: _applyOverride(r, ovs[r.id]).label }));
   const cs = _customRules(node);
@@ -2752,7 +2764,7 @@ function openRulePop(anchor, node, card) {
   const ref = rule.ref || {};
   const has = (k) => ref[k] !== undefined && ref[k] !== null && String(ref[k]).trim() !== '';
   if (!['image', 'video', 'audio'].some(has)) {
-    ex.appendChild(el('span', 'eph-rule-pop-note')).textContent = '无需引用媒体';
+    ex.appendChild(el('span', 'eph-rule-pop-note')).textContent = ezT('No media reference needed');
   } else {
     [['image', '@图片1'], ['video', '@视频1'], ['audio', '@音频1']].forEach(([k, src]) => {
       if (!has(k)) return;
@@ -2772,11 +2784,11 @@ function openRulePop(anchor, node, card) {
       ['start', 'start', '46px'], ['end', 'end', '46px'], ['dur', 'dur', '40px'], ['S', 'S', '40px'], ['M', 'M', '66px'],
     ].filter(([key]) => tpl.includes('{' + key + '}'));
     const FIELD_TIP = {
-      start: 'start：该镜头开始时间（秒）',
-      end: 'end：该镜头结束时间（秒）',
-      dur: 'dur：该镜头时长（秒）；留空自动用 end − start',
-      S: 'S：镜头号（如 1、2）',
-      M: 'M：时刻；填秒数自动转 00:03.500，填别的原样输出',
+      start: ezT('start: shot start time (s)'),
+      end: ezT('end: shot end time (s)'),
+      dur: ezT('dur: shot duration (s); blank = end - start'),
+      S: ezT('S: shot number (e.g. 1, 2)'),
+      M: ezT('M: time; seconds auto-convert to 00:03.500, anything else is output as-is'),
     };
     const box = el('div', 'eph-rule-pop-ts');
     const insWrap = el('div', 'eph-rule-shots-in');   // 输入控件：不可选中
@@ -2801,11 +2813,11 @@ function openRulePop(anchor, node, card) {
           inp.addEventListener('input', () => { v[key] = inp.value; upd(); });
           line.appendChild(inp);
         });
-        const add = el('button', 'eph-rule-shot-btn'); add.type = 'button'; add.textContent = '＋'; add.title = '再加一排';
+        const add = el('button', 'eph-rule-shot-btn'); add.type = 'button'; add.textContent = '＋'; add.title = ezT('Add another row');
         add.addEventListener('click', () => { _rulePopTs.push({ start: '', end: '', dur: '', S: '', M: '' }); render(); });
         line.appendChild(add);
         if (i > 0) {
-          const del = el('button', 'eph-rule-shot-btn'); del.type = 'button'; del.textContent = '−'; del.title = '删掉这排';
+          const del = el('button', 'eph-rule-shot-btn'); del.type = 'button'; del.textContent = '−'; del.title = ezT('Remove row');
           del.addEventListener('click', () => { _rulePopTs.splice(i, 1); render(); });
           line.appendChild(del);
         }
@@ -2841,7 +2853,7 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeRuleP
 // 卡片当前规范的「引用媒体编译后样子」：@图片1 → <Picture 1>
 function ruleRefPreview(rule, kind) {
   const tpl = ((rule && rule.ref) || {})[kind];
-  if (tpl === undefined || tpl === null || String(tpl).trim() === '') return '（不改，原样保留）';
+  if (tpl === undefined || tpl === null || String(tpl).trim() === '') return ezT('(unchanged, kept as-is)');
   return String(tpl).replace(/\{n\}/g, '1');
 }
 // ===== 设置弹窗（模型与接口 / TextGenerate / llama 三排）====
@@ -2869,7 +2881,7 @@ const _SET_PROVIDERS = [
     models: ['deepseek-ai/DeepSeek-V2.5', 'deepseek-ai/DeepSeek-R1', 'deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2-7B-Instruct', 'THUDM/glm-4-9b-chat', 'stabilityai/stable-diffusion-xl-base-1.0'] },
   { value: 'OpenRouter', label: 'OpenRouter', host: 'https://openrouter.ai/api/v1',
     models: ['openai/gpt-6-astra', 'openai/gpt-6-astra-pro', 'anthropic/claude-fable-5.1', 'anthropic/claude-opus-5', 'anthropic/claude-sonnet-5', 'google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'x-ai/grok-4.6', 'deepseek/deepseek-v4.1-flash', 'qwen/qwen3.8-max-0902', 'moonshotai/kimi-k3', 'openai/gpt-oss-120b'] },
-  { value: 'Ollama', label: 'Ollama（本机）', host: 'http://localhost:11434/v1', customHost: true, keyOptional: true, models: ['llama2', 'llama3', 'llama3.1', 'llama3.2', 'llama4', 'gemma', 'gemma2', 'gemma3', 'gemma4', 'qwen', 'qwen2', 'qwen2.5', 'qwen3', 'mistral', 'phi', 'deepseek-r1', 'codellama'] },
+  { value: 'Ollama', label: 'Ollama (local)', host: 'http://localhost:11434/v1', customHost: true, keyOptional: true, models: ['llama2', 'llama3', 'llama3.1', 'llama3.2', 'llama4', 'gemma', 'gemma2', 'gemma3', 'gemma4', 'qwen', 'qwen2', 'qwen2.5', 'qwen3', 'mistral', 'phi', 'deepseek-r1', 'codellama'] },
 ];
 const _PROVIDER_BASE = (() => { const m = {}; _SET_PROVIDERS.forEach((p) => { m[p.value] = p.host; }); return m; })();
 const _TG_DEFAULTS = { clip_path: '', clip_type: 'stable_diffusion', clip_root: '', max_length: 512, sampling_mode: 'on', temperature: 0.7, top_k: 64, top_p: 0.95, min_p: 0.05, repetition_penalty: 1.05, seed: 0, presence_penalty: 0.0, thinking: false, use_default_template: true };
@@ -2905,7 +2917,7 @@ function makeDropdown(items) {
   };
   const render = () => {
     menu.innerHTML = '';
-    if (!opts.length) { const e = el('div', 'eph-dd-empty'); e.textContent = '（无）'; menu.appendChild(e); }
+    if (!opts.length) { const e = el('div', 'eph-dd-empty'); e.textContent = ezT('(none)'); menu.appendChild(e); }
     opts.forEach((it) => {
       if (it && it.divider) { menu.appendChild(el('div', 'eph-dd-sep')); return; }
       const v = typeof it === 'string' ? it : it.value;
@@ -2939,8 +2951,8 @@ function segSwitch(labelText) {
   const l = el('label', 'eph-switch');
   const sp = el('span', 'eph-sw-label'); sp.textContent = labelText;
   const seg = el('span', 'eph-seg');
-  const onS = el('em', 'eph-seg-item on'); onS.textContent = '开启';
-  const offS = el('em', 'eph-seg-item off'); offS.textContent = '禁用';
+  const onS = el('em', 'eph-seg-item on'); onS.textContent = ezT('On');
+  const offS = el('em', 'eph-seg-item off'); offS.textContent = ezT('Off');
   seg.appendChild(onS); seg.appendChild(offS);
   l.appendChild(cb); l.appendChild(sp); l.appendChild(seg);
   const upd = () => { onS.classList.toggle('active', cb.checked); offS.classList.toggle('active', !cb.checked); };
@@ -2952,7 +2964,7 @@ function settingsEl() {
   _settingsModal = el('div', 'eph-settings');
   const box = el('div', 'eph-settings-box');
   const hd = el('div', 'eph-settings-hd');
-  const t = el('b'); t.textContent = '设置';
+  const t = el('b'); t.textContent = ezT('Settings');
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
   hd.appendChild(t); hd.appendChild(close);
   const body = el('div', 'eph-settings-body');
@@ -2965,16 +2977,16 @@ function settingsEl() {
   body.appendChild(sideroot);
 
   //  路径设置：模型扫描目录（前置于 textgen/llama 面板，供 clipboard 下拉用）。
-    const clipRootIn = el('input'); clipRootIn.placeholder = 'clip 模型扫描目录';
-  const llmModelRootIn = el('input'); llmModelRootIn.placeholder = 'LLM 文本编码模型扫描目录';
-  const mmprojRootIn = el('input'); mmprojRootIn.placeholder = 'mmproj 视觉编码模型扫描目录';
+    const clipRootIn = el('input'); clipRootIn.placeholder = ezT('clip model scan directory');
+  const llmModelRootIn = el('input'); llmModelRootIn.placeholder = ezT('LLM text encoder model scan directory');
+  const mmprojRootIn = el('input'); mmprojRootIn.placeholder = ezT('mmproj vision encoder model scan directory');
   const mkPathRow = (label, inp) => {
     const row = el('label'); const sp = el('span'); sp.textContent = label; row.appendChild(sp);
     const r = el('div', 'eph-path-row'); r.appendChild(inp);
-    const b = el('button', 'eph-btn'); b.textContent = '浏览'; r.appendChild(b);
+    const b = el('button', 'eph-btn'); b.textContent = ezT('Browse'); r.appendChild(b);
     b.addEventListener('click', async () => {
-      try { const res = await fetchApi('/prompt_helper/pick_folder', { method: 'POST' }); const d = await res.json().catch(() => ({})); if (d.ok && d.path) { inp.value = d.path; try { inp.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {} } else if (!d.ok && d.error) window.alert('选择失败：'  + d.error); }
-      catch (e) { window.alert('选择失败：'  + (e && e.message  ?  e.message : e)); }
+      try { const res = await fetchApi('/prompt_helper/pick_folder', { method: 'POST' }); const d = await res.json().catch(() => ({})); if (d.ok && d.path) { inp.value = d.path; try { inp.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {} } else if (!d.ok && d.error) phTip(ezT('Selection failed: ')  + d.error); }
+      catch (e) { phTip(ezT('Selection failed: ')  + (e && e.message  ?  e.message : e)); }
     });
     row.appendChild(r);
     return row;
@@ -2994,44 +3006,44 @@ function settingsEl() {
     grid0.appendChild(l);
     return cb;
   };
-  mkSwitch('运行期自动优化 (TextGenerate)', 'autoTextgen');
-  mkSwitch('运行期自动优化 (API)', 'autoApi');
-  mkSwitch('运行期自动优化 (llama)', 'autoLlama');
-  mkSwitch('调用后清除模型缓存', 'clearCache');
+  mkSwitch(ezT('Runtime auto-optimize (TextGenerate)'), 'autoTextgen');
+  mkSwitch(ezT('Runtime auto-optimize (API)'), 'autoApi');
+  mkSwitch(ezT('Runtime auto-optimize (llama)'), 'autoLlama');
+  mkSwitch(ezT('Clear model cache after call'), 'clearCache');
   pane.appendChild(grid0);
 
   // ---- 规则设置：卡片合并分隔符号 + 提示词规范表（下拉选择 / 新建自定义 / 保存 / 删除 + 下方信息）----
   const grid1r = el('div', 'eph-settings-grid');
   const sepIn = el('input'); sepIn.type = 'text'; sepIn.value = '\\n'; grid1r._sep = sepIn;
-  fld2(grid1r, '卡片合并分隔符号', sepIn,
-    '「合并提示词」把各卡片正文拼成一段时，卡片之间插入这个分隔符。\n默认 \\n = 换行；写 \\n\\n = 空行；也可以填「, 」「---」这类自定义文本。\n输入框里写 \\n（换行）/ \\t（制表）会当成真正的控制符；留空 = 换行。');
-  secTitle(grid1r, '提示词规范（引用媒体 / 时间规则 / 规则提示）');
+  fld2(grid1r, ezT('Card merge separator'), sepIn,
+    ezT('When "Merge prompts" joins card bodies into one paragraph, this separator is inserted between cards.\nDefault \\n = newline; \\n\\n = blank line; you can also enter custom text such as ", " or "---".\nIn the box, \\n (newline) / \\t (tab) are treated as real control characters; blank = newline.'));
+  secTitle(grid1r, ezT('Prompt specs (media refs / time rules / rule hints)'));
   const rbox = el('div', 'eph-rule-box');
   // 一行：规范下拉 + 删除规范 + 自定义名称 + 保存规范
   const rTop = el('div', 'eph-cm-row');
   const rDD = makeDropdown([]); rDD.el.style.flex = '1 1 auto';
-  const rDel = el('button', 'eph-btn danger'); rDel.textContent = '删除规范';
-  const rName = el('input'); rName.placeholder = '自定义规范名称';
-  const rSave = el('button', 'eph-btn'); rSave.textContent = '保存规范';
+  const rDel = el('button', 'eph-btn danger'); rDel.textContent = ezT('Delete spec');
+  const rName = el('input'); rName.placeholder = ezT('Custom spec name');
+  const rSave = el('button', 'eph-btn'); rSave.textContent = ezT('Save spec');
   rTop.appendChild(rDD.el); rTop.appendChild(rDel); rTop.appendChild(rName); rTop.appendChild(rSave);
   const rg = el('div', 'eph-rule-grid');
   const mkIn = (ph) => { const i = el('input'); i.placeholder = ph; return i; };
-  const rf = { image: mkIn('如 <Picture {n}>'), video: mkIn('如 <Video {n}>'), audio: mkIn('如 <Audio {n}>') };
-  const rTpl = mkIn('start 开始时间 · end 结束时间 · dur 时长 · S 镜头号 · M 时刻 · text 正文');
-  setTip(rTpl, '时间规则模板：只对模板里写到的占位符生效，没写的就不用。\n{start} 开始时间（秒）\n{end} 结束时间（秒）\n{dur} 时长（秒；留空自动用 end − start）\n{S} 镜头号\n{M} 时刻（填秒数自动转 00:03.500）\n{text} 卡片正文（自动带入，不用填）\n整条留空 = 这条规范不用时间戳。');
+  const rf = { image: mkIn(ezT('e.g. <Picture {n}>')), video: mkIn(ezT('e.g. <Video {n}>')), audio: mkIn(ezT('e.g. <Audio {n}>')) };
+  const rTpl = mkIn(ezT('start start time · end end time · dur duration · S shot no. · M time · text body'));
+  setTip(rTpl, ezT('Time rule template: only placeholders written in the template take effect.\n{start} start time (s)\n{end} end time (s)\n{dur} duration (s; blank = end - start)\n{S} shot number\n{M} time (seconds auto-convert to 00:03.500)\n{text} card body (filled automatically, no need to enter)\nLeave the whole thing blank = this spec has no timestamp.'));
   const rNote = el('textarea');
   const rField = (labelText, node) => { const l = el('label'); l.appendChild(el('span')).textContent = labelText; l.appendChild(node); rg.appendChild(l); return l; };
-  rField('引用图片', rf.image);
-  rField('引用视频', rf.video);
-  rField('引用音频', rf.audio);
-  rField('时间规则', rTpl);
-  rField('规则提示', rNote);
+  rField(ezT('Image ref'), rf.image);
+  rField(ezT('Video ref'), rf.video);
+  rField(ezT('Audio ref'), rf.audio);
+  rField(ezT('Time rule'), rTpl);
+  rField(ezT('Rule hint'), rNote);
   const rLangWrap = el('div', 'eph-lang-wrap');   // 中/EN（只有双语规范才显示）
   rbox.appendChild(rTop); rbox.appendChild(rLangWrap); rbox.appendChild(rg);
   grid1r.appendChild(rbox);
   grid1r._state = { custom: [], overrides: {}, ruleId: 'none' };
   const rItems = () => {
-    const arr = [{ value: '__new__', label: '＋ 新建自定义规范…' }];
+    const arr = [{ value: '__new__', label: ezT('+ New custom spec…') }];
     _PROMPT_RULES.forEach((r) => { const ov = grid1r._state.overrides[r.id]; arr.push({ value: r.id, label: (ov && ov.label) || r.label }); });
     if (grid1r._state.custom.length) { arr.push({ divider: true }); grid1r._state.custom.forEach((r) => arr.push({ value: r.id, label: r.label })); }
     return arr;
@@ -3052,7 +3064,7 @@ function settingsEl() {
     const changed = builtin && !!grid1r._state.overrides[raw.id];
     [rf.image, rf.video, rf.audio, rTpl, rNote, rName].forEach((i) => { i.readOnly = false; });
     rSave.disabled = false; rDel.disabled = builtin ? !changed : false;
-    rDel.textContent = builtin ? '恢复默认' : '删除规范';
+    rDel.textContent = builtin ? ezT('Restore default') : ezT('Delete spec');
     rLangWrap.innerHTML = '';
     if (raw && raw.alt) {   // 这条规范有中英两版 → 显示切换
       rLangWrap.appendChild(mkLangToggle(grid1r._state.editLang, (k) => { grid1r._state.editLang = k; grid1r._state.lang = k; rSetEditing(raw, false); }));
@@ -3103,7 +3115,7 @@ function settingsEl() {
       return;
     }
     const name = rName.value.trim();
-    if (!name) { window.alert('请先填写自定义规范名称。'); return; }
+    if (!name) { phTip(ezT('Enter a custom spec name first.')); return; }
     const id = (cur && !_BUILTIN_RULE_IDS.includes(cur.id)) ? cur.id : ('cust_' + Date.now().toString(36));
     const rec = { id, label: name, ref, ts, note: rNote.value };
     const i = grid1r._state.custom.findIndex((x) => x.id === id);
@@ -3128,72 +3140,72 @@ function settingsEl() {
 
   // ---- API设置 ----
   const grid1 = el('div', 'eph-settings-grid');
-  const provDD = makeDropdown(_SET_PROVIDERS.map((p) => ({ value: p.value, label: p.label })));
+  const provDD = makeDropdown(_SET_PROVIDERS.map((p) => ({ value: p.value, label: ezT(p.label) })));
   const modelDD = makeDropdown();
-  const apiUrlIn = el('input'); apiUrlIn.placeholder = 'API 主机（默认自动填充）'; apiUrlIn.value = '';
+  const apiUrlIn = el('input'); apiUrlIn.placeholder = ezT('API host (auto-filled by default)'); apiUrlIn.value = '';
   const apiKeyIn = el('input'); apiKeyIn.type = 'password'; apiKeyIn.placeholder = 'API Key';
-  const proxyIn = el('input'); proxyIn.value = ''; proxyIn.placeholder = '如 http://127.0.0.1:7890（留空=直连）';
+  const proxyIn = el('input'); proxyIn.value = ''; proxyIn.placeholder = ezT('e.g. http://127.0.0.1:7890 (blank = direct)');
   const mkFld = (host, labelText, node) => { const l = el('label'); const sp = el('span'); sp.textContent = labelText; l.appendChild(sp); l.appendChild(node); host.appendChild(l); return l; };
-  const cNameIn = el('input'); cNameIn.placeholder = '名称（如  My-Proxy）';
-  const cProviderIn = el('input'); cProviderIn.placeholder = '如 OpenAI / DeepSeek / Claude';
-  const cModelIn = el('input'); cModelIn.placeholder = '模型 ID（如  my-model-v1）';
-  const cUrlIn = el('input'); cUrlIn.placeholder = 'API 主机（默认自动填充）';
+  const cNameIn = el('input'); cNameIn.placeholder = ezT('Name (e.g. My-Proxy)');
+  const cProviderIn = el('input'); cProviderIn.placeholder = ezT('e.g. OpenAI / DeepSeek / Claude');
+  const cModelIn = el('input'); cModelIn.placeholder = ezT('Model ID (e.g. my-model-v1)');
+  const cUrlIn = el('input'); cUrlIn.placeholder = ezT('API host (auto-filled by default)');
   const cKeyIn = el('input'); cKeyIn.type = 'password'; cKeyIn.placeholder = 'API Key';
-  const cProxyIn = el('input'); cProxyIn.placeholder = '如 http://127.0.0.1:7890（留空=直连）';
+  const cProxyIn = el('input'); cProxyIn.placeholder = ezT('e.g. http://127.0.0.1:7890 (blank = direct)');
 
   // 模式切换：默认 / 自定义（滑到哪个用哪个，另一侧不用）
   const modeWrap = el('div', 'eph-mode');
-  const mDef = el('button', 'eph-mode-opt'); mDef.type = 'button'; mDef.textContent = '默认';
-  const mCus = el('button', 'eph-mode-opt'); mCus.type = 'button'; mCus.textContent = '自定义';
+  const mDef = el('button', 'eph-mode-opt'); mDef.type = 'button'; mDef.textContent = ezT('Default');
+  const mCus = el('button', 'eph-mode-opt'); mCus.type = 'button'; mCus.textContent = ezT('Custom');
   modeWrap.appendChild(mDef); modeWrap.appendChild(mCus);
   grid1.appendChild(modeWrap);
 
   //  中间按钮行（右侧）：新增自定义api / 保存为自定义 / 保存api设置 / 删除自定义api
   const btnRow = el('div', 'eph-settings-btnrow');
-  const btnNewCustom = el('button', 'eph-btn'); btnNewCustom.textContent = '新增自定义api';
-  const btnSaveAsCustom = el('button', 'eph-btn eph-btn-save'); btnSaveAsCustom.textContent = '保存为自定义'; btnSaveAsCustom.style.cssText = 'background:#1a1a2e;border-color:#1a1a2e;color:#fff;';
-  const btnSaveEdit = el('button', 'eph-btn eph-btn-save'); btnSaveEdit.textContent = '保存api设置'; btnSaveEdit.style.cssText = 'background:#1a1a2e;border-color:#1a1a2e;color:#fff;';
-  const btnDeleteCustom = el('button', 'eph-btn eph-btn-cancel'); btnDeleteCustom.textContent = '删除自定义api';
+  const btnNewCustom = el('button', 'eph-btn'); btnNewCustom.textContent = ezT('New custom API');
+  const btnSaveAsCustom = el('button', 'eph-btn eph-btn-save'); btnSaveAsCustom.textContent = ezT('Save as custom'); btnSaveAsCustom.style.cssText = 'background:#1a1a2e;border-color:#1a1a2e;color:#fff;';
+  const btnSaveEdit = el('button', 'eph-btn eph-btn-save'); btnSaveEdit.textContent = ezT('Save API settings'); btnSaveEdit.style.cssText = 'background:#1a1a2e;border-color:#1a1a2e;color:#fff;';
+  const btnDeleteCustom = el('button', 'eph-btn eph-btn-cancel'); btnDeleteCustom.textContent = ezT('Delete custom API');
   btnRow.appendChild(btnNewCustom); btnRow.appendChild(btnSaveAsCustom); btnRow.appendChild(btnSaveEdit); btnRow.appendChild(btnDeleteCustom);
   grid1.appendChild(btnRow);
 
   // 默认厂商模式
   const defaultWrap = el('div', 'eph-settings-sub'); grid1.appendChild(defaultWrap);
-  mkFld(defaultWrap, '模型提供方', provDD.el);
-  mkFld(defaultWrap, '模型选择', modelDD.el);
-  mkFld(defaultWrap, 'API 主机', apiUrlIn);
+  mkFld(defaultWrap, ezT('Model provider'), provDD.el);
+  mkFld(defaultWrap, ezT('Model selection'), modelDD.el);
+  mkFld(defaultWrap, ezT('API host'), apiUrlIn);
   mkFld(defaultWrap, 'API Key', apiKeyIn);
-  mkFld(defaultWrap, '代理地址（可选）', proxyIn);
+  mkFld(defaultWrap, ezT('Proxy (optional)'), proxyIn);
 
   //  自定义厂商模式：下拉选择已保存预设 + 下方显示参数
   const customWrap = el('div', 'eph-settings-sub'); grid1.appendChild(customWrap);
   const customDD = makeDropdown();
-  mkFld(customWrap, '自定义API', customDD.el);
-  mkFld(customWrap, '自定义名称', cNameIn);
-  mkFld(customWrap, '模型提供方', cProviderIn);
-  mkFld(customWrap, '模型 ID', cModelIn);
-  mkFld(customWrap, 'API 主机', cUrlIn);
+  mkFld(customWrap, ezT('Custom API'), customDD.el);
+  mkFld(customWrap, ezT('Custom name'), cNameIn);
+  mkFld(customWrap, ezT('Model provider'), cProviderIn);
+  mkFld(customWrap, ezT('Model ID'), cModelIn);
+  mkFld(customWrap, ezT('API host'), cUrlIn);
   mkFld(customWrap, 'API Key', cKeyIn);
-  mkFld(customWrap, '代理地址（可选）', cProxyIn);
+  mkFld(customWrap, ezT('Proxy (optional)'), cProxyIn);
 
   // ---- API 调用参数（API 优化用；留空 = 不发送该字段，用厂商默认）----
-  secTitle(grid1, '调用参数');
+  secTitle(grid1, ezT('Call parameters'));
   const apWrap = el('div', 'eph-settings-sub');
   const apTemp = el('input'); apTemp.type = 'number';
   const apTopP = el('input'); apTopP.type = 'number';
   const apMax = el('input'); apMax.type = 'number';
   const apSeed = el('input'); apSeed.type = 'number';
   const apStop = el('input'); apStop.type = 'text';
-  const apReason = makeDropdown([{ value: 'off', label: '关闭' }, { value: 'low', label: '低' }, { value: 'medium', label: '中' }, { value: 'high', label: '高' }]);
-  const apWeb = segSwitch('联网搜索');
-  mkFld(apWrap, '温度 temperature', apTemp);
+  const apReason = makeDropdown([{ value: 'off', label: ezT('None') }, { value: 'low', label: ezT('Low') }, { value: 'medium', label: ezT('Medium') }, { value: 'high', label: ezT('High') }]);
+  const apWeb = segSwitch(ezT('Web search'));
+  mkFld(apWrap, ezT('Temperature'), apTemp);
   mkFld(apWrap, 'Top P', apTopP);
-  mkFld(apWrap, '最大 token max_tokens', apMax);
-  mkFld(apWrap, '种子 seed', apSeed);
-  mkFld(apWrap, '停止串 stop（逗号分隔）', apStop);
-  mkFld(apWrap, '思考强度 reasoning', apReason.el);
+  mkFld(apWrap, ezT('Max tokens max_tokens'), apMax);
+  mkFld(apWrap, ezT('Seed'), apSeed);
+  mkFld(apWrap, ezT('Stop strings (comma-separated)'), apStop);
+  mkFld(apWrap, ezT('Reasoning effort'), apReason.el);
   const apCustom = el('textarea'); apCustom.placeholder = '{"reasoning_effort":"high"}';
-  mkFld(apWrap, '自定义参数（JSON 键值对）', apCustom);
+  mkFld(apWrap, ezT('Custom parameters (JSON key-value pairs)'), apCustom);
   apWrap.appendChild(apWeb);
   grid1.appendChild(apWrap);
   grid1._ap = { temperature: apTemp, top_p: apTopP, max_tokens: apMax, seed: apSeed, stop: apStop, reasoning: apReason, webSearch: apWeb._cb, custom: apCustom };
@@ -3208,7 +3220,7 @@ function settingsEl() {
     modelDD.setItems(ms);
     if (cur && ms.includes(cur)) modelDD.value = cur;
     else if (ms.length) modelDD.value = ms[0];
-    apiKeyIn.placeholder = providerMeta().keyOptional  ?  'API Key（Ollama  可留空）' : 'API Key';
+    apiKeyIn.placeholder = providerMeta().keyOptional  ?  ezT('API Key (can be blank for Ollama)') : 'API Key';
   };
   provDD.addEventListener('change', () => { if (_PROVIDER_BASE[provDD.value]) apiUrlIn.value = _PROVIDER_BASE[provDD.value]; modelDD.value = ''; setModels(); });
 
@@ -3236,13 +3248,13 @@ function settingsEl() {
   const saveCustom = async () => {
     // 保存api设置：更新当前选中的预设（改名则先删旧再建新），或新增（点击保存才生效）
         const editingExisting = !!_customSelected;
-    const name = cNameIn.value.trim(); if (!name) { window.alert('请先填写自定义名称'); return; }
+    const name = cNameIn.value.trim(); if (!name) { phTip(ezT('Enter a custom name first')); return; }
     const provider = cProviderIn.value.trim() || (editingExisting ? _customSelected.provider : name);
     const rec = { name, provider, model: cModelIn.value.trim(), apiUrl: cUrlIn.value.trim(), apiKey: cKeyIn.value.trim(), proxy: cProxyIn.value.trim(), custom: editingExisting ? !!_customSelected.custom : true };
     if (editingExisting && name !== _customSelected.name) {
       try { await fetchApi('/prompt_helper/custom_providers?name=' + encodeURIComponent(_customSelected.name), { method: 'DELETE' }); } catch (_) {}
     }
-    try { const r = await fetchApi('/prompt_helper/custom_providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) }); const d = await r.json().catch(() => ({})); if (d.error) { window.alert('保存失败：'  + d.error); return; } _customSelected = rec; await loadCustom(); } catch (e) { window.alert('保存失败：'  + (e && e.message  ?  e.message : e)); }
+    try { const r = await fetchApi('/prompt_helper/custom_providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) }); const d = await r.json().catch(() => ({})); if (d.error) { phTip(ezT('Save failed: ')  + d.error); return; } _customSelected = rec; await loadCustom(); } catch (e) { phTip(ezT('Save failed: ')  + (e && e.message  ?  e.message : e)); }
   };
   const saveCurrent = async () => {
     // 保存为自定义：把当前默认厂商所选的 provider/model/apiKey 存为新命名预设（默认  deepseek1/2…）
@@ -3250,9 +3262,9 @@ function settingsEl() {
     const provider = provDD.value; const base = (provider || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
     const nums = _customProviders.map((x) => /^([a-z0-9]+)(\d+)$/.exec((x.name || '').toLowerCase())).filter((m) => m && m[1] === base).map((m) => parseInt(m[2], 10));
     const next = (nums.length ? Math.max(...nums) : 0) + 1;
-    const name = (await uiPrompt('保存为自定义 API 名称：', base + next)) || ''; if (!name.trim()) return;
+    const name = (await uiPrompt(ezT('Name for saved custom API:'), base + next)) || ''; if (!name.trim()) return;
     const rec = { name: name.trim(), provider, model: modelDD.value, apiUrl: apiUrlIn.value.trim(), apiKey: apiKeyIn.value.trim(), proxy: proxyIn.value.trim(), custom: false };
-    try { const r = await fetchApi('/prompt_helper/custom_providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) }); const d = await r.json().catch(() => ({})); if (d.error) { window.alert('保存失败：'  + d.error); return; } await loadCustom(); } catch (e) { window.alert('保存失败：'  + (e && e.message  ?  e.message : e)); }
+    try { const r = await fetchApi('/prompt_helper/custom_providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) }); const d = await r.json().catch(() => ({})); if (d.error) { phTip(ezT('Save failed: ')  + d.error); return; } await loadCustom(); } catch (e) { phTip(ezT('Save failed: ')  + (e && e.message  ?  e.message : e)); }
   };
   const setMode = (m) => {
     _curMode = m;
@@ -3273,8 +3285,8 @@ function settingsEl() {
   btnSaveAsCustom.addEventListener('click', saveCurrent);
   btnSaveEdit.addEventListener('click', saveCustom);
   btnDeleteCustom.addEventListener('click', async () => {
-    if (!_customSelected) { window.alert('请先在下拉选择要删除的预设'); return; }
-    if (!(await uiConfirm('删除自定义 API「'  + _customSelected.name + '」？'))) return;
+    if (!_customSelected) { phTip(ezT('Select the preset to delete in the dropdown first')); return; }
+    if (!(await uiConfirm(ezT('Delete custom API "')  + _customSelected.name + ezT('"?')))) return;
     await deleteCustom(_customSelected.name);
   });
   customDD.addEventListener('change', (v) => { const p = _customProviders.find((x) => x.name === v); if (p) { _customSelected = p; applyCustomFields(p); } });
@@ -3288,26 +3300,26 @@ function settingsEl() {
   const tgDD = (labelText, key, opts, tipText) => { const dd = makeDropdown((opts || []).map(([v, l]) => ({ value: v, label: l }))); grid2._tg = grid2._tg || {}; grid2._tg[key] = dd; fld2(grid2, labelText, dd.el, tipText); return dd; };
   const tgChk = (labelText, key, def, tipText) => { const l = segSwitch(labelText); l._cb.checked = !!def; l._cb._upd(); grid2._tg = grid2._tg || {}; grid2._tg[key] = l._cb; setTip(l, tipText); grid2.appendChild(l); return l._cb; };
   // CLIP 模型选择（放最上面，点击即用 textgen，像 llama  一样自加载）
-    const clipPath = el('input'); clipPath.type = 'text'; clipPath.value = ''; clipPath.placeholder = '如 text_encoders/...safetensors';
+    const clipPath = el('input'); clipPath.type = 'text'; clipPath.value = ''; clipPath.placeholder = ezT('e.g. text_encoders/...safetensors');
   const clipTypeDD = makeDropdown(_CLIP_TYPES.map((t) => ({ value: t, label: t })));
   grid2._tg = grid2._tg || {}; grid2._tg.clip_path = clipPath; grid2._tg.clip_type = clipTypeDD; grid2._tg.clip_root = clipRootIn;
-  secTitle(grid2, '模型');
-  fld2(grid2, 'clip 模型', attachFileMenu(clipPath, '/prompt_helper/clip_models', () => clipRootIn.value.trim()),
-    'TextGenerate 用的文本编码器（有 generate 能力的 text-gen CLIP：Gemma / Qwen3-VL / flux2 等）。\n点输入框可选「路径设置」目录里扫到的文件；普通 stable_diffusion CLIP 不支持文本生成。');
-  fld2(grid2, 'CLIP 类型', clipTypeDD.el, '与 clip 模型匹配的 ComfyUI CLIPType（如 qwen_image / flux2）。\n选错会加载失败或输出乱码。');
-  secTitle(grid2, '采样');
-  numField('最大长度', 'max_length', _TG_DEFAULTS.max_length, '最多生成多少 token（含 prompt 之外的新 token）。\n512 ≈ 300~400 汉字；调大更慢更吃显存。');
-  tgDD('采样模式', 'sampling_mode', [['on', 'on'], ['off', 'off']], 'on = 按下面的温度 / Top K / Top P 等随机采样；off = 贪心解码（每次结果一致，稳但死板）。');
-  numField('温度', 'temperature', _TG_DEFAULTS.temperature, '随机性。低（0.2~0.5）稳定保守，高（0.9~1.2）发散有创意；官方默认 0.7。');
-  numField('Top K', 'top_k', _TG_DEFAULTS.top_k, '只从概率最高的 K 个候选里采样，0 = 关闭该过滤；官方默认 64。');
-  numField('Top P', 'top_p', _TG_DEFAULTS.top_p, '核采样：累计概率到 P 为止的候选才参与，越小越保守；官方默认 0.95。');
-  numField('最小概率', 'min_p', _TG_DEFAULTS.min_p, '候选概率必须 ≥ 最高概率 × min_p 才保留（剪掉明显不可能的 token）；官方默认 0.05。');
-  numField('重复惩罚', 'repetition_penalty', _TG_DEFAULTS.repetition_penalty, '>1 抑制重复用词（1.05 轻微、1.2 明显），1.0 = 不惩罚；太高句子会变生硬。');
-  numField('种子', 'seed', _TG_DEFAULTS.seed, '0 或留空 = 每次随机；填固定值 = 每次生成同样的结果（便于复现）。');
-  numField('存在惩罚 presence_penalty', 'presence_penalty', _TG_DEFAULTS.presence_penalty, '存在惩罚：某个词只要出现过就压低它的概率，鼓励说新内容；0 = 关闭。');
-  secTitle(grid2, '选项');
-  tgChk('思考模式', 'thinking', _TG_DEFAULTS.thinking, '让支持思考的模型（如 Qwen3-VL）先输出思考过程再给结果。\n模型不支持时会多输出无关内容。');
-  tgChk('使用内置模板 use_default_template', 'use_default_template', _TG_DEFAULTS.use_default_template, '用模型内置的 system / 对话模板包裹提示词；关掉则按纯文本直接喂给模型。');
+  secTitle(grid2, ezT('Model'));
+  fld2(grid2, ezT('clip model'), attachFileMenu(clipPath, '/prompt_helper/clip_models', () => clipRootIn.value.trim()),
+    ezT('Text encoder used by TextGenerate (a text-gen CLIP with generate capability: Gemma / Qwen3-VL / flux2, etc.).\nClick the input to pick a file scanned from the "Paths" directories; a plain stable_diffusion CLIP cannot generate text.'));
+  fld2(grid2, ezT('CLIP type'), clipTypeDD.el, ezT('ComfyUI CLIPType matching the clip model (e.g. qwen_image / flux2).\nA wrong choice fails to load or produces garbled output.'));
+  secTitle(grid2, ezT('Sampling'));
+  numField(ezT('Max length'), 'max_length', _TG_DEFAULTS.max_length, ezT('Maximum number of tokens to generate (new tokens beyond the prompt).\n512 ≈ 300-400 Chinese characters; larger is slower and uses more VRAM.'));
+  tgDD(ezT('Sampling mode'), 'sampling_mode', [['on', 'on'], ['off', 'off']], ezT('on = random sampling by the temperature / Top K / Top P below; off = greedy decoding (same result every time, stable but rigid).'));
+  numField(ezT('Temperature'), 'temperature', _TG_DEFAULTS.temperature, ezT('Randomness. Low (0.2-0.5) is stable and conservative, high (0.9-1.2) is divergent and creative; official default 0.7.'));
+  numField('Top K', 'top_k', _TG_DEFAULTS.top_k, ezT('Sample only from the K most likely candidates, 0 = disable this filter; official default 64.'));
+  numField('Top P', 'top_p', _TG_DEFAULTS.top_p, ezT('Nucleus sampling: only candidates within cumulative probability P participate, smaller is more conservative; official default 0.95.'));
+  numField(ezT('Min P'), 'min_p', _TG_DEFAULTS.min_p, ezT('A candidate is kept only if its probability ≥ max probability × min_p (cuts obviously impossible tokens); official default 0.05.'));
+  numField(ezT('Repetition penalty'), 'repetition_penalty', _TG_DEFAULTS.repetition_penalty, ezT('>1 suppresses repeated words (1.05 mild, 1.2 strong), 1.0 = no penalty; too high makes sentences stiff.'));
+  numField(ezT('Seed'), 'seed', _TG_DEFAULTS.seed, ezT('0 or blank = random each time; a fixed value = the same result each time (reproducible).'));
+  numField(ezT('Presence penalty'), 'presence_penalty', _TG_DEFAULTS.presence_penalty, ezT('Presence penalty: once a word has appeared, its probability is lowered to encourage new content; 0 = off.'));
+  secTitle(grid2, ezT('Options'));
+  tgChk(ezT('Thinking mode'), 'thinking', _TG_DEFAULTS.thinking, ezT('Let thinking-capable models (e.g. Qwen3-VL) output their reasoning before the result.\nUnsupported models will output extra irrelevant content.'));
+  tgChk(ezT('Use default template'), 'use_default_template', _TG_DEFAULTS.use_default_template, ezT('Wrap the prompt with the model built-in system / chat template; turn off to feed plain text directly.'));
   pane.appendChild(grid2);
 
   // ---- llama设置 ----
@@ -3315,67 +3327,67 @@ function settingsEl() {
   const llField = (labelText, key, def, tipText) => { const inp = el('input'); inp.type = 'number'; inp.value = String(def); if (key === 'model' || key === 'mmproj' || key === 'server' || key === 'stop' || key === 'chat_format') { inp.type = 'text'; } grid3._ll = grid3._ll || {}; grid3._ll[key] = inp; fld2(grid3, labelText, inp, tipText); return inp; };
   const llDD = (labelText, key, opts, tipText) => { const dd = makeDropdown((opts || []).map(([v, l]) => ({ value: v, label: l }))); grid3._ll = grid3._ll || {}; grid3._ll[key] = dd; fld2(grid3, labelText, dd.el, tipText); return dd; };
   const llChk = (labelText, key, def, tipText) => { const l = segSwitch(labelText); l._cb.checked = !!def; l._cb._upd(); grid3._ll = grid3._ll || {}; grid3._ll[key] = l._cb; setTip(l, tipText); grid3.appendChild(l); return l._cb; };
-  secTitle(grid3, '模型');
-  const llModeDD = makeDropdown([{ value: 'local', label: '进程内 llama-cpp-python' }, { value: 'server', label: 'llama.cpp 服务器(HTTP)' }]);
-  grid3._ll = grid3._ll || {}; grid3._ll.mode = llModeDD; fld2(grid3, '调用方式', llModeDD.el,
-    '进程内 = 本进程直接用 llama-cpp-python 加载 GGUF（免起服务，占本机内存/显存）；\n服务器(HTTP) = 调已启动的 llama.cpp server（下面的加载参数不生效，采样参数仍会发给服务器）。');
+  secTitle(grid3, ezT('Model'));
+  const llModeDD = makeDropdown([{ value: 'local', label: ezT('In-process llama-cpp-python') }, { value: 'server', label: ezT('llama.cpp server (HTTP)') }]);
+  grid3._ll = grid3._ll || {}; grid3._ll.mode = llModeDD; fld2(grid3, ezT('Call mode'), llModeDD.el,
+    ezT('In-process = this process loads the GGUF directly with llama-cpp-python (no server needed, uses local RAM/VRAM);\nServer (HTTP) = call an already-running llama.cpp server (the loading options below do not apply, sampling options are still sent).'));
   grid3._ll.model_root = llmModelRootIn; grid3._ll.mmproj_root = mmprojRootIn;
-  const llModel = el('input'); llModel.type = 'text'; llModel.value = String(_LL_DEFAULTS.model); llModel.placeholder = '可填相对或绝对路径';
+  const llModel = el('input'); llModel.type = 'text'; llModel.value = String(_LL_DEFAULTS.model); llModel.placeholder = ezT('Relative or absolute path');
   grid3._ll.model = llModel;
-  fld2(grid3, 'LLM 文本编码模型', attachFileMenu(llModel, '/prompt_helper/llama_models', () => llmModelRootIn.value.trim()),
-    '主模型 GGUF（文本推理）。填文件名即可，按「路径设置」的目录递归查找；也可填绝对路径。');
-  const llMmproj = el('input'); llMmproj.type = 'text'; llMmproj.value = String(_LL_DEFAULTS.mmproj); llMmproj.placeholder = '如 mmproj-Qwen3-VL-8B-Instruct-Q8_0.gguf';
+  fld2(grid3, ezT('LLM text encoder model'), attachFileMenu(llModel, '/prompt_helper/llama_models', () => llmModelRootIn.value.trim()),
+    ezT('Main GGUF model (text inference). A file name is enough; searched recursively under the "Paths" directories; an absolute path also works.'));
+  const llMmproj = el('input'); llMmproj.type = 'text'; llMmproj.value = String(_LL_DEFAULTS.mmproj); llMmproj.placeholder = ezT('e.g. mmproj-Qwen3-VL-8B-Instruct-Q8_0.gguf');
   grid3._ll.mmproj = llMmproj;
-  fld2(grid3, 'mmproj 视觉编码模型', attachFileMenu(llMmproj, '/prompt_helper/llama_models', () => mmprojRootIn.value.trim()),
-    '多模态投影模型（mmproj GGUF）。要与主模型同源同系列，填了才能看图；\n纯文本模型留空，此时接图像会报「does not support image inputs」。');
-  const llServer = llField('服务器地址', 'server', _LL_DEFAULTS.server, '仅「llama.cpp 服务器(HTTP)」模式使用，如 http://127.0.0.1:8080。\n服务器需要自己先启动（llama-server -m 模型.gguf --mmproj ...）。'); llServer.placeholder = '如 http://127.0.0.1:8080';
-  llField('聊天模板 chat_format', 'chat_format', _LL_DEFAULTS.chat_format, '进程内加载时使用的对话模板名（如 qwen2-vl / llama-3 / chatml）。\n留空 = 用 GGUF 里自带的 tokenizer.chat_template，一般留空即可。');
-  secTitle(grid3, '加载（仅进程内模式生效）');
-  llField('上下文长度 n_ctx', 'n_ctx', _LL_DEFAULTS.n_ctx, '上下文窗口：prompt + 生成的总 token 上限。\n越大越吃内存/显存；看图会额外占用视觉 token（Qwen3-VL 一张图约几百到上千）。');
-  llField('GPU 层数 n_gpu_layers', 'n_gpu_layers', _LL_DEFAULTS.n_gpu_layers, '卸载到 GPU 的层数：0 = 纯 CPU（默认，最省显存但慢）；\n填 99 或 ≥ 模型层数 ≈ 全部卸载（4B Q4 约需 3~4GB 显存）。');
-  llField('batch n_batch', 'n_batch', _LL_DEFAULTS.n_batch, '逻辑批大小：一次提交处理的 token 数，影响 prompt 处理速度。\n调小更省显存。');
-  llField('微批 n_ubatch', 'n_ubatch', _LL_DEFAULTS.n_ubatch, '物理微批大小，必须 ≤ n_batch。\n显存吃紧或长 prompt 报显存不足时调小（如 128 / 256）。');
-  llField('CPU 线程 n_threads', 'n_threads', _LL_DEFAULTS.n_threads, 'CPU 生成/解码线程数。\n0 或 -1 = 自动（约物理核数一半），留默认即可。');
-  llField('CPU 批线程 n_threads_batch', 'n_threads_batch', _LL_DEFAULTS.n_threads_batch, 'CPU 处理 prompt（预填/看图）用的线程数，影响首字延迟。\n0 或 -1 = 自动（约物理核数），CPU 推理时可设成与物理核数相同。');
-  llDD('Flash Attention', 'flash_attn', [['auto', 'auto（跟随运行时）'], ['on', 'on（开启）'], ['off', 'off（关闭）']],
-    '注意力加速：on 更省显存也更快（后端支持时）；off 关闭；auto 交给运行时判断。\n切换后需要重新加载模型才生效；用 q4_0/q8_0 的 V 缓存量化时必须开。');
-  llDD('K 缓存类型 type_k', 'type_k', [['', '默认（f16，不量化）'], ['q8_0', 'q8_0（约省一半 K 显存）'], ['q4_0', 'q4_0（约省 3/4，精度略降）']],
-    'KV 缓存里 K 的数据类型：长上下文/大 n_ctx 时量化能明显省显存。\n默认 f16 不量化；改完需重新加载模型。');
-  llDD('V 缓存类型 type_v', 'type_v', [['', '默认（f16，不量化）'], ['q8_0', 'q8_0（约省一半 V 显存）'], ['q4_0', 'q4_0（约省 3/4，精度略降）']],
-    'KV 缓存里 V 的数据类型。非 f16 时 llama.cpp 要求开启 Flash Attention（本页 Flash Attention 设为 on），否则加载会报错。');
-  llChk('内存映射 use_mmap', 'use_mmap', _LL_DEFAULTS.use_mmap, '开 = 按需从磁盘映射模型文件（启动快、峰值内存低）；\n关 = 一次性读入内存（默认）。切换后重新加载模型才生效。');
-  llChk('锁定内存 use_mlock', 'use_mlock', _LL_DEFAULTS.use_mlock, '把模型锁在物理内存里，防止被换出到页面文件（避免卡顿）。\n物理内存不够时开启会更慢甚至失败。');
-  llChk('KQV 卸载 offload_kqv', 'offload_kqv', _LL_DEFAULTS.offload_kqv, '把 K/Q/V 注意力计算也放到 GPU（默认开，显存换速度）。\n关掉可省显存但明显更慢。');
-  secTitle(grid3, '视觉（mmproj，需填视觉编码模型）');
-  llField('图片最大 token image_max_tokens', 'image_max_tokens', _LL_DEFAULTS.image_max_tokens, '视觉（mmproj）看图时，一张图最多切成多少个 token —— 即“图片 token 上限”。\n默认 -1 = 不限制（用 mmproj 自带配置）；调小（如 512/256）省显存、看图更快，但细节更粗。\n注意：Qwen-VL 系列低于 1024 时 llama.cpp 会提示「require at minimum 1024 image tokens」，细粒度定位类任务会变差。\n需填了 mmproj 才生效。');
-  llField('图片最小 token image_min_tokens', 'image_min_tokens', _LL_DEFAULTS.image_min_tokens, '视觉（mmproj）看图时一张图至少保留多少个 token。\n默认 -1 = 不限制；必须 ≤ 图片最大 token，否则加载时报错。');
-  llField('视觉批上限 batch_max_tokens', 'batch_max_tokens', _LL_DEFAULTS.batch_max_tokens, '视觉编码器一次最多处理的 token 数（mmproj 批上限，默认 1024）。\n大图报显存不足时调小（如 512 / 256）。');
-  llChk('视觉编码用 GPU vision_use_gpu', 'vision_use_gpu', _LL_DEFAULTS.vision_use_gpu, 'mmproj 视觉编码器是否跑在 GPU 上（默认开）。\n关掉改成 CPU 编码：省显存但看图明显更慢；即使 n_gpu_layers=0 也可以开着它。');
-  llChk('标注图片序号 add_vision_id', 'vision_add_vision_id', _LL_DEFAULTS.vision_add_vision_id, '给每张图在提示里加「Picture 1:」这类序号前缀（Qwen-VL 系列模板支持的变量）。\n多图区分时有用；只喂一张图时影响很小。');
-  secTitle(grid3, '采样（两种模式都生效）');
-  llField('最大 token', 'max_tokens', _LL_DEFAULTS.max_tokens, '最多生成多少 token（输出长度上限）。');
-  llField('温度', 'temperature', _LL_DEFAULTS.temperature, '随机性：低（0.2~0.5）稳定，高（0.9+）发散；llama.cpp 官方默认 0.8。');
-  llField('Top P', 'top_p', _LL_DEFAULTS.top_p, '核采样，官方默认 0.95，越小越保守。');
-  llField('Top K', 'top_k', _LL_DEFAULTS.top_k, '只从概率最高的 K 个候选里采样，0 = 关闭，官方默认 40。');
-  llField('最小概率 min_p', 'min_p', _LL_DEFAULTS.min_p, '候选概率 ≥ 最高概率 × min_p 才保留，官方默认 0.05。');
-  llField('典型采样 typical_p', 'typical_p', _LL_DEFAULTS.typical_p, 'locally typical sampling：1.0 = 关闭（默认），0.9 左右可让用词更“典型”。');
-  llField('重复惩罚 repeat_penalty', 'repeat_penalty', _LL_DEFAULTS.repeat_penalty, '>1 抑制重复，官方默认 1.1；1.0 = 关闭。');
-  llField('惩罚回看 penalty_last_n', 'penalty_last_n', _LL_DEFAULTS.penalty_last_n, '重复/存在/频率惩罚回看多少个 token：64 常用；\n0 = 关闭惩罚，-1 = 整个上下文。');
-  llField('存在惩罚 presence_penalty', 'presence_penalty', _LL_DEFAULTS.presence_penalty, '词一旦出现过就持续压低它的概率（鼓励新话题）；0 = 关闭。');
-  llField('频率惩罚 frequency_penalty', 'frequency_penalty', _LL_DEFAULTS.frequency_penalty, '按出现次数成比例压低概率（比存在惩罚更平缓）；0 = 关闭。');
-  llField('种子', 'seed', _LL_DEFAULTS.seed, '0 或 -1 = 每次随机；其他值 = 固定结果（便于复现）。');
-  const llStop = llField('stop', 'stop', _LL_DEFAULTS.stop, '停止词：生成到这些字符串就停。多个用英文逗号分隔，留空 = 不设置。'); llStop.placeholder = '多个用逗号分隔';
+  fld2(grid3, ezT('mmproj vision encoder model'), attachFileMenu(llMmproj, '/prompt_helper/llama_models', () => mmprojRootIn.value.trim()),
+    ezT('Multimodal projection model (mmproj GGUF). Must match the main model family; required for image input;\nleave blank for text-only models, in which case images report "does not support image inputs".'));
+  const llServer = llField(ezT('Server address'), 'server', _LL_DEFAULTS.server, ezT('Used only in "llama.cpp server (HTTP)" mode, e.g. http://127.0.0.1:8080.\nYou must start the server yourself first (llama-server -m model.gguf --mmproj ...).')); llServer.placeholder = ezT('e.g. http://127.0.0.1:8080');
+  llField(ezT('Chat template chat_format'), 'chat_format', _LL_DEFAULTS.chat_format, ezT('Chat template name used for in-process loading (e.g. qwen2-vl / llama-3 / chatml).\nBlank = use the tokenizer.chat_template bundled in the GGUF; usually fine to leave blank.'));
+  secTitle(grid3, ezT('Loading (in-process mode only)'));
+  llField(ezT('Context length n_ctx'), 'n_ctx', _LL_DEFAULTS.n_ctx, ezT('Context window: total token limit for prompt + generation.\nLarger uses more RAM/VRAM; images add vision tokens (a few hundred to a thousand per image for Qwen3-VL).'));
+  llField(ezT('GPU layers n_gpu_layers'), 'n_gpu_layers', _LL_DEFAULTS.n_gpu_layers, ezT('Layers offloaded to the GPU: 0 = CPU only (default, least VRAM but slow);\n99 or ≥ the model layer count offloads everything (a 4B Q4 needs about 3-4 GB VRAM).'));
+  llField('batch n_batch', 'n_batch', _LL_DEFAULTS.n_batch, ezT('Logical batch size: tokens processed per submission, affects prompt processing speed.\nSmaller uses less VRAM.'));
+  llField(ezT('Micro batch n_ubatch'), 'n_ubatch', _LL_DEFAULTS.n_ubatch, ezT('Physical micro-batch size, must be ≤ n_batch.\nLower it (e.g. 128 / 256) when VRAM is tight or long prompts report out of memory.'));
+  llField(ezT('CPU threads n_threads'), 'n_threads', _LL_DEFAULTS.n_threads, ezT('CPU generation/decoding threads.\n0 or -1 = auto (about half the physical cores); the default is usually fine.'));
+  llField(ezT('CPU batch threads n_threads_batch'), 'n_threads_batch', _LL_DEFAULTS.n_threads_batch, ezT('CPU threads for prompt processing (prefill/image encoding), affects time to first token.\n0 or -1 = auto (about the physical core count); for CPU inference set it equal to the physical core count.'));
+  llDD('Flash Attention', 'flash_attn', [['auto', ezT('auto (follow runtime)')], ['on', ezT('on (enabled)')], ['off', ezT('off (disabled)')]],
+    ezT('Attention acceleration: on saves VRAM and is faster (when the backend supports it); off disables it; auto lets the runtime decide.\nReload the model to apply; required when using q4_0/q8_0 V-cache quantization.'));
+  llDD(ezT('K cache type type_k'), 'type_k', [['', ezT('Default (f16, no quantization)')], ['q8_0', ezT('q8_0 (about half the K VRAM)')], ['q4_0', ezT('q4_0 (about 3/4 less, slight precision loss)')]],
+    ezT('Data type of K in the KV cache: quantization clearly saves VRAM with long contexts / large n_ctx.\nDefault f16 without quantization; reload the model after changing.'));
+  llDD(ezT('V cache type type_v'), 'type_v', [['', ezT('Default (f16, no quantization)')], ['q8_0', ezT('q8_0 (about half the V VRAM)')], ['q4_0', ezT('q4_0 (about 3/4 less, slight precision loss)')]],
+    ezT('Data type of V in the KV cache. When not f16, llama.cpp requires Flash Attention (set Flash Attention to on on this page), otherwise loading fails.'));
+  llChk(ezT('Memory mapping use_mmap'), 'use_mmap', _LL_DEFAULTS.use_mmap, ezT('On = map the model file from disk on demand (faster startup, lower peak memory);\nOff = read it into memory at once (default). Reload the model to apply.'));
+  llChk(ezT('Lock memory use_mlock'), 'use_mlock', _LL_DEFAULTS.use_mlock, ezT('Lock the model in physical memory to keep it from being paged out (avoids stutter).\nWith too little physical memory this is slower or even fails.'));
+  llChk(ezT('KQV offload offload_kqv'), 'offload_kqv', _LL_DEFAULTS.offload_kqv, ezT('Run K/Q/V attention computation on the GPU too (default on, trades VRAM for speed).\nTurning it off saves VRAM but is clearly slower.'));
+  secTitle(grid3, ezT('Vision (mmproj; set the vision encoder model)'));
+  llField(ezT('Image max tokens image_max_tokens'), 'image_max_tokens', _LL_DEFAULTS.image_max_tokens, ezT('With vision (mmproj), the maximum number of tokens one image is split into - the "image token cap".\nDefault -1 = unlimited (use the mmproj bundled setting); lower values (e.g. 512/256) save VRAM and speed up vision but lose detail.\nNote: below 1024 the Qwen-VL family makes llama.cpp warn "require at minimum 1024 image tokens" and fine-grained grounding gets worse.\nTakes effect only when mmproj is set.'));
+  llField(ezT('Image min tokens image_min_tokens'), 'image_min_tokens', _LL_DEFAULTS.image_min_tokens, ezT('With vision (mmproj), the minimum number of tokens kept per image.\nDefault -1 = unlimited; must be ≤ image max tokens or loading fails.'));
+  llField(ezT('Vision batch cap batch_max_tokens'), 'batch_max_tokens', _LL_DEFAULTS.batch_max_tokens, ezT('Maximum tokens the vision encoder processes at once (mmproj batch cap, default 1024).\nLower it (e.g. 512 / 256) when large images report out of memory.'));
+  llChk(ezT('Vision encoding on GPU vision_use_gpu'), 'vision_use_gpu', _LL_DEFAULTS.vision_use_gpu, ezT('Whether the mmproj vision encoder runs on the GPU (default on).\nTurn off for CPU encoding: saves VRAM but vision is clearly slower; you can keep it on even with n_gpu_layers=0.'));
+  llChk(ezT('Annotate image index add_vision_id'), 'vision_add_vision_id', _LL_DEFAULTS.vision_add_vision_id, ezT('Add an index prefix like "Picture 1:" to each image in the prompt (a variable supported by Qwen-VL family templates).\nUseful to tell multiple images apart; negligible effect with a single image.'));
+  secTitle(grid3, ezT('Sampling (both modes)'));
+  llField(ezT('Max tokens'), 'max_tokens', _LL_DEFAULTS.max_tokens, ezT('Maximum number of tokens to generate (output length cap).'));
+  llField(ezT('Temperature'), 'temperature', _LL_DEFAULTS.temperature, ezT('Randomness: low (0.2-0.5) is stable, high (0.9+) diverges; llama.cpp official default 0.8.'));
+  llField('Top P', 'top_p', _LL_DEFAULTS.top_p, ezT('Nucleus sampling, official default 0.95; smaller is more conservative.'));
+  llField('Top K', 'top_k', _LL_DEFAULTS.top_k, ezT('Sample only from the K most likely candidates, 0 = off, official default 40.'));
+  llField(ezT('Min P min_p'), 'min_p', _LL_DEFAULTS.min_p, ezT('Keep a candidate only if its probability ≥ max probability × min_p, official default 0.05.'));
+  llField(ezT('Typical sampling typical_p'), 'typical_p', _LL_DEFAULTS.typical_p, ezT('Locally typical sampling: 1.0 = off (default), around 0.9 makes word choice more "typical".'));
+  llField(ezT('Repetition penalty repeat_penalty'), 'repeat_penalty', _LL_DEFAULTS.repeat_penalty, ezT('>1 suppresses repetition, official default 1.1; 1.0 = off.'));
+  llField(ezT('Penalty lookback penalty_last_n'), 'penalty_last_n', _LL_DEFAULTS.penalty_last_n, ezT('How many tokens back the repetition/presence/frequency penalties look: 64 is common;\n0 = disable penalties, -1 = the whole context.'));
+  llField(ezT('Presence penalty presence_penalty'), 'presence_penalty', _LL_DEFAULTS.presence_penalty, ezT('Once a word has appeared its probability stays lowered (encourages new topics); 0 = off.'));
+  llField(ezT('Frequency penalty frequency_penalty'), 'frequency_penalty', _LL_DEFAULTS.frequency_penalty, ezT('Lowers probability in proportion to occurrence count (gentler than presence penalty); 0 = off.'));
+  llField(ezT('Seed'), 'seed', _LL_DEFAULTS.seed, ezT('0 or -1 = random each time; any other value = fixed result (reproducible).'));
+  const llStop = llField('stop', 'stop', _LL_DEFAULTS.stop, ezT('Stop words: generation stops at these strings. Separate multiple with commas; blank = none.')); llStop.placeholder = ezT('Separate multiple with commas');
   pane.appendChild(grid3);
 
   // ----  路径设置 ----
   const grid4 = el('div', 'eph-settings-grid');
   grid4._paths = { clipRoot: clipRootIn, llmModelRoot: llmModelRootIn, mmprojRoot: mmprojRootIn };
-  grid4.appendChild(mkPathRow('clip 模型路径', clipRootIn));
-  grid4.appendChild(mkPathRow('LLM 文本编码模型路径', llmModelRootIn));
-  grid4.appendChild(mkPathRow('mmproj 视觉编码模型路径', mmprojRootIn));
+  grid4.appendChild(mkPathRow(ezT('clip model path'), clipRootIn));
+  grid4.appendChild(mkPathRow(ezT('LLM text encoder model path'), llmModelRootIn));
+  grid4.appendChild(mkPathRow(ezT('mmproj vision encoder model path'), mmprojRootIn));
   pane.appendChild(grid4);
 
-  const navItems = [['general', '调用设置', grid0], ['rules', '规则设置', grid1r], ['api', 'API设置', grid1], ['textgen', 'TextGenerate设置', grid2], ['llama', 'llama设置', grid3], ['paths', '路径设置', grid4]];
+  const navItems = [['general', ezT('Call settings'), grid0], ['rules', ezT('Rule settings'), grid1r], ['api', ezT('API settings'), grid1], ['textgen', ezT('TextGenerate settings'), grid2], ['llama', ezT('llama settings'), grid3], ['paths', ezT('Path settings'), grid4]];
   const showGrid = (g) => { pane.querySelectorAll('.eph-settings-grid').forEach((x) => { x.style.display = 'none'; }); g.style.display = 'grid'; };
   const navBtns = navItems.map(([key, label, g], i) => {
     const b = el('button', 'eph-settings-nav-btn'); b.textContent = label; if (i === 0) b.classList.add('active');
@@ -3385,9 +3397,9 @@ function settingsEl() {
   showGrid(grid0);
 
   const ft = el('div', 'eph-settings-ft');
-  const resetBtn = el('button', 'eph-btn eph-btn-cancel'); resetBtn.textContent = '恢复默认';
-  const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = '取消';
-  const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = '保存';
+  const resetBtn = el('button', 'eph-btn eph-btn-cancel'); resetBtn.textContent = ezT('Restore default');
+  const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = ezT('Cancel');
+  const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = ezT('Save');
   ft.appendChild(resetBtn); ft.appendChild(cancelBtn); ft.appendChild(saveBtn);
   box.appendChild(hd); box.appendChild(body); box.appendChild(ft);
   _settingsModal.appendChild(box); document.body.appendChild(_settingsModal);
@@ -3496,8 +3508,8 @@ function saveSettings() {
     if (raw) {
       try {
         apCustom = JSON.parse(raw);
-        if (!apCustom || typeof apCustom !== 'object' || Array.isArray(apCustom)) throw new Error('必须是 JSON 对象');
-      } catch (err) { window.alert('「自定义参数」不是合法的 JSON 对象：' + (err && err.message ? err.message : err)); return; }
+        if (!apCustom || typeof apCustom !== 'object' || Array.isArray(apCustom)) throw new Error(ezT('must be a JSON object'));
+      } catch (err) { phTip(ezT('"Custom parameters" is not a valid JSON object: ') + (err && err.message ? err.message : err)); return; }
     }
   }
   const apiParams = g1ap ? {
@@ -3546,11 +3558,16 @@ function saveSettings() {
     const mmproj = (m._grid3._ll && m._grid3._ll.mmproj && m._grid3._ll.mmproj.value) || '';
     fetchApi('/prompt_helper/model_paths', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clip_path, model, mmproj }) }).catch(() => {});
   } catch (_) {}
+  // 安全：把自定义 API / llama 服务器主机登记进服务端「出站允许列表」（只有列表里的主机允许被调用）
+  try {
+    const urls = [apiUrl, (ll && ll.server) || ''].filter(Boolean);
+    if (urls.length) fetchApi('/prompt_helper/api_hosts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls }) }).catch(() => {});
+  } catch (_) {}
   m.classList.remove('active');
 }
 async function resetSettings() {
   const m = _settingsModal; if (!m) return;
-  if (!(await uiConfirm('恢复默认设置？'))) return;
+  if (!(await uiConfirm(ezT('Restore default settings?')))) return;
   m._modelIn.value = ''; m._apiUrlIn.value = ''; m._apiKeyIn.value = ''; m._proxyIn.value = '';
   m._cNameIn.value = ''; m._cProviderIn.value = ''; m._cModelIn.value = ''; m._cUrlIn.value = ''; m._cKeyIn.value = ''; m._cProxyIn.value = '';
   ['autoTextgen', 'autoApi', 'autoLlama', 'clearCache'].forEach((k) => { const cb = m._grid0 && m._grid0._auto && m._grid0._auto[k]; if (cb) { cb.checked = false; cb._upd && cb._upd(); } });
@@ -3592,7 +3609,7 @@ async function cmRefreshList() {
   catch (_) { _cmSaved = []; }
   const dd = _cardMgr && _cardMgr._dd;
   if (!dd) return;
-  dd.setItems(_cmSaved.map((x) => ({ value: x.name, label: x.name + '（' + x.count + ' 张）' })));
+  dd.setItems(_cmSaved.map((x) => ({ value: x.name, label: x.name + ezT(' (') + x.count + ezT(' cards)') })));
   if (_cmName && !_cmSaved.some((x) => x.name === _cmName)) _cmName = '';   // 被删掉/改名了：下拉框跟着清空
   dd.value = _cmName;
 }
@@ -3602,12 +3619,12 @@ function cmRenderPick() {
   const pick = m._pick; pick.innerHTML = '';
   const ids = new Set(st.cards.map((c) => c.id));
   _cmSel.forEach((id) => { if (!ids.has(id)) _cmSel.delete(id); });   // 卡片增删/换过一份之后，丢掉不存在的选中项
-  if (!st.cards.length) { const e = el('div', 'eph-cm-empty'); e.textContent = '当前没有提示词卡片。'; pick.appendChild(e); return; }
+  if (!st.cards.length) { const e = el('div', 'eph-cm-empty'); e.textContent = ezT('No prompt cards currently.'); pick.appendChild(e); return; }
   st.cards.forEach((c, i) => {
     const chip = el('button', 'eph-cm-chip' + (_cmSel.has(c.id) ? ' on' : '')); chip.type = 'button';
     const ix = el('span', 'eph-cm-idx'); ix.textContent = String(i + 1);
-    chip.appendChild(ix); chip.appendChild(document.createTextNode(c.title || '提示词'));
-    chip.title = (c.title || '') + '：' + String(c.content || '').slice(0, 90);
+    chip.appendChild(ix); chip.appendChild(document.createTextNode(c.title || ezT('Prompt')));
+    chip.title = (c.title || '') + ezT(': ') + String(c.content || '').slice(0, 90);
     chip.addEventListener('mousedown', (e) => e.preventDefault());
     chip.addEventListener('click', (e) => cmPickCard(c.id, i, e));
     pick.appendChild(chip);
@@ -3633,30 +3650,30 @@ async function cmSave() {
   const m = _cardMgr; if (!m || !m._node) return false;
   const st = stateFor(m._node);
   const name = m._nameIn.value.trim();
-  if (!name) { cmHint('请先填写保存名称。', 'err'); return false; }
-  if (!st.cards.length) { cmHint('当前没有可保存的提示词卡片。', 'err'); return false; }
+  if (!name) { cmHint(ezT('Enter a save name first.'), 'err'); return false; }
+  if (!st.cards.length) { cmHint(ezT('No prompt cards to save.'), 'err'); return false; }
   const cards = cmCardsToSave(m._node);
-  if (_cmSaved.some((x) => x.name === name) && !(await uiConfirm('已存在名为「' + name + '」的卡片，覆盖它吗？'))) { cmHint('已取消保存。'); return false; }
+  if (_cmSaved.some((x) => x.name === name) && !(await uiConfirm(ezT('A card named "') + name + ezT('" already exists. Overwrite?')))) { cmHint(ezT('Save cancelled.')); return false; }
   try {
     const r = await fetchApi(CARDS_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, cards: cards }) });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.error) { cmHint('保存失败：' + (d.error || ('HTTP ' + r.status)), 'err'); return false; }
+    if (!r.ok || d.error) { cmHint(ezT('Save failed: ') + (d.error || ('HTTP ' + r.status)), 'err'); return false; }
     _cmName = ''; _cmSig = '';   // 保存后下拉框保持未选中：再点开列表选这份预设才能真正加载
     await cmRefreshList();
-    cmHint('已保存「' + name + '」（' + cards.length + ' 张卡片）→ userdata/prompts/' + name + '.json', 'ok');
+    cmHint(ezT('Saved "') + name + ezT('" (') + cards.length + ezT(' cards) → userdata/prompts/') + name + '.json', 'ok');
     return true;
-  } catch (e) { cmHint('保存失败：' + (e && e.message ? e.message : e), 'err'); return false; }
+  } catch (e) { cmHint(ezT('Save failed: ') + (e && e.message ? e.message : e), 'err'); return false; }
 }
 async function cmLoad(name) {
   const m = _cardMgr; if (!m || !m._node || !name) return;
   try {
     const r = await fetchApi(CARDS_API + '?name=' + encodeURIComponent(name));
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.error) { cmHint('加载失败：' + (d.error || ('HTTP ' + r.status)), 'err'); return; }
+    if (!r.ok || d.error) { cmHint(ezT('Load failed: ') + (d.error || ('HTTP ' + r.status)), 'err'); return; }
     const st = stateFor(m._node);
     // 逐张补默认字段并重新给 id（同一份卡片可以在不同节点上加载，id 不跨节点复用）
     st.cards = (Array.isArray(d.cards) ? d.cards : []).map((c) => Object.assign({
-      title: '提示词', content: '', contentHTML: '', contentOptimized: '', contentOptimizedHTML: '',
+      title: ezT('Prompt'), content: '', contentHTML: '', contentOptimized: '', contentOptimizedHTML: '',
       timelineStart: '', timelineEnd: '', modelType: 'text', model: '', provider: '', apiUrl: '', indent: 0, useOptimized: false,
     }, c, { id: genId() }));
     st.editingId = null;
@@ -3665,40 +3682,40 @@ async function cmLoad(name) {
     _cmName = name; _cmSig = cmSig(m._node);
     if (m._dd) m._dd.value = name;
     cmRenderPick();
-  } catch (e) { cmHint('加载失败：' + (e && e.message ? e.message : e), 'err'); }
+  } catch (e) { cmHint(ezT('Load failed: ') + (e && e.message ? e.message : e), 'err'); }
 }
 async function cmDelete() {
   const m = _cardMgr; if (!m || !m._node) return;
-  if (!_cmName) { cmHint('请先在上面的下拉框里选择要删除的卡片。', 'err'); return; }
+  if (!_cmName) { cmHint(ezT('Select the card to delete in the dropdown above first.'), 'err'); return; }
   if (cmSig(m._node) !== _cmSig) {
-    cmHint('卡片在选中之后被编辑过，当前内容已经不是选中的「' + _cmName + '」了；要删除请重新在下拉框里选择。', 'err');
+    cmHint(ezT('The card was edited after selection, so the current content is no longer "') + _cmName + ezT('"; select it again in the dropdown to delete.'), 'err');
     return;
   }
-  if (!(await uiConfirm('删除已保存的卡片「' + _cmName + '」？（userdata/prompts 里的文件）'))) return;
+  if (!(await uiConfirm(ezT('Delete the saved card "') + _cmName + ezT('"? (file under userdata/prompts)')))) return;
   try {
     const r = await fetchApi(CARDS_API + '?name=' + encodeURIComponent(_cmName), { method: 'DELETE' });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.error) { cmHint('删除失败：' + (d.error || ('HTTP ' + r.status)), 'err'); return; }
+    if (!r.ok || d.error) { cmHint(ezT('Delete failed: ') + (d.error || ('HTTP ' + r.status)), 'err'); return; }
     const gone = _cmName; _cmName = '';
     await cmRefreshList();
-    cmHint('已删除「' + gone + '」。', 'ok');
-  } catch (e) { cmHint('删除失败：' + (e && e.message ? e.message : e), 'err'); }
+    cmHint(ezT('Deleted "') + gone + ezT('".'), 'ok');
+  } catch (e) { cmHint(ezT('Delete failed: ') + (e && e.message ? e.message : e), 'err'); }
 }
 function cardMgrEl() {
   if (_cardMgr && _cardMgr.parentNode) return _cardMgr;
   _cardMgr = el('div', 'eph-cm');
   const box = el('div', 'eph-cm-box');
   const hd = el('div', 'eph-cm-hd');
-  const t = el('b'); t.textContent = '卡片管理';
+  const t = el('b'); t.textContent = ezT('Card manager');
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
   hd.appendChild(t); hd.appendChild(close);
   const body = el('div', 'eph-cm-body');
 
   const row = el('div', 'eph-cm-row');
-  const nameIn = el('input'); nameIn.placeholder = '保存名称（如 分镜-夜景）'; nameIn.title = '保存到 userdata/prompts/<名称>.json';
-  const saveBtn = el('button', 'eph-btn'); saveBtn.textContent = '保存卡片';
+  const nameIn = el('input'); nameIn.placeholder = ezT('Save name (e.g. storyboard-night)'); nameIn.title = ezT('Saved to userdata/prompts/<name>.json');
+  const saveBtn = el('button', 'eph-btn'); saveBtn.textContent = ezT('Save cards');
   const dd = makeDropdown([]);
-  const delBtn = el('button', 'eph-btn danger'); delBtn.textContent = '删除卡片';
+  const delBtn = el('button', 'eph-btn danger'); delBtn.textContent = ezT('Delete cards');
   row.appendChild(nameIn); row.appendChild(saveBtn); row.appendChild(dd.el); row.appendChild(delBtn);
   body.appendChild(row);
   const pick = el('div', 'eph-cm-pick');
@@ -3779,9 +3796,9 @@ function allEl() {
   _allModal = el('div', 'eph-all');
   const box = el('div', 'eph-all-box');
   const hd = el('div', 'eph-all-hd');
-  const t = el('b'); t.textContent = '总体编辑';
+  const t = el('b'); t.textContent = ezT('Overall edit');
   // 全屏 / 退出全屏放在右上角（和关闭按钮同一排）
-  const fullBtn = el('button', 'eph-btn eph-all-full'); fullBtn.textContent = '全屏'; fullBtn.title = '总体编辑全屏 / 退出全屏';
+  const fullBtn = el('button', 'eph-btn eph-all-full'); fullBtn.textContent = ezT('Fullscreen'); fullBtn.title = ezT('Overall edit fullscreen / exit fullscreen');
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
   const hdRight = el('div', 'eph-all-hd-right');
   hdRight.appendChild(fullBtn); hdRight.appendChild(close);
@@ -3790,14 +3807,14 @@ function allEl() {
     e.stopPropagation();
     const m = _allModal; if (!m) return;
     m.classList.toggle('full');
-    fullBtn.textContent = m.classList.contains('full') ? '退出全屏' : '全屏';
+    fullBtn.textContent = m.classList.contains('full') ? ezT('Exit fullscreen') : ezT('Fullscreen');
     requestAnimationFrame(() => { try { moveAllTabThumb(); } catch (_) {} });   // 全屏切换后滑块宽度会滞留，重新量一次
   });
   // 默认/优化滑块
   const tabThumb = el('span', 'eph-tabs-thumb');
   const tabs = el('div', 'eph-tabs');
-  const tabDefault = el('button', 'eph-tab active'); tabDefault.textContent = '默认提示词';
-  const tabOptimized = el('button', 'eph-tab'); tabOptimized.textContent = '优化提示词';
+  const tabDefault = el('button', 'eph-tab active'); tabDefault.textContent = ezT('Default prompt');
+  const tabOptimized = el('button', 'eph-tab'); tabOptimized.textContent = ezT('Optimized prompt');
   tabs.appendChild(tabThumb); tabs.appendChild(tabDefault); tabs.appendChild(tabOptimized);
   // 工具栏（与卡片一致）
   const toolbar = el('div', 'eph-all-toolbar');
@@ -3822,8 +3839,8 @@ function allEl() {
   fontBtn.addEventListener('click', (e) => { e.stopPropagation(); fontList.classList.toggle('active'); if (fontList.classList.contains('active')) { phFixedDD(fontBtn, fontList); phLayerPush(fontList); } });
   fontIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { applyFontSizeOn(editor, fontIn.value); } });
   fontList.addEventListener('click', (e) => { if (e.target.tagName === 'LI') { applyFontSizeOn(editor, e.target.dataset.value); fontIn.value = e.target.textContent; fontList.classList.remove('active'); } });
-  const indentL = el('label'); indentL.textContent = '缩进';
-  const indentIn = el('input', 'eph-indent-input'); indentIn.value = '0'; indentIn.title = '首行缩进';
+  const indentL = el('label'); indentL.textContent = ezT('Indent');
+  const indentIn = el('input', 'eph-indent-input'); indentIn.value = '0'; indentIn.title = ezT('First-line indent');
   indentL.appendChild(indentIn); toolbar.appendChild(indentL);
   // 颜色（与卡片一致：色块下拉）
     const colorGroup = el('div', 'eph-tb-group');
@@ -3839,13 +3856,13 @@ function allEl() {
   fcBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); fcDD.classList.toggle('active'); hlDD.classList.remove('active'); if (fcDD.classList.contains('active')) phCenterPopup(fcDD); });
   // 工具（引用媒体改成每张卡片自己一个按钮，见 renderAllEditor）
   const toolsGroup = el('div', 'eph-tb-group');
-  const toolsBtn = el('button', 'eph-btn'); toolsBtn.textContent = '工具';
+  const toolsBtn = el('button', 'eph-btn'); toolsBtn.textContent = ezT('Tools');
   const toolsDD = el('div', 'eph-tools-dropdown');
   toolsGroup.appendChild(toolsBtn); toolsGroup.appendChild(toolsDD); toolbar.appendChild(toolsGroup);
-  const collapseBtn = el('button', 'eph-btn'); collapseBtn.textContent = '收起小标题'; collapseBtn.title = '折叠/展开每张卡片的小标题行';
-  collapseBtn.addEventListener('click', (e) => { e.stopPropagation(); const m = _allModal; if (m) { m.classList.toggle('collapsed'); collapseBtn.textContent = m.classList.contains('collapsed')  ?  '展开小标题'  : '收起小标题'; markBlankLines(m); } });
+  const collapseBtn = el('button', 'eph-btn'); collapseBtn.textContent = ezT('Collapse headers'); collapseBtn.title = ezT('Collapse/expand each card header row');
+  collapseBtn.addEventListener('click', (e) => { e.stopPropagation(); const m = _allModal; if (m) { m.classList.toggle('collapsed'); collapseBtn.textContent = m.classList.contains('collapsed')  ?  ezT('Expand headers')  : ezT('Collapse headers'); markBlankLines(m); } });
   toolbar.appendChild(collapseBtn);
-  const addCardBtn = el('button', 'eph-btn success'); addCardBtn.textContent = '＋ 新增卡片'; toolbar.appendChild(addCardBtn);
+  const addCardBtn = el('button', 'eph-btn success'); addCardBtn.textContent = ezT('+ Add card'); toolbar.appendChild(addCardBtn);
   const editor = el('div', 'eph-all-editor'); editor.contentEditable = 'true';
   attachMention(editor, () => ({ node: _allModal._node, card: caretCard(_allModal._node) }));
   toolbar.insertBefore(skillButton(editor), collapseBtn);
@@ -3897,7 +3914,7 @@ function allEl() {
   const ruleBar = el('div', 'eph-all-rulebar');
   const ruleDD = makeDropdown(ruleDropdownItems(_allModal && _allModal._node, false));
   ruleDD.el.classList.add('eph-rule-dd');
-  const ruleHint = el('button', 'eph-rule-hint'); ruleHint.type = 'button'; ruleHint.textContent = '提示'; ruleHint.title = '看该规范的书写规则 / 引用写法';
+  const ruleHint = el('button', 'eph-rule-hint'); ruleHint.type = 'button'; ruleHint.textContent = ezT('Hint'); ruleHint.title = ezT('View writing rules / reference syntax for this spec');
   ruleDD.addEventListener('change', (v) => {
     const nd = _allModal && _allModal._node; if (!nd) return;
     setNodeRule(nd, v);
@@ -3911,8 +3928,8 @@ function allEl() {
   });
   ruleBar.appendChild(ruleDD.el); ruleBar.appendChild(ruleHint);
   _allModal._ruleDD = ruleDD;
-  const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = '取消';
-  const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = '保存';
+  const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = ezT('Cancel');
+  const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = ezT('Save');
   ft.appendChild(ruleBar); ft.appendChild(cancelBtn); ft.appendChild(saveBtn);
   box.appendChild(hd); box.appendChild(tabs); box.appendChild(toolbar); box.appendChild(editor); box.appendChild(ft);
   _allModal.appendChild(box); document.body.appendChild(_allModal);
@@ -3928,7 +3945,7 @@ function allEl() {
   indentIn.addEventListener('change', () => { editor.querySelectorAll('.eph-all-block-body').forEach((x) => { const n = parseFloat(indentIn.value) || 0; x.style.textIndent = n ? n + 'em' : ''; }); });
   addCardBtn.addEventListener('click', () => { const nd = _allModal._node; if (nd) { addCard(nd); openAllEditor(nd); } });
   // 工具 / 插入引用下拉
-  [['查找替换', 'find'], ['全角符号转半角', 'fullToHalf'], ['半角符号转全角', 'halfToFull'], ['优化提示词 (API)', 'api'], ['优化提示词 (TextGenerate)', 'textgen'], ['优化提示词 (llama)', 'llama']].forEach(([t, id]) => { const b = el('button', 'eph-tool-item'); b.textContent = t; b.addEventListener('click', () => { if (id === 'api' || id === 'textgen' || id === 'llama') { runBatchOptimize(_allModal && _allModal._node, id); } else if (id === 'find') { openFindModal('find', _allModal && _allModal._ed); } else { runToolOn(editor, id); } toolsDD.classList.remove('active'); }); toolsDD.appendChild(b); });
+  [[ezT('Find & replace'), 'find'], [ezT('Full-width to half-width'), 'fullToHalf'], [ezT('Half-width to full-width'), 'halfToFull'], [ezT('Optimize prompt (API)'), 'api'], [ezT('Optimize prompt (TextGenerate)'), 'textgen'], [ezT('Optimize prompt (llama)'), 'llama']].forEach(([t, id]) => { const b = el('button', 'eph-tool-item'); b.textContent = t; b.addEventListener('click', () => { if (id === 'api' || id === 'textgen' || id === 'llama') { runBatchOptimize(_allModal && _allModal._node, id); } else if (id === 'find') { openFindModal('find', _allModal && _allModal._ed); } else { runToolOn(editor, id); } toolsDD.classList.remove('active'); }); toolsDD.appendChild(b); });
   toolsBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); toolsDD.classList.toggle('active'); if (toolsDD.classList.contains('active')) phFixedDD(toolsBtn, toolsDD); });
   // 点弹窗外空白自动保存关闭；卡片内部拖动到外面松开不关（只在外面点击才关）
   let _allStartInBox = false;
@@ -4064,16 +4081,16 @@ function renderAllEditor(node) {
   const m = allEl(); const ed = m._ed;
   ed.innerHTML = '';
   if (!st.cards.length) {
-    ed.appendChild(el('div', 'eph-all-empty')).textContent = '暂无提示词卡片，点上面「＋ 新增卡片」添加。';
+    ed.appendChild(el('div', 'eph-all-empty')).textContent = ezT('No prompt cards yet. Click "+ Add card" above to add one.');
     return;
   }
   if (_allTab === 'optimized') {
     // 「优化」页签 = 所有卡片合并后整体优化一次的结果（一整块，不按卡片分；分卡优化只在卡片弹窗里手动做）
     const block = el('div', 'eph-all-block');
     const rw = el('div', 'eph-all-block-hd'); rw.contentEditable = 'false';
-    const num = el('span', 'eph-all-num'); num.textContent = '合';
-    const ttl = el('span', 'eph-all-title'); ttl.textContent = '整体优化结果';
-    ttl.title = '运行期自动优化 / 总体编辑「工具→优化提示词」的结果：只合并「合」为绿的卡片的默认正文（灰卡不参与），可直接编辑';
+    const num = el('span', 'eph-all-num'); num.textContent = ezT('Merge');
+    const ttl = el('span', 'eph-all-title'); ttl.textContent = ezT('Overall optimized result');
+    ttl.title = ezT('Result of runtime auto-optimize / Overall edit "Tools → Optimize prompt": only the default bodies of cards whose merge badge is green are merged (gray cards are skipped); editable directly');
     rw.appendChild(num); rw.appendChild(ttl);
     const body = el('div', 'eph-all-block-body');
     body.innerHTML = st.overallOptimizedHTML || st.overallOptimized || '';
@@ -4087,13 +4104,13 @@ function renderAllEditor(node) {
     // 左侧小标题行：序号 / 标题(可编辑) / 时间轴 / 删除(-)
     const rw = el('div', 'eph-all-block-hd'); rw.contentEditable = 'false';
     const num = el('span', 'eph-all-num'); num.textContent = String(idx + 1);
-    const titleEl = el('span', 'eph-all-title'); titleEl.contentEditable = 'true'; titleEl.setAttribute('data-ph', '标题');
+    const titleEl = el('span', 'eph-all-title'); titleEl.contentEditable = 'true'; titleEl.setAttribute('data-ph', ezT('Title'));
     titleEl.textContent = card.title || '';
     titleEl.addEventListener('input', () => { card.title = titleEl.textContent.replace(/\u200b/g, ''); syncToConfig(node); });
-    const delEl = el('button', 'eph-all-del'); delEl.textContent = '－'; delEl.title = '删除此卡片';
+    const delEl = el('button', 'eph-all-del'); delEl.textContent = '－'; delEl.title = ezT('Delete this card');
     delEl.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); deleteCard(node, card.id); renderAllEditor(node); });
     // 每张卡片自己的「引用媒体」：插进本卡片内容里，引用状态与卡片弹窗共用（同一个 card.refTarget）
-    const refEl = el('button', 'eph-all-ref'); refEl.textContent = '引用媒体'; refEl.title = '浏览该卡片引用的生成节点素材，+/− 直接插入或移除引用';
+    const refEl = el('button', 'eph-all-ref'); refEl.textContent = ezT('Reference media'); refEl.title = ezT('Browse media from generation nodes referenced by this card; +/- inserts or removes a reference');
     refEl.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
       // 块结构被删坏时先重建，否则这里取不到正文 →「引用媒体」点了没反应（重开后块对象已换，按序重找一次）
@@ -4114,7 +4131,7 @@ function renderAllEditor(node) {
       openRefBrowser(node, body, card);
     });
     // 「合」放在小标题行、引用媒体按钮前面
-    const mergeBtnH = el('button', 'eph-merge-btn'); mergeBtnH.type = 'button'; mergeBtnH.textContent = '合'; mergeBtnH.title = '合并进「合并提示词」：绿=合并，灰=不合并';
+    const mergeBtnH = el('button', 'eph-merge-btn'); mergeBtnH.type = 'button'; mergeBtnH.textContent = ezT('Merge'); mergeBtnH.title = ezT('Merge into the merged prompt: green = merge, gray = skip');
     mergeBtnH.classList.toggle('on', !card.mergeOff);
     mergeBtnH.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); card.mergeOff = !card.mergeOff; syncToConfig(node); mergeBtnH.classList.toggle('on', !card.mergeOff); refreshUI(node); });
     rw.appendChild(num); rw.appendChild(titleEl); rw.appendChild(mergeBtnH); rw.appendChild(refEl); rw.appendChild(delEl);
@@ -4163,7 +4180,7 @@ async function runBatchOptimize(node, method) {
   // 先把编辑器里还没保存的改动写回卡片（否则合并的是旧内容）
   if (_allModal && _allModal.classList.contains('active') && _allModal._node === node) syncAllContent(node);
   const cfg = optimizeFor(node);
-  if (method === 'api' && cfg.provider !== 'Ollama' && !cfg.apiKey) { window.alert('调用「优化提示词 (API)」需要先在「设置·API设置」里填写该厂商的 API Key。'); return; }
+  if (method === 'api' && cfg.provider !== 'Ollama' && !cfg.apiKey) { phTip(ezT('Optimizing with the API requires an API Key for this provider in Settings > API settings.')); return; }
   // 源 = 每张卡**默认**页签的正文（不看卡片滑块、不取优化版），跳「合」灰卡、空的不占位，用「卡片合并分隔符号」拼成一份
   const parts = [];
   st.cards.forEach((c) => {
@@ -4171,20 +4188,20 @@ async function runBatchOptimize(node, method) {
     const s = String(c.content || plainTextOf(c.contentHTML || '') || '').trim();
     if (s) parts.push(s);
   });
-  if (!parts.length) { window.alert('当前卡片没有可优化的提示词内容。'); return; }
+  if (!parts.length) { phTip(ezT('The current cards have no prompt content to optimize.')); return; }
   const merged = parts.join(cardSeparator(node));
-  phProgShow(node, 1, '总体优化');
-  phProgTick(node, 0, '合并 ' + parts.length + ' 张卡片，单次调用…');
+  phProgShow(node, 1, ezT('Overall optimize'));
+  phProgTick(node, 0, ezT('Merging ') + parts.length + ezT(' cards, single call…'));
   const payload = { method, prompt: merged, provider: cfg.provider || '', model: cfg.model || '', apiUrl: cfg.apiUrl || '', apiKey: cfg.apiKey || '', proxy: cfg.proxy || '', image: '', textgen: cfg.textgen || {}, llama: cfg.llama || {}, apiParams: cfg.apiParams || {}, clearCache: !!cfg.clearCache };
   const imgs = await cardImageDataUrls(node, null);
   if (imgs.length) payload.images = imgs;
   const medias = cardMediaRefs(node, null);
   if (medias.length) payload.media = medias;
-  if (imgs.length || medias.length) phProgTick(node, 0, '合并 ' + parts.length + ' 张卡片，已附带 ' + (imgs.length ? imgs.length + ' 张图' : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' 个视频/音频' : '') + '…');
+  if (imgs.length || medias.length) phProgTick(node, 0, ezT('Merging ') + parts.length + ezT(' cards, attached ') + (imgs.length ? imgs.length + ' ' + ezT('images') : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' ' + ezT('video/audio') : '') + '…');
   try {
     const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.error) { phProgErr(node, d.error || ('HTTP ' + r.status)); window.alert('优化失败：'  + (d.error || ('HTTP ' + r.status))); return; }
+    if (!r.ok || d.error) { phProgErr(node, d.error || ('HTTP ' + r.status)); phTip(ezT('Optimization failed: ')  + (d.error || ('HTTP ' + r.status))); return; }
     const out = d.text || '';
     // 结果 = 「总体编辑」里那份整体优化（不写进每张卡片）
     st.overallOptimized = out;
@@ -4193,7 +4210,7 @@ async function runBatchOptimize(node, method) {
     phProgDone(node);
     syncToConfig(node); updatePorts(node); refreshUI(node);
     _allTab = 'optimized'; if (_allModal && _allModal.classList.contains('active')) switchAllTab('optimized');
-  } catch (e) { phProgErr(node, (e && e.message  ?  e.message : e)); window.alert('优化请求失败：'  + (e && e.message  ?  e.message : e)); }
+  } catch (e) { phProgErr(node, (e && e.message  ?  e.message : e)); phTip(ezT('Optimization request failed: ')  + (e && e.message  ?  e.message : e)); }
 }
 
 // ===== 面板 =====
@@ -4204,10 +4221,10 @@ function buildRoot(node) {
   shell.appendChild(root);
   node._ezRoot = shell;
   const hd = el('div', 'eph-hd');
-  const allBtn = el('button', 'eph-btn primary'); allBtn.textContent = '总体编辑';
-  const settingsBtn = el('button', 'eph-btn'); settingsBtn.textContent = '设置';
-  const cmBtn = el('button', 'eph-btn'); cmBtn.textContent = '卡片管理'; cmBtn.title = '保存 / 加载提示词卡片（userdata/prompts）';
-  const addBtn = el('button', 'eph-btn'); addBtn.textContent = '＋ 新增提示词卡片';
+  const allBtn = el('button', 'eph-btn primary'); allBtn.textContent = ezT('Overall edit');
+  const settingsBtn = el('button', 'eph-btn'); settingsBtn.textContent = ezT('Settings');
+  const cmBtn = el('button', 'eph-btn'); cmBtn.textContent = ezT('Card manager'); cmBtn.title = ezT('Save / load prompt cards (userdata/prompts)');
+  const addBtn = el('button', 'eph-btn'); addBtn.textContent = ezT('+ Add prompt card');
   const dockBtn = el('button', 'eph-btn'); dockBtn.style.flex = '0 0 auto';
   node._ezDockBtn = dockBtn; phDockSyncBtn(node);   // 弹窗 ⇄ 平铺（状态持久化在节点 config 的 ui.dock）
   hd.appendChild(allBtn); hd.appendChild(dockBtn); hd.appendChild(settingsBtn); hd.appendChild(cmBtn); hd.appendChild(addBtn);
@@ -4383,6 +4400,7 @@ function installSocketLabels(node) {
         pumpFrames();
     };
     scheduleOnRedraw(update);
+    onLocaleChange(() => { try { refreshUI(node); } catch (_) {} update(); });   // 语言切换即时重画
     scheduleOnRedraw(phDockTrack);   // 平铺面板跟着画布平移/缩放
     schedule();
   }
@@ -4404,7 +4422,7 @@ function nextPhWidgetType() { _phWidgetSeq += 1; return 'eph-config__' + _phWidg
 function setupNode(node) {
   if (!node || node._ezPhSetup) return;
   try {
-    if (typeof node.addDOMWidget !== 'function') { console.warn('[PromptHelper] 该前端不支持 addDOMWidget，面板无法挂载（节点 #' + node.id + '）'); return; }
+    if (typeof node.addDOMWidget !== 'function') { console.warn('[PromptHelper] this frontend does not support addDOMWidget, panel cannot mount (node #' + node.id + ')'); return; }
     node._ezPhSetup = true;
     loadFromConfig(node);
     const root = buildRoot(node);
@@ -4424,7 +4442,7 @@ function setupNode(node) {
 }
 function hookPrototype(nt) {
   if (!nt || nt.__ezPhHooked) return; nt.__ezPhHooked = true;
-  const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; console.log('[PromptHelper] 钩子 nodeCreated #' + this.id); setupNode(this); return r; };
+  const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; console.log('[PromptHelper] hook nodeCreated #' + this.id); setupNode(this); return r; };
   const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); refreshUI(this); return r; };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;

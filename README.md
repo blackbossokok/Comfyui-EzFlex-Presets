@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.11 稳定版）
+# Comfyui-EzFlex-Presets（V1.2.0 稳定版）
 
 用于comfyui的灵活组合插件，使用ai构建完成，目前插件还在更新完善中。
 
@@ -21,6 +21,7 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV116tz6xE5V)
 
 ## 版本更新内容：
 
+- V1.2.0：全面优化安全相关问题。
 - V1.11：提示词助手功能全面优化，修复bug。
 - V1.1：插件节点全面完善、性能、提示词助手（`EzFlex-PromptHelper`）功能全面增强、修复适配bug。
 - V1.05：提示词助手新增「引用媒体」：实时读取画布上生成节点（MiniMax H3 / Wan / LTX / 音频模型等）的媒体输入端口，按端口算出「图片N / 视频N / 音频N」编号与编译标签（`<Picture 1>` 等）；面板按生成节点分块预览素材（缩略图 / 名字 / 大小 / 格式 / 播放），右上角 +/− 一键插入或移除 @引用；多个生成节点各自独立编号，没接入生成节点的素材在 @ 菜单里标黄且不编号。
@@ -212,6 +213,17 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 - 支持扩展名：图片 .png .jpg .jpeg .webp .gif .bmp .tif .tiff｜视频 .mp4 .webm .mov .mkv .avi .m4v｜音频 .mp3 .wav .flac .ogg .aac .m4a .opus .wma｜3D .obj .glb .gltf .fbx .stl .ply .3ds .dae .blend｜文本/其它 → STRING（文本给文件内容、其它给路径）。
 - 顶栏「加载输出」：一键生成一个 EzFlex-MediaOut 并连好线。
 
+> ⚠️ **根目录（可浏览根）设置请谨慎——它决定"局域网内别人能看到你哪些文件"**
+>
+> 素材浏览器默认只能浏览 ComfyUI 自己的 `input` / `output`。要让它进别的目录，得在工具栏输入路径 → 点「保存根目录」，把该目录**显式登记为一个根**。登记之后：
+>
+> - **读取不限本机**：任何能访问你这个 ComfyUI 端口的人（同局域网、内网穿透、反向代理暴露时）都能列出并下载**该目录及其所有子目录**里的文件。「登记 / 删除」这两个动作只允许本机，但「读」不限本机 —— 这才是风险点。
+> - **只登记具体素材目录**：不要登记盘符、用户主目录、项目根这类宽目录。插件会直接拒绝把**整盘**（`C:\`、`D:\`、`/`）登记为根，历史遗留的整盘条目也会被自动忽略并清除。
+> - **别把 ComfyUI 暴露出去**：`--listen 0.0.0.0`、内网穿透、公网反代都会让这些根对所有人开放；默认的 `127.0.0.1`（localhost）只有本机能访问，才是安全的用法。
+> - **用完就删**：下拉里选中那个根 → 点「删除根目录」。内置的 `input` / `output` 删不掉（选中时删除按钮会变灰）。
+> - **嵌套要一条条删**：如果同时登记了 `D:\素材` 和 `D:\素材\视频`，下拉里就是两条，删一条不会连带删另一条。
+> - 想彻底不碰这套机制也行：只用 `input` / `output` 里的素材，把文件放进这两个目录即可。
+
 ### 素材输出（`EzFlex-MediaOut`）：
 
 - 输入：单一输入（专属类型 `EZFLEX_MEDIA_CARD`），接 `EzFlex-MediaLoader` 的某张卡片端口。
@@ -222,6 +234,29 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 - 开关：可单开/单关；拆分模式下禁用保留端口并输出 `None`（重启用不用重连），其余模式禁用即从分组剔除。**运行时**（排队提交前）会把「已禁用但仍连着」的那条输入从**提交的 prompt** 里摘掉 —— 下游按「没连接」处理（可选输入用它自己的默认值，必需输入会被校验拦下并指名报错），**画布连线与保存的工作流都不动**；从 HTTP API 直接排队不经前端，仍是 `None`。
 - 翻页：翻页功能。
 
+
+## 安全（Security）
+
+本插件所有**前端可达**的文件与网络入口都做了收口（对应 ComfyUI 注册表评审意见）：
+
+- **路径包含性**：任何来自前端的路径都先落到「服务端自己的根目录」里再使用（realpath + commonpath）——根 = ComfyUI 的 input / output / temp / models ＋ 用户在「设置·路径设置」里登记的扫描目录。绝对路径、`..`、符号链接、UNC、兄弟目录前缀（`root2`）都逃不出去。
+- **根外媒体转存**：视频/3D 预览遇到根外文件时，后端**复制/导出进临时目录**再服务，所以「任意来源也能预览」，但不放开任意读。
+- **素材浏览器限根**：MediaLoader 的文件浏览器只在「可浏览根目录」内导航（默认只有 `input` / `output`，越界自动回落到第一个根）；新增/删除根目录需**本机且同源**操作（浏览器工具栏「保存根目录 / 删除根目录」，或 `POST /media_loader/roots`），并且**拒绝整盘**（`C:\`、`/`）。注意：**根内的"读"不限本机** —— 根登记得越宽，暴露面越大，详见素材加载器一节的警告。
+- **本机限定**：拉起系统文件管理器（`/preview_any/open`、`/media_loader/open`）、弹原生对话框（`pick_folder` / `pick_skill`）、改服务端状态（扫描目录 / 模型路径 / 自定义厂商 / 提示词卡片 / 可浏览根 / 出站主机登记）**只允许 127.0.0.1 / ::1 客户端**，其余一律 403。
+- **出站允许列表（防 SSRF）**：`/prompt_helper/optimize` 只允许访问「内置厂商域名 ＋ 本机登记过的主机」。自定义 API / 本机 llama.cpp·Ollama 端点在「设置·API设置」保存时会自动登记；未登记的地址直接报错，不会静默请求。
+- 测试：`_dev_tests/route_security_test.py`（路径逃逸 / 根外转存 / 本机限定 / 出站白名单 / 路由接线）。
+
+> 说明：从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是`None`值语义；前端排队时才会按「未连接」提交（见 README 素材输出一节）。
+
+## 多语言 / Localization
+
+界面文案的**源串是英文**，中文放在两套字典里；默认跟随 ComfyUI 语言，也可以在 MainControl 面板右上角一键切换（本机记住，存 `localStorage: ezflex.locale`）。
+
+- **节点 schema**（节点名 / 描述 / tooltip / 输入输出说明）：走 ComfyUI 官方 i18n —— `locales/zh/nodeDefs.json`（`nodeDefs.<Class>.display_name / .description / .inputs.<name>.tooltip` …），由 `GET /i18n` 提供给前端；因此 `pyproject.toml` 声明 `requires-comfyui = ">=0.3.13"`。
+- **内嵌面板 DOM**（面板里的按钮 / 标签 / 提示 / 弹窗）：`web/ezflex_i18n.js` 的 `ezT(key)` ＋ `EZ_ZH` 字典，key 就是英文原文，切换语言即时生效。
+- **加一种语言**：加 `locales/<lang>/nodeDefs.json`，并在 `ezflex_i18n.js` 里加一份 `EZ_<LANG>` 字典、在 `ezLocale()` 里登记。
+- 协议 / 数据串（端口类型、config JSON 键、预设 id、媒体编号 token）不翻译。
+- 测试：`_dev_tests/i18n_test.py`（schema 无中文 / zh 覆盖 11 个节点 / 代码里的 `ezT` 词条与字典一一对应）。
 
 ## 目录结构
 
@@ -235,10 +270,12 @@ Comfyui-EzFlex-Presets/
 │                        #   EzFlex-MainControl.json / EzFlex-ParamPresetControl.json
 │                        # 说明：这些由服务器预设路由运行期生成；你机器上若还有 EzFlex-PreviewAny.json 等，
 │                        #   属本地运行产生，不是插件自带/固定的文件。
+├── locales/zh/nodeDefs.json  # 官方 i18n：节点名 / 描述 / tooltip 中文
 └── web/
     ├── modelscombo_node.js  # ModelsCombo 内嵌控件（addDOMWidget）
     ├── freelatent_node.js   # FreeLatent 内嵌 canvas 分辨率选择器
     ├── ezflex_service.js    # 共享：节点注册表 / 分组匹配 / node.mode / 预设库 API / 命名弹窗
+    ├── ezflex_i18n.js       # 面板 i18n：ezT(key) + 中文词典（英文是源串）
     ├── node_switch_group.js # NodeSwitchGroup 面板
     ├── node_switch_master.js# NodeSwitchMaster 面板
     ├── main_control.js      # MainControl 面板

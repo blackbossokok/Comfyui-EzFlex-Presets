@@ -62,7 +62,7 @@ import comfy.sd
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.11"
+__version__ = "1.2.0"
 
 WEB_DIRECTORY = "./web"
 
@@ -148,6 +148,142 @@ async def _preview_handler(request):
         if os.path.isfile(cand):
             return _web.FileResponse(cand, headers={"Cache-Control": "no-store"})
     return _web.Response(status=404, text="no preview")
+
+
+# ===== 安全收口（评审要求）：路径包含性 / 本机限定 / 出站主机允许列表 =====
+# 原则：前端能碰到的路径先落到「服务端自己的根目录」里（realpath + commonpath）；落不进去的
+# 要么转存进临时目录再服务，要么直接拒绝。拉起本机程序 / 弹本机对话框 / 改允许列表：只认本机客户端。
+def _ez_real(p):
+    """规范化路径；空串一律返回 ''（注意：os.path.abspath('') 会得到进程 CWD，不能当路径用）。"""
+    try:
+        s = str(p).strip()
+        return os.path.realpath(os.path.abspath(s)) if s else ""
+    except Exception:
+        return ""
+
+
+def _ez_plugin_scan_dirs():
+    """用户在「设置·路径设置」里登记的扫描目录（服务端自己的状态，不是请求参数）。"""
+    out = []
+    try:
+        fn = _ph_scan_paths_file()
+        if fn and os.path.isfile(fn):
+            with open(fn, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                out.extend([x for x in data if isinstance(x, str)])
+            elif isinstance(data, dict):
+                for k in ("scan", "models", "dirs", "paths"):
+                    v = data.get(k)
+                    if isinstance(v, list):
+                        out.extend([x for x in v if isinstance(x, str)])
+    except Exception:
+        pass
+    return out
+
+
+def _ez_roots():
+    """允许前端读写的根目录 = ComfyUI 的 input/output/temp/models + 用户登记过的扫描目录。"""
+    out = []
+    for fn in ("get_input_directory", "get_output_directory", "get_temp_directory"):
+        try:
+            f = getattr(folder_paths, fn, None)
+            if callable(f):
+                v = f()
+                if v:
+                    out.append(v)
+        except Exception:
+            pass
+    try:
+        md = getattr(folder_paths, "models_dir", None)
+        if md:
+            out.append(md)
+    except Exception:
+        pass
+    try:
+        out.extend(_ph_media_input_dirs())
+    except Exception:
+        pass
+    try:
+        out.extend(_ez_plugin_scan_dirs())
+    except Exception:
+        pass
+    roots, seen = [], set()
+    for p in out:
+        r = _ez_real(p)
+        if r and r not in seen:
+            seen.add(r)
+            roots.append(r)
+    return roots
+
+
+def _ez_inside(path, roots=None):
+    """realpath + commonpath：只有落在某个根目录内才返回规范路径，否则返回 ''。"""
+    p = _ez_real(path)
+    if not p:
+        return ""
+    for r in (roots if roots is not None else _ez_roots()):
+        rr = _ez_real(r)
+        if not rr:
+            continue
+        try:
+            if p == rr or os.path.commonpath([p, rr]) == rr:
+                return p
+        except Exception:
+            continue
+    return ""
+
+
+def _ez_adopt_to_temp(path):
+    """根外文件：复制一份进 ComfyUI 临时目录再服务 —— 保住「任意来源也能预览」，但不放开任意读。"""
+    try:
+        import shutil
+        import hashlib
+        if not path or not os.path.isfile(path):
+            return ""
+        tmp_root = _ez_real(folder_paths.get_temp_directory())
+        if not tmp_root:
+            return ""
+        src = _ez_real(path)
+        ext = os.path.splitext(src)[1].lower()
+        dest = os.path.join(tmp_root, "ezflex_serve_" + hashlib.sha1(src.encode("utf-8", "replace")).hexdigest()[:16] + ext)
+        if not os.path.isfile(dest) or os.path.getsize(dest) != os.path.getsize(src):
+            shutil.copy2(src, dest)
+        return dest
+    except Exception:
+        return ""
+
+
+def _ez_local(req):
+    """敏感动作（拉起系统程序 / 弹本机对话框 / 改服务端允许列表）只允许本机客户端。
+    另外校验来源头：任意网页也能从浏览器打到 localhost，所以带 Origin/Referer 时必须与 Host 同源。"""
+    try:
+        host = str(getattr(req, "remote", "") or "").strip()
+    except Exception:
+        host = ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        return False
+    # Host 也必须是回环名：挡 DNS rebinding（恶意域名解析到 127.0.0.1 时，浏览器给的 Host 是那个域名）
+    try:
+        raw_host = str(req.headers.get("Host") or "").strip().lower()
+    except Exception:
+        raw_host = ""
+    if raw_host.startswith("["):
+        req_host = raw_host[1:raw_host.find("]")] if "]" in raw_host else raw_host
+    else:
+        req_host = raw_host.split(":", 1)[0]
+    if req_host and req_host not in ("127.0.0.1", "localhost", "::1"):
+        return False
+    try:
+        origin = str(req.headers.get("Origin") or req.headers.get("Referer") or "")
+    except Exception:
+        origin = ""
+    if origin and origin.strip().lower() != "null":
+        ref = origin.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].strip().lower()
+        req_host = str(req.headers.get("Host") or "").split(":", 1)[0].strip().lower()
+        if ref and req_host and ref != req_host:
+            return False
+    return True
 
 
 try:
@@ -512,13 +648,13 @@ def parse_config(config):
         try:
             data = json.loads(config)
         except json.JSONDecodeError as e:
-            raise ValueError(f"config 不是合法的 JSON：{e}") from e
+            raise ValueError(f"config is not valid JSON: {e}") from e
     else:
         data = config
     if isinstance(data, dict):
         data = data.get("loaders", [])
     if not isinstance(data, list):
-        raise ValueError("config 必须是加载器数组，或包含 loaders 数组的对象")
+        raise ValueError("config must be a list of loaders, or an object with a loaders list")
 
     loaders = []
     for i, item in enumerate(data):
@@ -526,10 +662,10 @@ def parse_config(config):
             continue
         ltype = item.get("type")
         if ltype not in LOADER_FOLDERS:
-            raise ValueError(f"未知加载器类型：{ltype!r}（可选：{', '.join(LOADER_FOLDERS)}）")
+            raise ValueError(f"unknown loader type: {ltype!r} (expected one of: {', '.join(LOADER_FOLDERS)})")
         extra = item.get("extra") or {}
         if not isinstance(extra, dict):
-            raise ValueError(f"加载器 {ltype!r} 的 extra 必须是对象")
+            raise ValueError(f"loader {ltype!r} extra must be an object")
         loaders.append({
             "id": item.get("id", f"idx{i}"),
             "type": ltype,
@@ -544,7 +680,7 @@ def parse_config(config):
 def device_options(extra):
     device = extra.get("device", "default")
     if device not in DEVICES:
-        raise ValueError(f"不支持的 device：{device!r}（可选：{', '.join(DEVICES)}）")
+        raise ValueError(f"unsupported device: {device!r} (expected one of: {', '.join(DEVICES)})")
     if device == "default":
         return {}
     dev = torch.device(device)
@@ -557,7 +693,7 @@ def device_options(extra):
 def dtype_options(extra, allowed=WEIGHT_DTYPES):
     weight_dtype = extra.get("weight_dtype", "default")
     if weight_dtype not in allowed:
-        raise ValueError(f"不支持的 weight_dtype：{weight_dtype!r}（可选：{', '.join(allowed)}）")
+        raise ValueError(f"unsupported weight_dtype: {weight_dtype!r} (expected one of: {', '.join(allowed)})")
     dtype = allowed[weight_dtype]
     opts = {}
     if dtype is not None:
@@ -593,7 +729,7 @@ def load_clip(loader):
     path = folder_paths.get_full_path_or_raise("text_encoders", loader["file"])
     clip_type_name = loader["extra"].get("type", "stable_diffusion")
     if clip_type_name not in CLIP_TYPES:
-        raise ValueError(f"不支持的 CLIP type：{clip_type_name!r}（可选：{', '.join(CLIP_TYPES)}）")
+        raise ValueError(f"unsupported CLIP type: {clip_type_name!r} (expected one of: {', '.join(CLIP_TYPES)})")
     clip_type = getattr(comfy.sd.CLIPType, clip_type_name.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
     return comfy.sd.load_clip(
         ckpt_paths=[path],
@@ -609,7 +745,7 @@ def load_vae(loader):
     extra = loader["extra"]
     device = extra.get("device", "default")
     if device not in DEVICES:
-        raise ValueError(f"不支持的 device：{device!r}（可选：{', '.join(DEVICES)}）")
+        raise ValueError(f"unsupported device: {device!r} (expected one of: {', '.join(DEVICES)})")
     vae_device = None if device == "default" else torch.device(device)
     dtype = dtype_options(extra, allowed=dict((k, v) for k, v in WEIGHT_DTYPES.items() if k in VAE_DTYPES)).get("dtype")
     vae = comfy.sd.VAE(sd=sd, metadata=metadata, device=vae_device, dtype=dtype)
@@ -625,7 +761,7 @@ class ModelsComboLoader:
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "[]",
-                    "tooltip": "从「模型组合配置器」页面复制的 JSON 配置（加载器数组）。",
+                    "tooltip": "JSON config copied from the Models Combo panel (loader array).",
                 }),
             },
         }
@@ -638,7 +774,7 @@ class ModelsComboLoader:
     )
     FUNCTION = "load_combo"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "模型组合加载器"
+    DESCRIPTION = "Models Combo Loader"
 
     def load_combo(self, config, **kwargs):
         loaders = parse_config(config)
@@ -650,8 +786,8 @@ class ModelsComboLoader:
         vae_count = sum(1 for l in mains if l["type"] in ("checkpoint", "vae"))
         if max(model_count, clip_count, vae_count) > MAX_PORTS_PER_TYPE:
             raise ValueError(
-                f"端口数超出上限：每种类型最多 {MAX_PORTS_PER_TYPE} 个 "
-                f"（当前 models={model_count}, clips={clip_count}, vaes={vae_count}），请拆分配置。"
+                f"too many ports: at most {MAX_PORTS_PER_TYPE} per type "
+                f"(currently models={model_count}, clips={clip_count}, vaes={vae_count}); split the config."
             )
 
         by_id = {}
@@ -790,25 +926,25 @@ class FreeLatentNode(io.ComfyNode):
             node_id="EzFlex-FreeLatent",
             display_name="EzFlex-FreeLatent",
             category="EzFlex",
-            description="分辨率/Latent 选择器",
+            description="Resolution / Latent Selector",
             inputs=[
                 io.String.Input("config", socketless=True, default="{}",
-                                tooltip="「分辨率选择器」面板生成的配置 JSON（宽度/高度/批次/算法/比例等）。"),
+                                tooltip="Config JSON generated by the resolution panel (width / height / batch / algorithm / ratio)."),
                 io.Int.Input("width", display_name="Width", optional=True, default=0,
                              min=0, max=32768, step=8, force_input=True,
-                             tooltip="外部宽度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。"),
+                             tooltip="External width: >0 overrides the panel width (0 / empty = use the panel value)."),
                 io.Int.Input("height", display_name="Height", optional=True, default=0,
                              min=0, max=32768, step=8, force_input=True,
-                             tooltip="外部高度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。"),
+                             tooltip="External height: >0 overrides the panel height (0 / empty = use the panel value)."),
                 io.Int.Input("batch_size", display_name="Batch", optional=True, default=0,
                              min=0, max=4096, force_input=True,
-                             tooltip="外部批次：>0 时覆盖面板批次（不填/为 0 时用面板值）。"),
+                             tooltip="External batch: >0 overrides the panel batch (0 / empty = use the panel value)."),
             ],
             outputs=[
-                io.Latent.Output("Latent", tooltip="空 latent (batch,4,height/8,width/8)"),
-                io.Int.Output("Width", tooltip="像素宽度"),
-                io.Int.Output("Height", tooltip="像素高度"),
-                io.Int.Output("Batch", tooltip="批次数量"),
+                io.Latent.Output("Latent", tooltip="Empty latent (batch, 4, height/8, width/8)"),
+                io.Int.Output("Width", tooltip="Width in pixels"),
+                io.Int.Output("Height", tooltip="Height in pixels"),
+                io.Int.Output("Batch", tooltip="Batch size"),
             ],
         )
 
@@ -828,8 +964,8 @@ class FreeLatentNode(io.ComfyNode):
         w, h = _fl_round_step(w, mult), _fl_round_step(h, mult)
         if (w % 8) != 0 or (h % 8) != 0:
             raise ValueError(
-                f"[EzFlex-FreeLatent] 对齐分辨率（align={mult}）计算出的尺寸 {w}x{h} 不是 8 的倍数，"
-                f"latent 尺寸需能被 8 整除（latent = 像素/8）。请把「对齐」调成 8 的倍数，或调整宽高。"
+                f"[EzFlex-FreeLatent] the aligned size {w}x{h} (align={mult}) is not a multiple of 8; "
+                f"latent dimensions must be divisible by 8 (latent = pixels / 8). Set align to a multiple of 8, or change the width/height."
             )
         batch = max(1, int(batch))
         latent = torch.zeros([batch, 4, h // 8, w // 8], dtype=torch.float32)
@@ -857,14 +993,14 @@ class NodeSwitchGroupNode:
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "「分组预设」面板生成的配置 JSON（开关列表/匹配规则/当前预设）。",
+            "Config JSON produced by the Node Switch Group panel (switch list / match rules / current preset).",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "节点开关组"
+    DESCRIPTION = "Node Switch Group"
 
     def run(self, config="{}", **kwargs):
         return ()
@@ -877,14 +1013,14 @@ class NodeSwitchMasterNode:
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "「节点控制总预设」面板生成的配置 JSON（当前总预设名）。",
+            "Config JSON produced by the Node Switch Master panel (current master preset name).",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "节点总控制"
+    DESCRIPTION = "Node Switch Master"
 
     def run(self, config="{}", **kwargs):
         return ()
@@ -898,14 +1034,14 @@ class MainControlNode:
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "「总控制」面板生成的配置 JSON（当前总预设名）。",
+            "Config JSON produced by the Main Control panel (current master preset name).",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "总控制节点"
+    DESCRIPTION = "Main Control"
 
     def run(self, config="{}", **kwargs):
         return ()
@@ -919,14 +1055,14 @@ class ParamPresetControlNode:
     @classmethod
     def INPUT_TYPES(s):
         return _control_input_types(
-            "「参数预设控制」面板生成的配置 JSON（参数组列表 + 当前预设名）。",
+            "Config JSON produced by the Param Preset Control panel (parameter group list + current preset name).",
         )
 
     RETURN_TYPES = ()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "参数预设控制节点"
+    DESCRIPTION = "Param Preset Control"
 
     def run(self, config="{}", **kwargs):
         groups = parse_param_groups(config)
@@ -948,12 +1084,12 @@ class ParamPresetOutputNode:
         return {
             "required": {
                 "group": ("EZFLEX_PARAM_GROUP", {
-                    "tooltip": "来自 EzFlex-ParamPresetControl 的某个参数组端口。",
+                    "tooltip": "A parameter-group output from EzFlex-ParamPresetControl.",
                 }),
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "{}",
-                    "tooltip": "「参数预设输出」面板生成的配置 JSON（局部启用/禁用参数 id 集合）。",
+                    "tooltip": "Config JSON generated by the Param Preset Output panel (ids of disabled parameters).",
                 }),
             },
         }
@@ -962,7 +1098,7 @@ class ParamPresetOutputNode:
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "参数输出控制节点"
+    DESCRIPTION = "Param Preset Output"
 
     def run(self, group=None, config="{}", **kwargs):
         group = group or {}
@@ -1055,14 +1191,14 @@ class PreviewAnyNode:
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "{\"save\":false,\"savePath\":\"\"}",
-                    "tooltip": "「任意预览」配置（是否存档 + 存档相对目录）。",
+                    "tooltip": "Preview Any settings (save to disk + relative save folder).",
                 }),
             },
             "optional": {},
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
         for i in range(1, _PREVIEW_MAX + 1):
-            inputs["optional"][f"input_{i}"] = (_ANY, {"forceInput": True, "tooltip": f"任意输入 {i}。"})
+            inputs["optional"][f"input_{i}"] = (_ANY, {"forceInput": True, "tooltip": f"Any input {i}."})
         return inputs
 
     RETURN_TYPES = ()
@@ -1070,7 +1206,7 @@ class PreviewAnyNode:
     OUTPUT_NODE = True
     FUNCTION = "preview"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "任意预览"
+    DESCRIPTION = "Preview Any"
 
     def preview(self, config="{}", unique_id=None, extra_pnginfo=None, **kwargs):
         cfg = self._parse_config(config)
@@ -3003,9 +3139,10 @@ class PreviewAnyNode:
         """返回 3D 模型可访问 URL。优先用 path-based URL（/preview_any/fs/<abs>）以便外部贴图/缓冲的相对路径正确解析，否则 save_to 导出。"""
         try:
             path = getattr(value, "path", None) or getattr(value, "file", None) or _file3d_source(value)
-            if isinstance(path, str) and path and os.path.isfile(path):
+            safe_path = _ez_inside(path) if isinstance(path, str) and path else ""   # 只给允许目录内的模型 path-URL
+            if safe_path and os.path.isfile(safe_path):
                 from urllib.parse import quote
-                abs_p = os.path.abspath(path).replace("\\", "/")
+                abs_p = safe_path.replace("\\", "/")
                 return "/preview_any/fs/" + quote(abs_p, safe="/")
             if not hasattr(value, "save_to"):
                 return None
@@ -3625,9 +3762,7 @@ except Exception:
 async def _preview_any_folders(req):
     base = PreviewAnyNode._output_dir()
     rel = (req.query.get("path") or "").strip()
-    full = os.path.normpath(os.path.join(base, rel))
-    if not full.startswith(os.path.normpath(base)):
-        full = base
+    full = _ez_inside(os.path.join(base, rel), [_ez_real(base)]) or base
     if os.path.isfile(full):
         full = os.path.dirname(full)
     try:
@@ -3644,6 +3779,8 @@ async def _preview_any_folders(req):
 
 
 async def _preview_any_open(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         path = str(data.get("path") or "").strip()
@@ -3664,7 +3801,9 @@ async def _preview_any_open(req):
 
 
 async def _preview_any_pick_folder(req):
-    """弹 Windows 原生“选择文件夹”对话框，默认 ComfyUI 输出目录。"""
+    """弹 Windows 原生“选择文件夹”对话框，默认 ComfyUI 输出目录。仅本机客户端。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     base = PreviewAnyNode._output_dir()
     try:
         import tkinter as tk
@@ -3682,19 +3821,25 @@ async def _preview_any_pick_folder(req):
 
 
 async def _preview_any_serve_video(req):
-    """流式返回本地视频文件（带 Range 支持，可拖动进度/有声）。仅限本地路径。"""
+    """流式返回媒体文件（Range 支持）。只服务「允许目录」内的文件；根外文件仅「本机预览」才复制进临时目录
+    再服务 —— 否则远端能借这条路由把任意文件当视频读走。"""
     path = req.query.get("path", "").strip()
-    if not path or not os.path.isfile(path):
+    src = _ez_inside(path)
+    if not src:
+        if not _ez_local(req):
+            return _web.json_response({"error": "out of allowed roots"}, status=403)
+        src = _ez_adopt_to_temp(path)
+    if not src or not os.path.isfile(src):
         return _web.json_response({"error": "not found"}, status=404)
-    return _web.FileResponse(os.path.abspath(path))
+    return _web.FileResponse(src)
 
 
 async def _preview_any_static(req):
     """serve 插件 web/ 目录（供前端本地导入 three.js 与加载器），仅白名单相对路径。"""
     rel = req.match_info.get("path", "")
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "web"))
-    full = os.path.abspath(os.path.join(root, rel))
-    if not full.startswith(root) or not os.path.isfile(full):
+    root = _ez_real(os.path.join(os.path.dirname(__file__), "web"))
+    full = _ez_inside(os.path.join(root, rel), [root])
+    if not full or not os.path.isfile(full):
         return _web.json_response({"error": "not found"}, status=404)
     return _web.FileResponse(full)
 
@@ -3702,20 +3847,22 @@ async def _preview_any_static(req):
 async def _preview_any_fs(req):
     """按绝对路径 serve 文件（用于 3D 模型及其外部贴图/缓冲，使相对路径能正确解析）。仅本地路径。"""
     from urllib.parse import unquote
-    rel = req.match_info.get("path", "")
-    full = os.path.abspath(unquote(rel))
-    if os.path.isfile(full):
+    full = _ez_inside(unquote(req.match_info.get("path", "")))
+    if full and os.path.isfile(full):
         return _web.FileResponse(full)
-    # 兜底：贴图/缓冲常在模型同目录的子文件夹（Textures/Materials），按 basename 在父目录递归找
-    try:
-        base = os.path.basename(full)
-        base_dir = os.path.dirname(full)
-        if base and base_dir and os.path.isdir(base_dir):
-            for root, _dirs, files in os.walk(base_dir):
-                if base in files:
-                    return _web.FileResponse(os.path.join(root, base))
-    except Exception:
-        pass
+    # 兜底：贴图/缓冲常在模型同目录的子文件夹（Textures/Materials），在该目录里按 basename 找（仍在允许目录内）
+    if full:
+        try:
+            base = os.path.basename(full)
+            base_dir = os.path.dirname(full)
+            if base and base_dir and os.path.isdir(base_dir):
+                for root, _dirs, files in os.walk(base_dir):
+                    if base in files:
+                        hit = _ez_inside(os.path.join(root, base))
+                        if hit:
+                            return _web.FileResponse(hit)
+        except Exception:
+            pass
     return _web.json_response({"error": "not found"}, status=404)
 
 
@@ -3906,8 +4053,8 @@ def _ph_clip_generate(clip, prompt, tg, media=None):
     media 字典可带 image/video/audio（来自综合媒体输入），随 prompt 一起喂给 text-gen CLIP（如 Qwen-VL/Gemma 可看图反推/扩写）。"""
     if not hasattr(clip, "generate"):
         raise ValueError(
-            "该 CLIP 不支持文本生成：TextGenerate 只对 Gemma/Qwen3-VL/flux2 等 text-gen 编码器生效；"
-            "普通 stable_diffusion 等 CLIP 没有 generate 方法。请改用正确的 text-gen CLIP，或换用「优化提示词 (API/lama)」。"
+            "this CLIP does not support text generation: TextGenerate only works with text-gen encoders such as Gemma/Qwen3-VL/flux2; "
+            "a regular stable_diffusion CLIP has no generate method. Use a text-gen CLIP instead, or switch to the API/llama prompt optimizer."
         )
     media = media or {}
     img = _ph_concat_images(media.get("images") or ([] if media.get("image") is None else [media.get("image")]))
@@ -3984,7 +4131,7 @@ def _ph_clip_instance(clip_path, clip_type):
                                   embedding_directory=folder_paths.get_folder_paths("embeddings"),
                                   clip_type=ct, model_options={})
     except Exception as e:
-        raise ValueError(f"加载 CLIP 失败：{e}（请确认是 text-gen 文本编码器且 CLIP 类型正确）") from e
+        raise ValueError(f"failed to load CLIP: {e} (make sure this is a text-gen text encoder and the CLIP type is correct)") from e
     _PH_CLIP_CACHE[key] = clip
     return clip
 
@@ -4224,6 +4371,7 @@ def _ph_chat_completion(url, headers, body, proxy="", timeout=90):
     """同步 OpenAI 兼容 chat/completions 请求（在线程池里跑，避免阻塞事件循环）。
     proxy 非空时走该代理（http/https），空则强制直连（忽略系统代理，默认）。"""
     import urllib.request, urllib.error, socket
+    _ph_check_outbound(url)   # 允许列表校验（防 SSRF）：不在列表直接报错
     data_b = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data_b, method="POST",
                                  headers={"Content-Type": "application/json", **headers})
@@ -4241,10 +4389,10 @@ def _ph_chat_completion(url, headers, body, proxy="", timeout=90):
             detail = e.read().decode("utf-8")[:300]
         except Exception:
             pass
-        raise ValueError(f"API 返回错误 {e.code}（{e.reason}）：{detail or '无错误详情'}") from e
+        raise ValueError(f"API returned error {e.code} ({e.reason}): {detail or 'no error detail'}") from e
     except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-        suffix = f"（若需代理，请在「设置·API设置」填代理地址，如 http://127.0.0.1:7890）" if not proxy else ""
-        raise ValueError(f"无法连接 API 主机 {url}：网络超时或无法访问{suffix}。原始错误：{e}") from e
+        suffix = f" (if you need a proxy, set the proxy address in the API settings, e.g. http://127.0.0.1:7890)" if not proxy else ""
+        raise ValueError(f"cannot reach API host {url}: network timeout or unreachable{suffix}. Original error: {e}") from e
 
 
 # ===== 进程内 llama-cpp-python（用户 venv 已装 llama-cpp-python 时的本地推理）=====
@@ -4442,7 +4590,7 @@ def _ph_apply_api_params(provider, model, body, ap, is_anthropic):
         elif provider == "OpenAI":
             body["web_search_options"] = {}
         else:
-            raise ValueError("「联网搜索」目前只支持 OpenAI / Anthropic / OpenRouter / xAI / Qwen；当前厂商「" + str(provider or "自定义") + "」没有通用联网参数，请关掉它。")
+            raise ValueError("web search only supports OpenAI / Anthropic / OpenRouter / xAI / Qwen; provider " + repr(str(provider or "custom")) + " has no generic web parameters, turn it off.")
     # 自定义参数（JSON 键值对）：最后合并，同名直接覆盖上面的映射，方便厂商字段变动时自行改/加
     extra = ap.get("custom")
     if isinstance(extra, dict) and extra:
@@ -4463,7 +4611,7 @@ def _ph_optimize_impl(data):
     method = str((data or {}).get("method") or "api")
     prompt = str((data or {}).get("prompt") or "")
     if not prompt.strip():
-        raise ValueError("prompt 为空")
+        raise ValueError("prompt is empty")
     raw_imgs = (data or {}).get("images")
     img_urls = [str(u).strip() for u in raw_imgs if str(u or "").strip()] if isinstance(raw_imgs, list) else []
     if not img_urls:
@@ -4476,7 +4624,7 @@ def _ph_optimize_impl(data):
         tgcfg = (data or {}).get("textgen") or {}
         clip_path = ph_resolve_model(str(tgcfg.get("clip_path") or _ph_global_model_path("clip_path") or "").strip(), [str(tgcfg.get("clip_root") or "").strip()])
         if not clip_path:
-            raise ValueError("TextGenerate 需在「设置·TextGenerate设置」里填 clip 模型 + 类型，才能点击即用；或改回「运行期自动优化(TextGenerate)」用已连接的 CLIP 在工作流运行时生成。")
+            raise ValueError("TextGenerate needs a clip model + type in the TextGenerate settings to run as a one-click button; or switch back to runtime auto-optimize (TextGenerate) to use the connected CLIP during workflow execution.")
         clip = _ph_clip_instance(clip_path, str(tgcfg.get("clip_type") or "stable_diffusion"))
         # 点击即用也带媒体：CLIP 必须吃张量，图片 data URL 解回张量；视频/音频按路径加载
         return _ph_clip_generate(clip, prompt, tgcfg, _ph_media_bundle(_ph_dataurls_to_images(img_urls), videos, audios))
@@ -4514,7 +4662,7 @@ def _ph_optimize_impl(data):
         model_path = _ph_resolve_gguf(str(llama.get("model") or _ph_global_model_path("model") or "").strip(), [str(llama.get("model_root") or _ph_global_scan_path("model_root") or "").strip()])
         if llama_mode == "local":
             if not model_path:
-                raise ValueError("llama 调用方式选的是「进程内 llama-cpp-python」，但没解析到 LLM 模型文件：请在「设置·llama设置」里填好 LLM 文本编码模型，或改用「llama.cpp 服务器(HTTP)」模式。")
+                raise ValueError("the llama mode is set to in-process llama-cpp-python, but no LLM model file was resolved: set the LLM text encoder model in the llama settings, or switch to the llama.cpp server (HTTP) mode.")
             mmproj = _ph_resolve_gguf(str(llama.get("mmproj") or _ph_global_model_path("mmproj") or "").strip(), [str(llama.get("mmproj_root") or _ph_global_scan_path("mmproj_root") or "").strip()])
             llm = _ph_llama_instance(model_path, mmproj, llama)
             return _ph_llama_chat(llm, prompt, llama, image_b64=img_urls or None)
@@ -4530,7 +4678,7 @@ def _ph_optimize_impl(data):
         if not api_url:
             api_url = HOST.get(provider, "")
         if not api_url:
-            raise ValueError("请填写 API 主机地址（如 https://api.deepseek.com/v1）")
+            raise ValueError("enter the API host URL (for example https://api.deepseek.com/v1)")
         base = api_url.rstrip("/")
         if is_anthropic:
             url = base + "/messages" if not base.endswith("/messages") else base
@@ -4615,7 +4763,7 @@ async def _ph_optimize(req):
         status = 400 if ("需在节点执行" in msg or "未填写" in msg or "为空" in msg or "请填写" in msg) else 502
         return _web.json_response({"error": msg}, status=status)
     except Exception as e:
-        return _web.json_response({"error": f"调用失败：{e}"}, status=502)
+        return _web.json_response({"error": f"request failed: {e}"}, status=502)
     if (data or {}).get("clearCache"):
         ph_clear_model_cache()
     return _web.json_response({"ok": True, "text": text})
@@ -4678,7 +4826,9 @@ def ph_ensure_skills_dir():
 
 
 async def _ph_pick_skill(req):
-    """弹 Windows 原生「打开文件」对话框（默认定位 models/skills），返回所选 md 的文本供插入卡片。"""
+    """弹 Windows 原生「打开文件」对话框（默认定位 models/skills），返回所选 md 的文本供插入卡片。仅本机客户端。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     initial = ph_ensure_skills_dir() or ""
 
     def _pick():
@@ -4704,7 +4854,7 @@ async def _ph_pick_skill(req):
         with open(p, "r", encoding="utf-8") as fh:
             text = fh.read()
     except Exception as e:
-        return _web.json_response({"error": f"读取 {os.path.basename(p)} 失败：{e}"}, status=500)
+        return _web.json_response({"error": f"failed to read {os.path.basename(p)}: {e}"}, status=500)
     return _web.json_response({"ok": True, "name": os.path.basename(p), "text": text})
 
 
@@ -4726,6 +4876,68 @@ def _ph_media_input_dirs():
         except Exception:
             pass
     return roots
+
+
+# ===== 出站主机允许列表（评审要求：/prompt_helper/optimize 不能拿请求里的 apiUrl 去打任意地址）=====
+# 允许列表 = 内置厂商域名 + 本机保存的自定义厂商域名 + userdata 里登记的额外主机（仅本机可写）。
+# 本机 llama.cpp / Ollama 也走「保存设置时登记一次」这条路，不默认放开 loopback（避免拿它扫本机/内网服务）。
+_PH_BUILTIN_HOSTS = (
+    "api.openai.com", "api.deepseek.com", "generativelanguage.googleapis.com", "api.anthropic.com",
+    "api.siliconflow.cn", "openrouter.ai", "dashscope.aliyuncs.com", "api.moonshot.ai",
+    "api.x.ai", "api.mistral.ai", "api.groq.com",
+)
+
+
+def _ph_api_hosts_file():
+    try:
+        return os.path.join(os.path.dirname(_ph_userdata_file()), "ezflex_api_hosts.json")
+    except Exception:
+        return ""
+
+
+def _ph_api_hosts_load():
+    fn = _ph_api_hosts_file()
+    if not fn or not os.path.isfile(fn):
+        return []
+    try:
+        with open(fn, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return [str(x).strip().lower() for x in data if str(x).strip()] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def _ph_allowed_hosts():
+    from urllib.parse import urlsplit as _us
+    hosts = set(_PH_BUILTIN_HOSTS)
+    try:
+        fn = _ph_userdata_file()
+        if fn and os.path.isfile(fn):
+            with open(fn, "r", encoding="utf-8") as fh:
+                recs = json.load(fh)
+            for rec in (recs if isinstance(recs, list) else []):
+                h = _us(str((rec or {}).get("apiUrl") or "")).hostname
+                if h:
+                    hosts.add(h.lower())
+    except Exception:
+        pass
+    hosts.update(_ph_api_hosts_load())
+    return hosts
+
+
+def _ph_check_outbound(url):
+    """出站前校验主机在允许列表里；不在就报清晰错误（不静默、不改小写匹配）。"""
+    from urllib.parse import urlsplit as _us
+    try:
+        host = (_us(str(url)).hostname or "").lower()
+    except Exception:
+        host = ""
+    if not host or host not in _ph_allowed_hosts():
+        raise ValueError(
+            "API host " + (host or "?") + " is not in the allow-list (security restriction). "
+            "Enter and save the address once in the API settings to register that host; built-in providers need no registration."
+        )
+    return url
 
 
 def _ph_userdata_file():
@@ -4752,6 +4964,8 @@ async def _ph_custom_load(req):
 
 
 async def _ph_custom_save(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
     except Exception:
@@ -4765,7 +4979,7 @@ async def _ph_custom_save(req):
             "apiUrl": (data.get("apiUrl") or "").strip(), "apiKey": (data.get("apiKey") or "").strip(),
             "proxy": (data.get("proxy") or "").strip(), "custom": bool(data.get("custom")) }
     if not rec["name"]:
-        return _web.json_response({"error": "请填写厂商名"}, status=400)
+        return _web.json_response({"error": "enter the provider name"}, status=400)
     try:
         arr = []
         if os.path.isfile(fn):
@@ -4783,6 +4997,8 @@ async def _ph_custom_save(req):
 
 
 async def _ph_custom_delete(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     fn = _ph_userdata_file()
     if not fn:
         return _web.json_response({"error": "no userdata"}, status=500)
@@ -4828,7 +5044,10 @@ def _ph_roots_for(extra=None):
 
 
 async def _ph_pick_folder(req):
-    """弹 Windows 原生「选择文件夹」对话框（线程里跑，避免阻塞事件循环并保证置顶）。"""
+    """弹 Windows 原生「选择文件夹」对话框（线程里跑，避免阻塞事件循环并保证置顶）。仅本机客户端。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+
     def _pick():
         try:
             import tkinter as tk
@@ -4885,6 +5104,8 @@ async def _ph_scan_paths_get(req):
 
 
 async def _ph_scan_paths_save(req):
+    if not _ez_local(req):   # 扫描目录会成为可读根目录，只允许本机改（否则远端能自己扩大根）
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
     except Exception:
@@ -4935,6 +5156,8 @@ async def _ph_model_paths_get(req):
 
 
 async def _ph_model_paths_save(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
     except Exception:
@@ -4985,7 +5208,7 @@ async def _ph_pcards_get(req):
     if name:
         fn = _ph_prompt_card_file(name)
         if not fn or not os.path.isfile(fn):
-            return _web.json_response({"error": "没有名为「" + name + "」的卡片"}, status=404)
+            return _web.json_response({"error": "no card named " + name}, status=404)
         try:
             with open(fn, 'r', encoding='utf-8') as fh:
                 rec = json.loads(fh.read())
@@ -5009,7 +5232,9 @@ async def _ph_pcards_get(req):
 
 
 async def _ph_pcards_save(req):
-    """把选中的提示词卡片存进 userdata/prompts/<名称>.json（同名覆盖）。"""
+    """把选中的提示词卡片存进 userdata/prompts/<名称>.json（同名覆盖）。仅本机客户端。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
     except Exception:
@@ -5018,9 +5243,9 @@ async def _ph_pcards_save(req):
     cards = data.get("cards")
     fn = _ph_prompt_card_file(name)
     if not fn:
-        return _web.json_response({"error": '名称不合法：不能含 \\ / : * ? " < > | ，不能以点开头，最长 64 字'}, status=400)
+        return _web.json_response({"error": 'invalid name: must not contain \\ / : * ? " < > | , must not start with a dot, max 64 characters'}, status=400)
     if not isinstance(cards, list) or not cards:
-        return _web.json_response({"error": "没有选中要保存的卡片"}, status=400)
+        return _web.json_response({"error": "no card selected to save"}, status=400)
     try:
         with open(fn, 'w', encoding='utf-8') as fh:
             json.dump({"name": name, "cards": cards}, fh, ensure_ascii=False, indent=2)
@@ -5030,11 +5255,13 @@ async def _ph_pcards_save(req):
 
 
 async def _ph_pcards_delete(req):
-    """删除一份保存的提示词卡片。"""
+    """删除一份保存的提示词卡片。仅本机客户端。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     name = (req.query.get("name") or "").strip()
     fn = _ph_prompt_card_file(name)
     if not fn or not os.path.isfile(fn):
-        return _web.json_response({"error": "没有名为「" + name + "」的卡片"}, status=404)
+        return _web.json_response({"error": "no card named " + name}, status=404)
     try:
         os.remove(fn)
         return _web.json_response({"ok": True})
@@ -5042,8 +5269,42 @@ async def _ph_pcards_delete(req):
         return _web.json_response({"error": str(e)}, status=500)
 
 
+async def _ph_api_hosts_get(req):
+    return _web.json_response({"hosts": sorted(_ph_allowed_hosts()), "registered": _ph_api_hosts_load()})
+
+
+async def _ph_api_hosts_post(req):
+    """登记出站主机（本机保存 API/llama 设置时调用，或用户手动加）。只允许本机客户端。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    from urllib.parse import urlsplit as _us
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    hosts = _ph_api_hosts_load()
+    for u in (data.get("urls") or []):
+        h = _us(str(u or "")).hostname
+        if h and h.lower() not in hosts:
+            hosts.append(h.lower())
+    for h in (data.get("hosts") or []):
+        h = str(h or "").strip().lower()
+        if h and h not in hosts:
+            hosts.append(h)
+    try:
+        fn = _ph_api_hosts_file()
+        os.makedirs(os.path.dirname(fn), exist_ok=True)
+        with open(fn, "w", encoding="utf-8") as fh:
+            json.dump(hosts, fh, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+    return _web.json_response({"ok": True, "hosts": sorted(_ph_allowed_hosts())})
+
+
 try:
     PromptServer.instance.routes.get("/prompt_helper/custom_providers")(_ph_custom_load)
+    PromptServer.instance.routes.get("/prompt_helper/api_hosts")(_ph_api_hosts_get)
+    PromptServer.instance.routes.post("/prompt_helper/api_hosts")(_ph_api_hosts_post)
     PromptServer.instance.routes.post("/prompt_helper/custom_providers")(_ph_custom_save)
     PromptServer.instance.routes.delete("/prompt_helper/custom_providers")(_ph_custom_delete)
     PromptServer.instance.routes.post("/prompt_helper/pick_folder")(_ph_pick_folder)
@@ -5218,16 +5479,18 @@ MEDIA_TO_COMFY = {
 
 
 def _ml_resolve(path):
-    """把相对 input 目录的路径解析为绝对路径（支持子目录）；找不到返回 ''。"""
+    """把媒体路径解析成绝对路径：相对路径按 input 目录解析，绝对路径必须是「允许目录」内的；
+    根外 / 找不到一律返回 ''（评审要求：不接受调用方给的任意路径）。"""
     if not path:
         return ""
     try:
+        p = _ez_real(path)
+        if p and os.path.isfile(p):
+            return _ez_inside(p)
         for root in _ph_media_input_dirs():
-            p = os.path.join(root, path)
-            if os.path.isfile(p):
-                return os.path.abspath(p)
-        if os.path.isfile(path):
-            return os.path.abspath(path)
+            q = _ez_inside(os.path.join(root, path))
+            if q and os.path.isfile(q):
+                return q
     except Exception:
         pass
     return ""
@@ -5603,8 +5866,8 @@ def _mo_batch_images(vals, label, fit=None):
         return torch.cat(out, dim=0)
     except Exception as e:
         raise ValueError(
-            f"EzFlex-MediaOut：（端口「{label}」）这组有 {len(vals)} 张图，无法合并成批量张量（{e}）。"
-            f"请改用「拆分」模式逐个文件接。"
+            f'EzFlex-MediaOut: (port "{label}") this group has {len(vals)} images and cannot be merged into a batched tensor ({e}). '
+            f"Switch to split mode and connect the files one by one."
         ) from e
 
 
@@ -5621,13 +5884,13 @@ def _mo_merge_values(values, label, kind="", fit=None):
         return None
     if len(vals) == 1:
         return vals[0]
-    hint = f"（端口「{label}」）"
+    hint = f'(port "{label}") '
     if kind == "image" or all(isinstance(v, torch.Tensor) for v in vals):
         return _mo_batch_images(vals, label, fit)
     if kind == "audio" or all(isinstance(v, dict) and "waveform" in v for v in vals):
         rates = {int(v.get("sample_rate") or 0) for v in vals}
         if len(rates) != 1:
-            raise ValueError(f"EzFlex-MediaOut：{hint}这组音频采样率不一致（{sorted(rates)}），无法拼成一条音轨；请改用「拆分」模式。")
+            raise ValueError(f"EzFlex-MediaOut: {hint}these audio clips have mixed sample rates ({sorted(rates)}) and cannot be joined into one track; use split mode.")
         try:
             waves = [v["waveform"] for v in vals]
             shapes = {tuple(w.shape[1:]) for w in waves}
@@ -5637,7 +5900,7 @@ def _mo_merge_values(values, label, kind="", fit=None):
                 waves = [w.repeat(1, ch, 1) if int(w.shape[1]) == 1 and ch > 1 else w for w in waves]
             return {"waveform": torch.cat(waves, dim=2), "sample_rate": rates.pop()}
         except Exception as e:
-            raise ValueError(f"EzFlex-MediaOut：{hint}这组音频无法拼接（{e}）；请改用「拆分」模式。") from e
+            raise ValueError(f"EzFlex-MediaOut: {hint}these audio clips cannot be joined ({e}); use split mode.") from e
     if all(isinstance(v, str) for v in vals):
         return "\n".join(vals)
     kinds_txt = "、".join(sorted({
@@ -5648,8 +5911,8 @@ def _mo_merge_values(values, label, kind="", fit=None):
         type(v).__name__ for v in vals
     }))
     raise ValueError(
-        f"EzFlex-MediaOut：{hint}这组有 {len(vals)} 个文件且类型不一致（{kinds_txt}），无法合并成单一批量值；"
-        f"请把 MediaOut 改成「拆分」模式逐个文件接。"
+        f"EzFlex-MediaOut: {hint}this group has {len(vals)} files of mixed types ({kinds_txt}) and cannot be merged into a single batched value; "
+        f"switch MediaOut to split mode and connect the files one by one."
     )
 
 
@@ -5735,12 +5998,154 @@ def _mout_flatten(card):
         return out
     if isinstance(card, dict) and ("value" in card or "type" in card):
         return [card]
-    return [{"id": "f0", "name": "文件", "type": "other", "value": card}]
+    return [{"id": "f0", "name": "File", "type": "other", "value": card}]
 
 
 def _ml_media_root():
     roots = _ph_media_input_dirs()
     return roots[0] if roots else ""
+
+
+def _ml_roots_file():
+    try:
+        return os.path.join(os.path.dirname(_ph_userdata_file()), "ezflex_media_roots.json")
+    except Exception:
+        return ""
+
+
+_ML_SEED_CACHE = {"t": 0, "dirs": []}
+
+
+def _ml_json_paths(obj, depth=0):
+    """递归挑出 JSON 里像媒体文件的绝对路径（用于把素材所在目录收成可浏览根）。"""
+    res = []
+    if depth > 8:
+        return res
+    try:
+        if isinstance(obj, dict):
+            for v in obj.values():
+                res.extend(_ml_json_paths(v, depth + 1))
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                res.extend(_ml_json_paths(v, depth + 1))
+        elif isinstance(obj, str):
+            s = obj.strip()
+            if 3 < len(s) < 4096 and _media_kind(s) != "other":
+                cand = s if os.path.isabs(s) else ""
+                if not cand:
+                    for root in _ph_media_input_dirs():
+                        q = os.path.join(root, s)
+                        if os.path.isfile(q):
+                            cand = q
+                            break
+                if cand and os.path.isfile(cand):
+                    res.append(cand)
+    except Exception:
+        pass
+    return res
+
+
+def _ml_seed_roots():
+    """从用户自己的数据里补根目录：已保存预设/卡片里引用过的素材所在目录（不是请求参数）。
+    带 30 秒缓存，避免每次浏览都扫一遍 user_data。"""
+    import time as _time
+    now = _time.time()
+    if now - _ML_SEED_CACHE["t"] < 30:
+        return list(_ML_SEED_CACHE["dirs"])
+    out = []
+    dirs = []
+    try:
+        dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data"))
+    except Exception:
+        pass
+    try:
+        ud = getattr(folder_paths, "user_directory", None)
+        if ud:
+            dirs.append(ud)
+    except Exception:
+        pass
+    for d in dirs:
+        try:
+            if not os.path.isdir(d):
+                continue
+            for f in os.listdir(d):
+                if not f.lower().endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(d, f), "r", encoding="utf-8") as fh:
+                        data = json.load(fh)
+                except Exception:
+                    continue
+                for p in _ml_json_paths(data):
+                    dd = os.path.dirname(p)
+                    if dd and dd not in out:
+                        out.append(dd)
+        except Exception:
+            continue
+    _ML_SEED_CACHE["t"] = now
+    _ML_SEED_CACHE["dirs"] = list(out)
+    return out
+
+
+def _ml_default_roots():
+    """素材浏览器默认只给 ComfyUI 的 input / output；temp、models 与别的目录都由用户自己登记为根。"""
+    out = []
+    for fn in ("get_input_directory", "get_output_directory"):
+        try:
+            v = getattr(folder_paths, fn, None)
+            v = v() if callable(v) else ""
+            if v:
+                out.append(_ez_real(v))
+        except Exception:
+            pass
+    return [x for x in out if x]
+
+
+def _ml_user_roots():
+    """用户自己登记的根（写进 roots 文件的），只有这些能删；内置根删不掉。"""
+    out = []
+    try:
+        fn = _ml_roots_file()
+        if fn and os.path.isfile(fn):
+            with open(fn, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                dropped = 0
+                for x in data:
+                    r = _ez_real(x)
+                    if not r:
+                        continue
+                    if os.path.dirname(r) == r:   # 整盘不再是根：忽略并顺手清掉（自愈）
+                        dropped += 1
+                        continue
+                    out.append(r)
+                if dropped:
+                    try:
+                        with open(fn, "w", encoding="utf-8") as fh:
+                            json.dump(out, fh, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+    except Exception:
+        out = []
+    return out
+
+
+def _ml_roots():
+    """MediaLoader 文件浏览器可浏览的根：input / output + 用户登记的扫描目录 + 本机添加的根。"""
+    roots = _ml_default_roots()
+    try:
+        roots.extend([_ez_real(x) for x in _ml_seed_roots() if _ez_real(x)])
+    except Exception:
+        pass
+    for r in _ml_user_roots():
+        if r not in roots:
+            roots.append(r)
+    seen, out = set(), []
+    for r in roots:
+        if r and r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
 
 
 def _media_safe(name):
@@ -5787,15 +6192,13 @@ async def _ml_upload(req):
 async def _ml_browse(req):
     """浏览任意目录（默认 input）：返回子目录、媒体文件、父级与可用盘符。"""
     from urllib.parse import quote as _q
-    path = (req.query.get("path") or "").strip()
-    if not path:
-        path = _ml_media_root()
-    try:
-        path = os.path.abspath(path)
-    except Exception:
-        path = _ml_media_root()
-    if not path or not os.path.isdir(path):
-        return _web.json_response({"error": "not a dir", "path": path}, status=404)
+    roots = _ml_roots()
+    if not roots:
+        return _web.json_response({"error": "no browsable root"}, status=400)
+    want = (req.query.get("path") or "").strip() or _ml_media_root()
+    path = _ez_inside(want, roots) or roots[0]      # 越界一律回落到第一个根，不报错
+    if not os.path.isdir(path):
+        path = roots[0]
     dirs, files = [], []
     try:
         for n in os.listdir(path):
@@ -5820,15 +6223,19 @@ async def _ml_browse(req):
         return _web.json_response({"error": str(e)}, status=500)
     dirs.sort(key=lambda x: (x["name"] or "").lower())
     files.sort(key=lambda x: (x["name"] or "").lower())
-    parent = os.path.dirname(path)
-    return _web.json_response({"path": path, "parent": parent, "name": os.path.basename(path) or path,
-                               "dirs": dirs, "files": files})
+    up = os.path.dirname(path)
+    parent = up if (up and up != path and _ez_inside(up, roots)) else ""   # 到根目录就到底，不许再往上层爬
+    inside = [r for r in roots if _ez_inside(path, [r])]
+    root_of = max(inside, key=len) if inside else roots[0]   # 嵌套时用最具体的根，下拉才停在用户登记的那个
+    return _web.json_response({"path": path, "parent": parent, "root": root_of, "roots": roots,
+                               "mine": _ml_user_roots(),
+                               "name": os.path.basename(path) or path, "dirs": dirs, "files": files})
 
 
 async def _ml_serve(req):
     """按路径流式返回本地文件（本地工具用途，仅只读须存在的文件）；相对路径按 input 目录解析。"""
     path = (req.query.get("path") or "").strip()
-    abs_path = path if os.path.isabs(path) else _ml_resolve(path)
+    abs_path = _ml_resolve(path)
     if not abs_path or not os.path.isfile(abs_path):
         return _web.Response(status=404, text="not found")
     try:
@@ -5838,7 +6245,9 @@ async def _ml_serve(req):
 
 
 async def _ml_open(req):
-    """在系统文件管理器中打开素材文件所在目录。"""
+    """在系统文件管理器中打开素材文件所在目录。仅本机客户端（拉起系统程序属于本机动作）。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         path = (data.get("path") or "").strip()
@@ -5863,12 +6272,14 @@ async def _ml_open(req):
 
 
 async def _ml_save_as(req):
-    """把素材文件另存到用户挑选的目录（dest 由前端调 pick_folder 得到）。"""
+    """把素材文件另存到用户挑选的目录（dest 由前端调 pick_folder 得到，所以同样是本机动作）。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         path = (data.get("path") or "").strip()
         dest = (data.get("dest") or "").strip()
-        abs_ = _ml_resolve(path)
+        abs_ = _ml_resolve(path)          # 只允许「允许目录」内的源文件
         if not abs_ or not os.path.isfile(abs_):
             return _web.json_response({"error": "file not found"}, status=404)
         if not dest or not os.path.isdir(dest):
@@ -5882,7 +6293,10 @@ async def _ml_save_as(req):
 
 
 async def _ml_pick_folder(req):
-    """弹 Windows 原生「选择文件夹」对话框（在线程里跑，避免阻塞事件循环并保证置顶）。"""
+    """弹 Windows 原生「选择文件夹」对话框（在线程里跑，避免阻塞事件循环并保证置顶）。仅本机客户端。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+
     def _pick():
         try:
             import tkinter as tk
@@ -5902,8 +6316,57 @@ async def _ml_pick_folder(req):
         return _web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+async def _ml_roots_get(req):
+    """当前可浏览的根目录（诊断用；远端调用也只看到根列表，不泄露目录内容）。"""
+    return _web.json_response({"roots": _ml_roots(), "mine": _ml_user_roots()})
+
+
+async def _ml_roots_post(req):
+    """添加/移除「可浏览根目录」。只允许本机客户端 —— 否则远端能自己扩大可读范围。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    fn = _ml_roots_file()
+    if not fn:
+        return _web.json_response({"error": "no userdata"}, status=500)
+    cur = []
+    try:
+        if os.path.isfile(fn):
+            with open(fn, "r", encoding="utf-8") as fh:
+                v = json.load(fh)
+            cur = [str(x) for x in v if str(x).strip()] if isinstance(v, list) else []
+    except Exception:
+        cur = []
+    p = _ez_real((data.get("path") or "").strip())
+    if p:
+        if not os.path.isdir(p):
+            return _web.json_response({"error": "not a folder: " + p}, status=400)
+        if os.path.dirname(p) == p:
+            return _web.json_response({"error": "a drive/filesystem root cannot be a browsable root; add a subfolder instead"}, status=400)
+        if p in _ml_roots():
+            return _web.json_response({"ok": True, "note": "already a root", "roots": _ml_roots(), "mine": _ml_user_roots()})
+        if p not in cur:
+            cur.append(p)
+    rm = _ez_real((data.get("remove") or "").strip())
+    if rm:
+        cur = [x for x in cur if _ez_real(x) != rm]
+    try:
+        os.makedirs(os.path.dirname(fn), exist_ok=True)
+        with open(fn, "w", encoding="utf-8") as fh:
+            json.dump(cur, fh, ensure_ascii=False, indent=2)
+        _ML_SEED_CACHE["t"] = 0   # 根目录变了，下次重算
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+    return _web.json_response({"ok": True, "roots": _ml_roots(), "mine": _ml_user_roots()})
+
+
 try:
     PromptServer.instance.routes.get("/media_loader/files")(_ml_files)
+    PromptServer.instance.routes.get("/media_loader/roots")(_ml_roots_get)
+    PromptServer.instance.routes.post("/media_loader/roots")(_ml_roots_post)
     PromptServer.instance.routes.get("/media_loader/browse")(_ml_browse)
     PromptServer.instance.routes.get("/media_loader/serve")(_ml_serve)
     PromptServer.instance.routes.post("/media_loader/outputs")(_ml_outputs)
@@ -5929,7 +6392,7 @@ class MediaLoaderNode:
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "{}",
-                    "tooltip": "「素材加载器」面板生成的配置 JSON（分组/卡片/文件）。",
+                    "tooltip": "Config JSON generated by the Media Loader panel (groups / cards / files).",
                 }),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
@@ -5939,7 +6402,7 @@ class MediaLoaderNode:
     RETURN_NAMES = ()
     FUNCTION = "load"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "素材加载器"
+    DESCRIPTION = "Media Loader"
 
     def load(self, config="{}", **kwargs):
         cards = parse_media_cards(config)
@@ -5991,12 +6454,12 @@ class MediaOutNode:
             "required": {
                 "card": (_MEDIA_CARD, {
                     "forceInput": True,
-                    "tooltip": "来自 EzFlex-MediaLoader 的某张「素材卡片」端口（深红输入）。",
+                    "tooltip": "A media-card output from EzFlex-MediaLoader (dark red input).",
                 }),
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "{}",
-                    "tooltip": "「素材输出」面板配置（局部禁用文件 id 集合）。",
+                    "tooltip": "Media Out panel config (ids of locally disabled files).",
                 }),
             },
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
@@ -6006,7 +6469,7 @@ class MediaOutNode:
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "素材输出"
+    DESCRIPTION = "Media Out"
 
     def run(self, card=None, config="{}", **kwargs):
         off = _mout_parse_off(config)
@@ -6068,7 +6531,7 @@ class PromptHelperNode:
                 "config": ("STRING", {
                     "multiline": True,
                     "default": "{}",
-                    "tooltip": "「提示词卡片」面板生成的配置 JSON（卡片列表）。",
+                    "tooltip": "Config JSON generated by the Prompt Cards panel (card list).",
                 }),
             },
             "optional": {},
@@ -6077,20 +6540,20 @@ class PromptHelperNode:
         for i in range(1, _PH_MAX_MEDIA + 1):
             inputs["optional"][f"media_in_{i}"] = (_ANY, {
                 "forceInput": True,
-                "tooltip": f"综合媒体 {i}：可接 图像/视频/音频/3D 模型 等任意媒体（连接后自动新增一个空端口）。",
+                "tooltip": f"Any media {i}: images / video / audio / 3D models are accepted (a new empty slot is added when connected).",
             })
         for i in range(1, _PH_MAX_CARDS + 1):
             inputs["optional"][f"card_in_{i}"] = ("STRING", {
                 "forceInput": True,
-                "tooltip": f"提示词卡片 {i} 的文本（接入后覆盖该卡片面板内容）。",
+                "tooltip": f"Text of prompt card {i} (when connected it overrides that card panel content).",
             })
         return inputs
 
     RETURN_TYPES = ("STRING",) * (_PH_MAX_CARDS + 1)
-    RETURN_NAMES = tuple(["合并提示词"] + [f"卡片 {i + 1}" for i in range(_PH_MAX_CARDS)])
+    RETURN_NAMES = tuple(["Merged prompt"] + [f"Card {i + 1}" for i in range(_PH_MAX_CARDS)])
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "提示词助手"
+    DESCRIPTION = "Prompt Helper"
 
     def _ph_optimize_runner(self, opt, tg, media):
         """运行期优化器：返回 optimize(text) —— 整体一次与单卡一次共用同一套参数/媒体。"""
@@ -6101,7 +6564,7 @@ class PromptHelperNode:
                 if "clip" not in cache:
                     clip_path = ph_resolve_model(str(tg.get("clip_path") or _ph_global_model_path("clip_path") or "").strip(), [str(tg.get("clip_root") or "").strip()])
                     if not clip_path:
-                        raise ValueError("[EzFlex-PromptHelper] 已开启「运行期自动优化 (TextGenerate)」，请在「设置·TextGenerate设置」里填写 clip 模型 + 类型。")
+                        raise ValueError("[EzFlex-PromptHelper] runtime auto-optimize (TextGenerate) is enabled; fill in the clip model + type in the TextGenerate settings.")
                     cache["clip"] = _ph_clip_instance(clip_path, str(tg.get("clip_type") or "stable_diffusion"))
                 return _ph_clip_generate(cache["clip"], text, tg, media)
             auto_method = "llama" if bool(opt.get("autoLlama")) else "api"
@@ -6119,8 +6582,8 @@ class PromptHelperNode:
             except Exception as e:
                 # 别只 print 到控制台：优化结果就是输出，静默失败会变成"悄悄输出空提示词"（用户看不到原因）
                 print(f"[PromptHelper] {auto_method} 运行期优化失败: {e}")
-                hint = "（llama：把「设置·llama设置」的 n_ctx 调大，或改用 API）" if auto_method == "llama" else ""
-                raise ValueError(f"[EzFlex-PromptHelper] 运行期自动优化（{auto_method}）失败：{e}{hint}") from e
+                hint = " (llama: increase n_ctx in the llama settings, or use the API)" if auto_method == "llama" else ""
+                raise ValueError(f"[EzFlex-PromptHelper] runtime auto-optimize ({auto_method}) failed: {e}{hint}") from e
 
         return optimize
 
@@ -6136,7 +6599,7 @@ class PromptHelperNode:
         # 不做静默优先级兜底。
         auto_flags = [k for k in ("autoTextgen", "autoApi", "autoLlama") if opt.get(k)]
         if len(auto_flags) > 1:
-            raise ValueError("[EzFlex-PromptHelper] 运行期自动优化同时开了多个（" + " / ".join(auto_flags) + "），只能留一个。")
+            raise ValueError("[EzFlex-PromptHelper] multiple runtime auto-optimize methods are enabled (" + " / ".join(auto_flags) + "); keep only one.")
         auto_used = bool(auto_flags)
 
         # 每张卡的「默认」正文（外部 card_in_N 覆盖该卡）；「合=绿」卡片的默认合并 = 总体层说的那份「默认」

@@ -6,6 +6,7 @@
 // 更新 o.links origin_slot、POST /param_preset_output/outputs 同步类 RETURN_TYPES）。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
   NODE_TYPES, nodeTypeOf, findNodeById, installResizeHandles, makeDomWidgetHitThrough,
 } from "./ezflex_service.js";
@@ -58,7 +59,7 @@ function openValuePreview(anchor, text) {
   _vprev = el('div');
   _vprev.style.cssText = 'position:fixed;z-index:9998;background:#fff;border-radius:12px;border:1px solid #eef2f8;box-shadow:0 12px 40px rgba(0,0,0,.14);padding:10px 12px;width:340px;max-width:min(340px,92vw);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:6px;margin-bottom:6px;';
-  const tt = el('b'); tt.textContent = '值预览'; tt.style.cssText = 'font-size:12px;color:#0f141f;';
+  const tt = el('b'); tt.textContent = ezT('Value preview'); tt.style.cssText = 'font-size:12px;color:#0f141f;';
   const close = el('button'); close.textContent = '✕'; close.style.cssText = 'background:transparent;border:none;font-size:12px;color:#8a99ae;cursor:pointer;padding:0 4px;';
   hd.appendChild(tt); hd.appendChild(close);
   const ta = el('textarea'); ta.readOnly = true; ta.spellcheck = false; ta.value = text;
@@ -106,7 +107,7 @@ function openValueTree(anchor, type, text) {
   overlay.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);';
   const box = el('div'); box.style.cssText = 'background:#fff;border-radius:16px;padding:14px 16px;width:92%;max-width:600px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
-  const t = el('b'); t.textContent = type + ' 详情';
+  const t = el('b'); t.textContent = type + ' ' + ezT('details');
   const close = el('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(t); hd.appendChild(close);
   const list = el('div'); list.style.cssText = 'display:flex;flex-direction:column;overflow:auto;max-height:60vh;border:1px solid #e6edf7;border-radius:9px;padding:6px;';
@@ -131,7 +132,7 @@ function openValueTree(anchor, type, text) {
     return wrap;
   };
   const entries = Array.isArray(data) ? data.map((v, i) => [i, v]) : Object.entries(data);
-  if (!entries.length) list.appendChild(el('div', 'ezo-empty')).textContent = '(空)';
+  if (!entries.length) list.appendChild(el('div', 'ezo-empty')).textContent = ezT('(empty)');
   entries.forEach(([k, v]) => list.appendChild(render(v, k, 0)));
   const onDown = (e) => { overlay._downInside = !!box.contains(e.target); };
   const onClick = (e) => { if (!overlay._downInside && !box.contains(e.target)) { overlay.remove(); cleanup(); } };
@@ -360,17 +361,17 @@ function renderPanel(node, conn) {
   const list = root.querySelector('.ezo-list');
   if (!status || !list) return;
   if (!conn || !conn.group) {
-    status.textContent = '未连接';
+    status.textContent = ezT('Not connected');
     status.classList.remove('on');
     list.innerHTML = '';
-    list.appendChild(el('div', 'ezo-empty')).textContent = '未连接：从 ParamPresetControl 的分组端口拖线连接';
+    list.appendChild(el('div', 'ezo-empty')).textContent = ezT('Not connected: drag a wire from a ParamPresetControl group port');
     return;
   }
-  status.textContent = `已连接: ${conn.group.name || '参数组'}`;
+  status.textContent = `${ezT('Connected')}: ${conn.group.name || ezT('Parameter group')}`;
   status.classList.add('on');
   const params = activeParams(conn.group);
   list.innerHTML = '';
-  if (!params.length) { list.appendChild(el('div', 'ezo-empty')).textContent = '该参数组暂无参数'; return; }
+  if (!params.length) { list.appendChild(el('div', 'ezo-empty')).textContent = ezT('This group has no parameters'); return; }
   params.forEach((p) => list.appendChild(renderRow(node, conn, p)));
 }
 
@@ -379,10 +380,10 @@ function renderRow(node, conn, p) {
   // 启/禁用是 Output 节点局部的显示开关，不写回控制节点，不改变参数组卡片
   const localOff = !!(node._ezLocalOff && node._ezLocalOff[p.id]);
   if (localOff) row.classList.add('ezo-off');
-  const name = el('span', 'ezo-name'); name.textContent = p.name || '参数'; name.title = p.name || '';
+  const name = el('span', 'ezo-name'); name.textContent = p.name || ezT('Parameter'); name.title = p.name || '';
   const actualType = (typeof p.value === 'string' && p.type !== 'string') ? 'string' : (p.type || 'string');
   const typeMismatch = actualType !== p.type;
-  const type = el('span', 'ezo-type' + (typeMismatch ? ' ezo-type-bad' : '')); type.textContent = actualType; type.title = typeMismatch ? `声明 ${p.type}，实际 ${actualType}` : '';
+  const type = el('span', 'ezo-type' + (typeMismatch ? ' ezo-type-bad' : '')); type.textContent = actualType; type.title = typeMismatch ? `${ezT('Declared')} ${p.type}, ${ezT('actual')} ${actualType}` : '';
   const vs = p.value != null ? (typeof p.value === 'object' ? (Array.isArray(p.value) ? (p.type === 'tuple' ? '(' + p.value.join(', ') + ')' : p.type === 'set' ? '{' + p.value.join(', ') + '}' : JSON.stringify(p.value)) : JSON.stringify(p.value)) : String(p.value)) : '';
   const isTree = p.type === 'dictionary' || p.type === 'list' || p.type === 'tuple';
   const value = el('span', 'ezo-value'); value.title = vs;
@@ -406,7 +407,7 @@ function renderRow(node, conn, p) {
     });
     toggle.appendChild(b);
   };
-  mk('on', '开启'); mk('off', '禁用');
+  mk('on', ezT('On')); mk('off', ezT('Off'));
   row.appendChild(name); row.appendChild(type); row.appendChild(value); row.appendChild(toggle);
   return row;
 }
@@ -417,8 +418,8 @@ function buildRoot(node) {
   const root = el('div', 'ezo-root');
   shell.appendChild(root);
   const hd = el('div', 'ezo-hd');
-  const title = el('span', 'ezo-title'); title.textContent = '参数预设输出';
-  const status = el('span', 'ezo-status'); status.textContent = '未连接';
+  const title = el('span', 'ezo-title'); title.textContent = ezT('Param Preset Output');
+  const status = el('span', 'ezo-status'); status.textContent = ezT('Not connected');
   hd.appendChild(title); hd.appendChild(status);
   const list = el('div', 'ezo-list');
   root.appendChild(hd); root.appendChild(list);
@@ -467,6 +468,11 @@ function hookPrototype(nt) {
   };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezOutSetup = false; return r; };
 }
+// 语言切换后重画同类型节点的面板（ezT 在渲染时求值，重画即换语言）
+onLocaleChange(() => {
+  ((app && app.graph && app.graph._nodes) || []).forEach((n) => { if (n && n.type === NODE) { try { renderPanel(n, connectedGroup(n)); } catch (_) {} } });
+});
+
 app.registerExtension({
   name: 'Comfy.EzFlex.ParamPresetOutput',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },

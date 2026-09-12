@@ -4,6 +4,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames } from "./ezflex_service.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 
 // ===== 简约现代风样式（浅底 + 靛蓝主色）=====
 const FL_CSS = `
@@ -99,9 +100,9 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
   // 比例列表
   const FIXED_RATIOS = ['1:1','2:3','3:2','3:4','4:3','4:5','5:4','9:16','9:21','10:16','16:9','16:10','21:9','2.35:1'];
   const RATIO_DESC = {
-    '1:1':'方形','4:5':'竖4:5','5:4':'横5:4','3:4':'竖3:4','4:3':'横4:3',
-    '2:3':'竖2:3','3:2':'横3:2','16:9':'宽屏','9:16':'竖屏','16:10':'宽屏10',
-    '10:16':'竖10:16','21:9':'超宽','9:21':'竖9:21','2.35:1':'电影宽银幕'
+    '1:1':ezT('Square'),'4:5':ezT('Portrait 4:5'),'5:4':ezT('Landscape 5:4'),'3:4':ezT('Portrait 3:4'),'4:3':ezT('Landscape 4:3'),
+    '2:3':ezT('Portrait 2:3'),'3:2':ezT('Landscape 3:2'),'16:9':ezT('Widescreen'),'9:16':ezT('Portrait'),'16:10':ezT('Widescreen 10'),
+    '10:16':ezT('Portrait 10:16'),'21:9':ezT('Ultrawide'),'9:21':ezT('Portrait 9:21'),'2.35:1':ezT('Cinema widescreen')
   };
 
   // 参考预设（首次可写入 server user_data 作默认）。与最早独立版前端一致：
@@ -340,7 +341,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     return loadPresetList().then((list) => seedPresets(list)).then((list) => {
       sel.innerHTML = '';
       const d = el('option', null, { value: '' });
-      d.textContent = '— 预设 —';
+      d.textContent = ezT('— Preset —');
       sel.appendChild(d);
       list.forEach((p) => {
         const o = el('option', null, { value: p.name });
@@ -378,8 +379,8 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         const input = el('input', 'fl-dialog-input');
         input.type = 'text';
         const row = el('div', 'fl-dialog-row');
-        const ok = el('button', 'fl-btn primary'); ok.textContent = '确定';
-        const cancel = el('button', 'fl-btn'); cancel.textContent = '取消';
+        const ok = el('button', 'fl-btn primary'); ok.textContent = ezT('OK');
+        const cancel = el('button', 'fl-btn'); cancel.textContent = ezT('Cancel');
         row.appendChild(ok); row.appendChild(cancel);
         box.appendChild(lab); box.appendChild(input); box.appendChild(row);
         _flDialog.appendChild(box);
@@ -508,6 +509,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         pumpFrames();
       };
       scheduleOnRedraw(update);
+      onLocaleChange(update);
       schedule();
     }
   }
@@ -521,18 +523,18 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     // 顶部工具条
     const top = el('div', 'fl-top');
     const limitSel = el('select', 'fl-limit');
-    [['1024','1024'],['2048','2048'],['4096','4096'],['8192','8192'],['custom','自定义']].forEach(([v, t]) => {
+    [['1024','1024'],['2048','2048'],['4096','4096'],['8192','8192'],['custom',ezT('Custom')]].forEach(([v, t]) => {
       const o = el('option', null, { value: v }); o.textContent = t; limitSel.appendChild(o);
     });
     limitSel.value = String(DEFAULT_LIMIT);
     const limitCustom = el('input', 'fl-num');
-    limitCustom.type = 'number'; limitCustom.value = String(DEFAULT_LIMIT); limitCustom.title = '自定义最大边';
+    limitCustom.type = 'number'; limitCustom.value = String(DEFAULT_LIMIT); limitCustom.title = ezT('Custom max edge');
     limitCustom.style.display = 'none';
-    const swapBtn = el('button', 'fl-btn fl-swap'); swapBtn.title = '交换宽高';
+    const swapBtn = el('button', 'fl-btn fl-swap'); swapBtn.title = ezT('Swap width and height');
     swapBtn.innerHTML = '<span>→</span><span>←</span>';
-    const batchInput = el('input', 'fl-batch'); batchInput.type = 'number'; batchInput.value = '1'; batchInput.min = '1'; batchInput.title = '批次数量';
-    const forceBtn = el('button', 'fl-btn fl-force'); forceBtn.textContent = '强'; forceBtn.title = '强制生效：忽略外部宽高/批次输入，强制面板值生效（仅任一输入有值时可用）';
-    const algBtn = el('button', 'fl-btn fl-alg opt'); algBtn.textContent = '优'; algBtn.title = '算法：优=比例优先，标=标准四舍五入';
+    const batchInput = el('input', 'fl-batch'); batchInput.type = 'number'; batchInput.value = '1'; batchInput.min = '1'; batchInput.title = ezT('Batch size');
+    const forceBtn = el('button', 'fl-btn fl-force'); forceBtn.textContent = ezT('Force'); forceBtn.title = ezT('Force override: ignore external width/height/batch inputs and use the panel values (available only when an input is connected)');
+    const algBtn = el('button', 'fl-btn fl-alg opt'); algBtn.textContent = ezT('Opt'); algBtn.title = ezT('Algorithm: Opt = ratio priority, Std = standard rounding');
 
     top.appendChild(limitSel); top.appendChild(limitCustom); top.appendChild(swapBtn);
     top.appendChild(batchInput); top.appendChild(forceBtn); top.appendChild(algBtn);
@@ -543,15 +545,15 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     canvas.className = 'fl-canvas-size';
     cw.appendChild(canvas);
     const selection = el('div', 'fl-canvas-select');
-    const handleBoth = el('div', 'fl-handle fl-handle--both'); handleBoth.title = '拖动调整宽高';
-    const handleWidth = el('div', 'fl-handle fl-handle--width'); handleWidth.title = '拖动调整宽度';
-    const handleHeight = el('div', 'fl-handle fl-handle--height'); handleHeight.title = '拖动调整高度';
+    const handleBoth = el('div', 'fl-handle fl-handle--both'); handleBoth.title = ezT('Drag to resize (both)');
+    const handleWidth = el('div', 'fl-handle fl-handle--width'); handleWidth.title = ezT('Drag to resize width');
+    const handleHeight = el('div', 'fl-handle fl-handle--height'); handleHeight.title = ezT('Drag to resize height');
     selection.appendChild(handleBoth); selection.appendChild(handleWidth); selection.appendChild(handleHeight);
     cw.appendChild(selection);
     const info = el('div', 'fl-info');
-    info.innerHTML = '<div class="rl"><span class="k">尺寸</span><span class="v" data-k="w">1024</span><span style="color:#8a9aa8;font-weight:300;">×</span><span class="v" data-k="h">1024</span></div>' +
-      '<div class="rl"><span class="k">比例</span><span class="v r" data-k="ratio">1:1</span></div>' +
-      '<div class="rl"><span class="k">实际MP</span><span class="v m" data-k="mp">1.00</span></div>';
+    info.innerHTML = '<div class="rl"><span class="k">' + ezT('Size') + '</span><span class="v" data-k="w">1024</span><span style="color:#8a9aa8;font-weight:300;">×</span><span class="v" data-k="h">1024</span></div>' +
+      '<div class="rl"><span class="k">' + ezT('Ratio') + '</span><span class="v r" data-k="ratio">1:1</span></div>' +
+      '<div class="rl"><span class="k">' + ezT('Actual MP') + '</span><span class="v m" data-k="mp">1.00</span></div>';
     cw.appendChild(info);
 
     // 控制行
@@ -561,27 +563,27 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     const alignInput = el('input', 'fl-num-xs'); alignInput.type = 'number'; alignInput.value = '8'; alignInput.min = '1';
     const mpInput = el('input', 'fl-num'); mpInput.type = 'number'; mpInput.value = '1.0'; mpInput.step = 'any'; mpInput.min = '0.01';
     const aspectSel = el('select', 'fl-sel');
-    ctrl.appendChild(el('label')).textContent = '宽';
+    ctrl.appendChild(el('label')).textContent = ezT('Width');
     ctrl.appendChild(wInput);
-    ctrl.appendChild(el('label')).textContent = '高';
+    ctrl.appendChild(el('label')).textContent = ezT('Height');
     ctrl.appendChild(hInput);
-    ctrl.appendChild(el('label')).textContent = '对齐';
+    ctrl.appendChild(el('label')).textContent = ezT('Align');
     ctrl.appendChild(alignInput);
     ctrl.appendChild(el('label')).textContent = 'MP';
     ctrl.appendChild(mpInput);
-    ctrl.appendChild(el('label')).textContent = '比例';
+    ctrl.appendChild(el('label')).textContent = ezT('Ratio');
     ctrl.appendChild(aspectSel);
 
     // 预设行（选中即自动生效，无加载按钮）+ 自定义比例输入（放预设删除按钮之后）
     const presetRow = el('div', 'fl-row wrap');
     const presetSel = el('select', 'fl-sel');
-    const saveBtn = el('button', 'fl-btn success sm'); saveBtn.textContent = '保存';
-    const delBtn = el('button', 'fl-btn danger sm'); delBtn.textContent = '删除';
-    const ratioW = el('input', 'fl-num-ratio'); ratioW.type = 'number'; ratioW.value = '1'; ratioW.min = '1'; ratioW.title = '自定义比例宽';
+    const saveBtn = el('button', 'fl-btn success sm'); saveBtn.textContent = ezT('Save');
+    const delBtn = el('button', 'fl-btn danger sm'); delBtn.textContent = ezT('Delete');
+    const ratioW = el('input', 'fl-num-ratio'); ratioW.type = 'number'; ratioW.value = '1'; ratioW.min = '1'; ratioW.title = ezT('Custom ratio width');
     const ratioSep = el('span', 'fl-ratio-sep'); ratioSep.textContent = ':';
-    const ratioH = el('input', 'fl-num-ratio'); ratioH.type = 'number'; ratioH.value = '1'; ratioH.min = '1'; ratioH.title = '自定义比例高';
-    const saveRatioBtn = el('button', 'fl-btn success sm'); saveRatioBtn.textContent = '保存'; saveRatioBtn.title = '保存自定义比例';
-    const delRatioBtn = el('button', 'fl-btn danger sm'); delRatioBtn.textContent = '删除'; delRatioBtn.title = '删除选中的自定义比例';
+    const ratioH = el('input', 'fl-num-ratio'); ratioH.type = 'number'; ratioH.value = '1'; ratioH.min = '1'; ratioH.title = ezT('Custom ratio height');
+    const saveRatioBtn = el('button', 'fl-btn success sm'); saveRatioBtn.textContent = ezT('Save'); saveRatioBtn.title = ezT('Save custom ratio');
+    const delRatioBtn = el('button', 'fl-btn danger sm'); delRatioBtn.textContent = ezT('Delete'); delRatioBtn.title = ezT('Delete selected custom ratio');
     presetRow.appendChild(presetSel); presetRow.appendChild(saveBtn);
     presetRow.appendChild(delBtn);
     presetRow.appendChild(ratioW); presetRow.appendChild(ratioSep); presetRow.appendChild(ratioH);
@@ -604,7 +606,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     // 同步默认控件显示
     limitSel.value = String(st.limit);
     batchInput.value = String(st.batchSize);
-    algBtn.textContent = st.useOptimized ? '优' : '标';
+    algBtn.textContent = st.useOptimized ? ezT('Opt') : ezT('Std');
     algBtn.classList.toggle('opt', st.useOptimized);
     wInput.value = String(st.width);
     hInput.value = String(st.height);
@@ -719,8 +721,8 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     if (!els || !els.forceBtn) return;
     const active = !!st.force && (st.wLinked || st.hLinked || st.bLinked);
     els.forceBtn.classList.toggle('on', active);
-    els.forceBtn.textContent = '强';
-    els.forceBtn.title = active ? '强制生效中（忽略外部宽高/批次，使用面板值）' : '强制生效（仅任一输入有值时可用）';
+    els.forceBtn.textContent = ezT('Force');
+    els.forceBtn.title = active ? ezT('Force override active (ignore external width/height/batch, use panel values)') : ezT('Force override (available only when an input is connected)');
   }
 
   function drawCanvas(node) {
@@ -789,7 +791,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     ctx.fillText(`${st.height} px`, rx + rectW + 7, ry + rectH / 2);
     ctx.textAlign = 'right'; ctx.textBaseline = 'top';
     ctx.fillStyle = 'rgba(26,32,44,0.20)'; ctx.font = '8px Inter, sans-serif';
-    ctx.fillText(`限制 ${limit}×${limit}`, cw - 10, 8);
+    ctx.fillText(`${ezT('Limit')} ${limit}×${limit}`, cw - 10, 8);
   }
 
   function updateInfo(st) {
@@ -809,7 +811,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     els.alignInput.value = st.align;
     syncLimitUI(st);
     els.batchInput.value = st.batchSize;
-    els.algBtn.textContent = st.useOptimized ? '优' : '标';
+    els.algBtn.textContent = st.useOptimized ? ezT('Opt') : ezT('Std');
     els.algBtn.classList.toggle('opt', st.useOptimized);
   }
 
@@ -858,7 +860,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     // 算法切换
     els.algBtn.addEventListener('click', () => {
       st.useOptimized = !st.useOptimized;
-      els.algBtn.textContent = st.useOptimized ? '优' : '标';
+      els.algBtn.textContent = st.useOptimized ? ezT('Opt') : ezT('Std');
       els.algBtn.classList.toggle('opt', st.useOptimized);
       applyFromMP(node);
     });
@@ -944,7 +946,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     });
     els.saveBtn.addEventListener('click', () => {
       const def = `${calcAspect(st.width, st.height)} - ${st.width}x${st.height} - (${calcAspect(st.width, st.height)})`;
-      uiPrompt('请输入预设名称：', def).then((name) => {
+      uiPrompt(ezT('Enter preset name:'), def).then((name) => {
         if (!name || !name.trim()) return;
         const trimmed = name.trim();
         apiFetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: trimmed, config: { width: st.width, height: st.height, batch_size: st.batchSize } }) })
@@ -1101,7 +1103,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     if (!node || node._flSetup) return;
     try {
       if (typeof node.addDOMWidget !== 'function') {
-        console.warn('[FreeLatent] 该 ComfyUI 前端不支持 addDOMWidget，节点控件未启用');
+        console.warn('[FreeLatent] this ComfyUI frontend does not support addDOMWidget, node controls are disabled');
         return;
       }
       node._flSetup = true;

@@ -3,6 +3,7 @@
 // 切换/应用总预设时，把映射写进各分组节点的 config.current 并触发其应用开关（级联）。
 // 当前总预设名存 config；命名总预设存服务器 user_data 预设库（按节点名共享）。
 import { app } from "../../scripts/app.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
   NODE_TYPES, BASE_PRESETS, isBasePreset,
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
@@ -86,7 +87,7 @@ async function applyPreset(node, name) {
   return true;
 }
 async function savePresetToLib(node) {
-  const name = await uiPrompt('请输入总预设名称', '新总预设');
+  const name = await uiPrompt(ezT('Enter master preset name'), ezT('New master preset'));
   if (!name || !name.trim()) return;
   const groups = {};
   nodesOfType(NODE_TYPES.GROUP).forEach((g) => {
@@ -118,12 +119,12 @@ function statusOf(groupNode) {
   try {
     const states = groupNode._ezGroupAPI ? groupNode._ezGroupAPI.states() : {};
     const vals = Object.values(states);
-    if (!vals.length) return { label: '混合', cls: '' };
-    if (vals.every((v) => v === 'on')) return { label: '全开', cls: 'on' };
-    if (vals.every((v) => v === 'off')) return { label: '全静音', cls: 'off' };
-    if (vals.every((v) => v === 'bypass')) return { label: '全绕过', cls: 'bypass' };
-    return { label: '混合', cls: '' };
-  } catch (_) { return { label: '混合', cls: '' }; }
+    if (!vals.length) return { label: ezT('Mixed'), cls: '' };
+    if (vals.every((v) => v === 'on')) return { label: ezT('All on'), cls: 'on' };
+    if (vals.every((v) => v === 'off')) return { label: ezT('All off'), cls: 'off' };
+    if (vals.every((v) => v === 'bypass')) return { label: ezT('All bypass'), cls: 'bypass' };
+    return { label: ezT('Mixed'), cls: '' };
+  } catch (_) { return { label: ezT('Mixed'), cls: '' }; }
 }
 const TAG_CSS = { on: 'background:#ecfdf3;color:#065f46;', off: 'background:#fef2f2;color:#991b1b;', bypass: 'background:#fffbeb;color:#92400e;' };
 
@@ -134,9 +135,9 @@ function buildRoot(node) {
   shell.appendChild(root);
   node._ezRoot = shell;
   const hd = el('div', 'ezm-hd');
-  const masterSel = el('select'); masterSel.title = '总预设';
-  const saveBtn = el('button', 'ezm-btn success'); saveBtn.textContent = '保存';
-  const delBtn = el('button', 'ezm-btn danger'); delBtn.textContent = '删除';
+  const masterSel = el('select'); masterSel.title = ezT('Master preset');
+  const saveBtn = el('button', 'ezm-btn success'); saveBtn.textContent = ezT('Save');
+  const delBtn = el('button', 'ezm-btn danger'); delBtn.textContent = ezT('Delete');
   hd.appendChild(masterSel); hd.appendChild(saveBtn); hd.appendChild(delBtn);
   const list = el('div', 'ezm-list');
   root.appendChild(hd); root.appendChild(list);
@@ -151,7 +152,7 @@ function buildRoot(node) {
 
     const groups = nodesOfType(NODE_TYPES.GROUP);
     list.innerHTML = '';
-    if (!groups.length) { list.appendChild(el('div', 'ezm-empty')).textContent = '画布上还没有 EzFlex-NodeSwitchGroup 节点'; return; }
+    if (!groups.length) { list.appendChild(el('div', 'ezm-empty')).textContent = ezT('No EzFlex-NodeSwitchGroup nodes on the canvas'); return; }
     groups.forEach((g) => list.appendChild(renderRow(node, g, render)));
   }
 
@@ -175,7 +176,7 @@ async function refreshPresetOptions(node, sel) {
 
 function renderRow(masterNode, groupNode, refresh) {
   const row = el('div', 'ezm-row');
-  const name = el('span', 'gname'); name.textContent = groupNode.title || '分组'; name.title = groupNode.title || '';
+  const name = el('span', 'gname'); name.textContent = groupNode.title || ezT('Group'); name.title = groupNode.title || '';
   const sel = el('select');
   const api = groupNode._ezGroupAPI;
   const status = statusOf(groupNode);
@@ -203,7 +204,7 @@ function refreshUI(node) {
     const list = root.querySelector('.ezm-list');
     const groups = nodesOfType(NODE_TYPES.GROUP);
     list.innerHTML = '';
-    if (!groups.length) { list.appendChild(el('div', 'ezm-empty')).textContent = '画布上还没有 EzFlex-NodeSwitchGroup 节点'; }
+    if (!groups.length) { list.appendChild(el('div', 'ezm-empty')).textContent = ezT('No EzFlex-NodeSwitchGroup nodes on the canvas'); }
     groups.forEach((g) => list.appendChild(renderRow(node, g, () => refreshUI(node))));
     loadPresets(API).then((lib) => {
       const masterSel = root.querySelector('select');
@@ -248,6 +249,7 @@ function startTitleWatch(node) {
     const prevDraw = node.onDrawForeground;
     node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); schedule(); };
     scheduleOnRedraw(schedule);
+    onLocaleChange(() => { node._ezTitleSig = ''; try { refreshUI(node); } catch (_) {} });   // 语言切换即时重画
     if (EZ_PERF.mainPollMs > 0) node._ezTitleIv = setInterval(schedule, EZ_PERF.mainPollMs);
     schedule();
   }
@@ -275,7 +277,7 @@ function setupNode(node) {
     const root = buildRoot(node);
     node._ezRoot = root;
     makeDomWidgetHitThrough(root);
-    const widget = node.addDOMWidget('节点控制总预设', 'ezm-panel', root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 4, getMinHeight: () => 120, getValue: () => '{}', setValue: () => {} });
+    const widget = node.addDOMWidget(ezT('Node Control Master Preset'), 'ezm-panel', root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 4, getMinHeight: () => 120, getValue: () => '{}', setValue: () => {} });
     makeDomWidgetHitThrough(widget.element || root);
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}

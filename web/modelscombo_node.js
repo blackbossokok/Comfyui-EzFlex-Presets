@@ -4,6 +4,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames } from "./ezflex_service.js";
+import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 
 // ===== 现代乳白风样式（ModelsCombo 内嵌面板同套观感）=====
 const MC_CSS = `
@@ -222,21 +223,21 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   const DOT = { checkpoint: '#4a7fa8', unet: '#3a8a6a', clip: '#b8954a', vae: '#7a5a9a', lora: '#a85a6a' };
 
   const EXTRA = {
-    checkpoint: [{ key: 'weight_dtype', label: '权重类型', type: 'select', opts: WEIGHT_OPTS }],
+    checkpoint: [{ key: 'weight_dtype', label: 'Weight type', type: 'select', opts: WEIGHT_OPTS }],
     unet: [
-      { key: 'device', label: '设备', type: 'select', opts: DEVICE_OPTS },
-      { key: 'weight_dtype', label: '权重类型', type: 'select', opts: WEIGHT_OPTS }
+      { key: 'device', label: 'Device', type: 'select', opts: DEVICE_OPTS },
+      { key: 'weight_dtype', label: 'Weight type', type: 'select', opts: WEIGHT_OPTS }
     ],
     clip: [
-      { key: 'type', label: '类型', type: 'select', opts: CLIP_TYPES },
-      { key: 'device', label: '设备', type: 'select', opts: DEVICE_OPTS }
+      { key: 'type', label: 'Type', type: 'select', opts: CLIP_TYPES },
+      { key: 'device', label: 'Device', type: 'select', opts: DEVICE_OPTS }
     ],
     vae: [
-      { key: 'device', label: '设备', type: 'select', opts: DEVICE_OPTS },
-      { key: 'weight_dtype', label: '权重类型', type: 'select', opts: ['default', 'fp16', 'bf16', 'fp32'] }
+      { key: 'device', label: 'Device', type: 'select', opts: DEVICE_OPTS },
+      { key: 'weight_dtype', label: 'Weight type', type: 'select', opts: ['default', 'fp16', 'bf16', 'fp32'] }
     ],
     lora: [
-      { key: 'strength_model', label: '模型', type: 'range', def: 1.0, min: -5, max: 5, step: 0.1 },
+      { key: 'strength_model', label: 'Model', type: 'range', def: 1.0, min: -5, max: 5, step: 0.1 },
       { key: 'strength_clip', label: 'CLIP', type: 'range', def: 1.0, min: -5, max: 5, step: 0.1 }
     ]
   };
@@ -438,8 +439,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   window.__ezDumpBindings = function (node) {
     try {
       const d = dumpLoadersOf(node);
-      console.log('[EzFlex] 输出端口→加载器绑定', JSON.stringify(d.rows, null, 2));
-      console.log('[EzFlex] 写入 config 的加载器顺序', JSON.stringify(d.configOrder));
+      console.log('[EzFlex] output socket -> loader bindings', JSON.stringify(d.rows, null, 2));
+      console.log('[EzFlex] loader order written to config', JSON.stringify(d.configOrder));
       return d;
     }
     catch (e) { console.error('[EzFlex] dump failed', e); return null; }
@@ -447,7 +448,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   window.__ezDumpCombo = function () {
     const nodes = ((app && app.graph && app.graph._nodes) || []).filter((n) => n && n.type === 'EzFlex-ModelsCombo');
     nodes.forEach((n) => { console.log('--- ModelsCombo node id=', n.id); window.__ezDumpBindings(n); });
-    if (!nodes.length) console.warn('[EzFlex] 未找到 EzFlex-ModelsCombo 节点');
+    if (!nodes.length) console.warn('[EzFlex] no EzFlex-ModelsCombo node found');
   };
 
   // LoRA「目标加载器」下拉实时跟随主加载器自定义名称变化（不重建整行，避免输入失焦）
@@ -529,7 +530,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
   // ===== 悬停预览（读取模型文件夹内同名图片，由后端 /models_combo/preview 提供）=====
   const PREVIEW_PH = 'data:image/svg+xml,' + encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="130"><rect width="200" height="130" fill="#e8e2da"/><text x="100" y="66" font-size="12" text-anchor="middle" fill="#8a9aa8" font-family="Inter">无预览图</text></svg>'
+    '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="130"><rect width="200" height="130" fill="#e8e2da"/><text x="100" y="66" font-size="12" text-anchor="middle" fill="#8a9aa8" font-family="Inter">' + ezT('No preview image') + '</text></svg>'
   );
 
   let _pv = null;
@@ -537,10 +538,10 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (!_pv) {
       const popup = el('div', 'mc-preview-popup');
       const img = el('img', 'mc-preview-img');
-      img.alt = '预览';
+      img.alt = ezT('Preview');
       const video = document.createElement('video');
       video.className = 'mc-preview-video';
-      video.muted = true; video.loop = true; video.autoplay = true; video.playsInline = true; video.alt = '预览';
+      video.muted = true; video.loop = true; video.autoplay = true; video.playsInline = true; video.alt = ezT('Preview');
       const lab = el('div', 'mc-preview-label');
       popup.appendChild(img); popup.appendChild(video); popup.appendChild(lab);
       document.body.appendChild(popup);
@@ -610,25 +611,25 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
     const bar = el('div', 'mc-bar');
     const addSel = el('select', 'mc-add');
-    addSel.appendChild(el('option', null, { value: '' })).textContent = '+ 添加加载器…';
+    addSel.appendChild(el('option', null, { value: '' })).textContent = ezT('+ Add loader…');
     TYPE_ORDER.forEach((t) => {
       const o = el('option', null, { value: t });
       o.textContent = LABEL[t];
       addSel.appendChild(o);
     });
     const browseBtn = el('button', 'mc-browse');
-    browseBtn.textContent = '⧉ 浏览';
-    browseBtn.title = '浏览 LoraManager 模型并批量添加加载器';
+    browseBtn.textContent = ezT('⧉ Browse');
+    browseBtn.title = ezT('Browse LoraManager models and add loaders in bulk');
     const presetName = el('input', 'mc-preset-name');
     presetName.type = 'text';
-    presetName.placeholder = '预设名';
+    presetName.placeholder = ezT('Preset name');
     const savePresetBtn = el('button', 'mc-preset-btn');
-    savePresetBtn.textContent = '保存';
-    savePresetBtn.title = '保存为预设';
+    savePresetBtn.textContent = ezT('Save');
+    savePresetBtn.title = ezT('Save as preset');
     const presetSel = el('select', 'mc-preset-sel');
     const delPresetBtn = el('button', 'mc-preset-btn');
-    delPresetBtn.textContent = '删除';
-    delPresetBtn.title = '删除所选预设';
+    delPresetBtn.textContent = ezT('Delete');
+    delPresetBtn.title = ezT('Delete selected preset');
 
     bar.appendChild(addSel);
     bar.appendChild(browseBtn);
@@ -679,13 +680,13 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const nameIn = el('input', 'mc-name');
     nameIn.type = 'text';
     nameIn.value = loader.name;
-    nameIn.placeholder = '名称';
+    nameIn.placeholder = ezT('Name');
 
     const fileCombo = fileComboEl(node, loader, st.files[loader.type] || []);
 
     const delBtn = el('button', 'mc-del');
     delBtn.textContent = '✕';
-    delBtn.title = '删除';
+    delBtn.title = ezT('Delete');
 
     row.appendChild(idxSpan);
     row.appendChild(typeSel);
@@ -695,7 +696,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     (EXTRA[loader.type] || []).forEach((f) => {
       const grp = el('div', 'mc-param');
       const lab = el('label', 'mc-plabel');
-      lab.textContent = f.label;
+      lab.textContent = ezT(f.label);
       grp.appendChild(lab);
 
       let ctl;
@@ -749,7 +750,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
     // 拖动排序（#3）：用把手拖动行
     const grip = el('div', 'mc-grip');
-    grip.title = '拖动排序';
+    grip.title = ezT('Drag to reorder');
     row.appendChild(grip);
     row.appendChild(delBtn);
     makeRowDraggable(node, row, loader);
@@ -948,12 +949,12 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const wrap = el('div', 'mc-combo');
     const trigger = el('button', 'mc-combo-trigger');
     const valSpan = el('span', 'mc-combo-value');
-    valSpan.textContent = loader.file || '选择模型…';
+    valSpan.textContent = loader.file || ezT('Select model…');
     const arrow = el('span', 'mc-combo-arrow'); arrow.textContent = '▾';
     trigger.appendChild(valSpan); trigger.appendChild(arrow);
     const populateCombo = (l, optsArr) => {
       l.innerHTML = '';
-      const opts = (optsArr && optsArr.length) ? optsArr : ['(无可用文件)'];
+      const opts = (optsArr && optsArr.length) ? optsArr : [ezT('(No files available)')];
       opts.forEach((f) => {
         const opt = el('div', 'mc-combo-option');
         opt.textContent = f;
@@ -969,7 +970,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         });
         l.appendChild(opt);
       });
-      if (!(optsArr && optsArr.length)) { const empty = el('div', 'mc-combo-empty'); empty.textContent = '暂无文件'; l.appendChild(empty); }
+      if (!(optsArr && optsArr.length)) { const empty = el('div', 'mc-combo-empty'); empty.textContent = ezT('No files'); l.appendChild(empty); }
       openCombo(l, trigger);
     };
     trigger.addEventListener('click', (e) => {
@@ -1007,7 +1008,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const c = portCounts(st.loaders);
     const add = typeContrib(type);
     if (c.models + add.model > MAX_PER_TYPE || c.clips + add.clip > MAX_PER_TYPE || c.vaes + add.vae > MAX_PER_TYPE) {
-      showWarn(node, `超出上限：每种输出最多 ${MAX_PER_TYPE} 个，请拆分配置。`);
+      showWarn(node, ezT('Over the limit: at most ') + MAX_PER_TYPE + ezT(' per output type, please split the configuration.'));
       return;
     }
     let id = 1;
@@ -1037,7 +1038,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const add = typeContrib(type);
     const rm = typeContrib(l.type);
     if (c.models - rm.model + add.model > MAX_PER_TYPE || c.clips - rm.clip + add.clip > MAX_PER_TYPE || c.vaes - rm.vae + add.vae > MAX_PER_TYPE) {
-      showWarn(node, `超出上限：每种输出最多 ${MAX_PER_TYPE} 个`);
+      showWarn(node, ezT('Over the limit: at most ') + MAX_PER_TYPE + ezT(' per output type'));
       return;
     }
     l.type = type;
@@ -1054,7 +1055,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       list.innerHTML = '';
       if (!st.loaders.length) {
         const empty = el('div', 'mc-empty');
-        empty.textContent = '暂无加载器';
+        empty.textContent = ezT('No loaders');
         list.appendChild(empty);
       } else {
         let dividerDone = false;
@@ -1108,7 +1109,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (!sel) return;
     sel.innerHTML = '';
     const d = el('option', null, { value: '' });
-    d.textContent = '—预设—';
+    d.textContent = ezT('—Preset—');
     sel.appendChild(d);
     let list = [];
     try { const r = await fetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
@@ -1116,22 +1117,22 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   }
   async function savePreset(node, sel, name) {
     name = (name || '').trim();
-    if (!name) { showWarn(node, '请输入预设名称'); return; }
-    if (!stateFor(node).loaders.length) { showWarn(node, '没有加载器可保存'); return; }
+    if (!name) { showWarn(node, ezT('Enter preset name')); return; }
+    if (!stateFor(node).loaders.length) { showWarn(node, ezT('No loaders to save')); return; }
     const cur = { name, loaders: JSON.parse(JSON.stringify(stateFor(node).loaders)) };
     try {
       await fetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cur) });
     } catch (_) { /* 忽略 */ }
     await refreshPresetSel(sel);
     sel.value = name;
-    showWarn(node, '已保存预设 ' + name);
+    showWarn(node, ezT('Saved preset ') + name);
   }
   async function loadPreset(node, sel, name) {
-    if (!name) { showWarn(node, '请选择预设'); return; }
+    if (!name) { showWarn(node, ezT('Select a preset')); return; }
     let list = [];
     try { const r = await fetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
     const p = list.find((x) => x.name === name);
-    if (!p) { showWarn(node, '预设不存在'); return; }
+    if (!p) { showWarn(node, ezT('Preset does not exist')); return; }
     node._ezCurPreset = name;
     stateFor(node).loaders = parseLoaders(JSON.stringify(p.loaders));
     let mx = 0;
@@ -1142,11 +1143,11 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   }
   async function deletePreset(node, sel) {
     const name = sel && sel.value;
-    if (!name) { showWarn(node, '请选择预设'); return; }
+    if (!name) { showWarn(node, ezT('Select a preset')); return; }
     try { await fetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); } catch (_) { /* 忽略 */ }
     await refreshPresetSel(sel);
     sel.value = '';
-    showWarn(node, '已删除预设 ' + name);
+    showWarn(node, ezT('Deleted preset ') + name);
   }
 
   // ===== 浏览弹窗（读取 LoraManager 生成的 metadata.json + 预览图）=====
@@ -1288,7 +1289,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (_isLoaded(node, type, item.file)) return;
     const c = portCounts(st.loaders), add = typeContrib(type);
     if (c.models + add.model > MAX_PER_TYPE || c.clips + add.clip > MAX_PER_TYPE || c.vaes + add.vae > MAX_PER_TYPE) {
-      showWarn(node, '超出上限：每种输出最多 ' + MAX_PER_TYPE + ' 个，请拆分配置。');
+      showWarn(node, ezT('Over the limit: at most ') + MAX_PER_TYPE + ezT(' per output type, please split the configuration.'));
       return;
     }
     let id = 1;
@@ -1316,30 +1317,30 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (_bbOverlay && _bbOverlay.parentNode) return _bbOverlay;
     const ov = el('div', 'mc-bb-overlay');
     const header = el('div', 'mc-bb-header');
-    const title = el('div', 'mc-bb-title'); title.textContent = '模型浏览器';
+    const title = el('div', 'mc-bb-title'); title.textContent = ezT('Model Browser');
     const badge = el('div', 'mc-bb-badge'); badge.textContent = 'LoraManager';
-    const search = el('input', 'mc-bb-search'); search.type = 'text'; search.placeholder = '搜索名称 / 标签…';
+    const search = el('input', 'mc-bb-search'); search.type = 'text'; search.placeholder = ezT('Search name / tags…');
     const searchField = el('select', 'mc-bb-searchfield');
-    [['all','全部字段'],['title','标题/名称'],['author','作者'],['category','模型类别'],['base','基础模型'],['tags','标签'],['trained','触发词'],['desc','描述'],['version','版本'],['file','文件名/路径']].forEach(([v,label]) => {
+    [['all',ezT('All fields')],['title',ezT('Title / name')],['author',ezT('Author')],['category',ezT('Model category')],['base',ezT('Base model')],['tags',ezT('Tags')],['trained',ezT('Trigger words')],['desc',ezT('Description')],['version',ezT('Version')],['file',ezT('File name / path')]].forEach(([v,label]) => {
       const o = el('option', null, { value: v });
       o.textContent = label;
       searchField.appendChild(o);
     });
     searchField.value = 'all';
     const count = el('div', 'mc-bb-count'); count.textContent = '0';
-    const close = el('button', 'mc-bb-close'); close.textContent = '✕'; close.title = '关闭'; close.setAttribute('aria-label', '关闭');
+    const close = el('button', 'mc-bb-close'); close.textContent = '✕'; close.title = ezT('Close'); close.setAttribute('aria-label', ezT('Close'));
     header.appendChild(title); header.appendChild(badge); header.appendChild(search); header.appendChild(searchField); header.appendChild(count); header.appendChild(close);
     const tabs = el('div', 'mc-bb-tabs');
     const body = el('div', 'mc-bb-body');
     const side = el('div', 'mc-bb-side');
     const sidehead = el('div', 'mc-bb-sidehead');
-    const sideTitle = el('div', 'mc-bb-side-title'); sideTitle.textContent = '文件夹';
+    const sideTitle = el('div', 'mc-bb-side-title'); sideTitle.textContent = ezT('Folder');
     const sidebtns = el('div', 'mc-bb-sidebtns');
-    const b1 = el('button', 'mc-bb-sbtn'); b1.innerHTML = _SVG.tree; b1.title = '树/列表切换';
-    const b2 = el('button', 'mc-bb-sbtn'); b2.innerHTML = _SVG.branch; b2.title = '递归（含子文件夹）';
+    const b1 = el('button', 'mc-bb-sbtn'); b1.innerHTML = _SVG.tree; b1.title = ezT('Toggle tree / list');
+    const b2 = el('button', 'mc-bb-sbtn'); b2.innerHTML = _SVG.branch; b2.title = ezT('Recursive (include subfolders)');
     b2.classList.add('active');
-    const b3 = el('button', 'mc-bb-sbtn'); b3.innerHTML = _SVG.compress; b3.title = '全部折叠';
-    const b4 = el('button', 'mc-bb-sbtn mc-bb-sbtn-hide'); b4.innerHTML = _SVG.chevLeft; b4.title = '隐藏侧栏';
+    const b3 = el('button', 'mc-bb-sbtn'); b3.innerHTML = _SVG.compress; b3.title = ezT('Collapse all');
+    const b4 = el('button', 'mc-bb-sbtn mc-bb-sbtn-hide'); b4.innerHTML = _SVG.chevLeft; b4.title = ezT('Hide sidebar');
     sidebtns.appendChild(b1); sidebtns.appendChild(b2); sidebtns.appendChild(b3); sidebtns.appendChild(b4);
     sidehead.appendChild(sideTitle); sidehead.appendChild(sidebtns);
     const tree = el('div', 'mc-bb-tree');
@@ -1365,7 +1366,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
   function renderTabs() {
     const tabs = _bbOverlay._tabs; tabs.innerHTML = '';
-    const defs = [['', '全部'], ['checkpoint', 'Checkpoint'], ['unet', 'UNET'], ['lora', 'LoRA']];
+    const defs = [['', ezT('All')], ['checkpoint', 'Checkpoint'], ['unet', 'UNET'], ['lora', 'LoRA']];
     defs.forEach(([v, label]) => {
       const b = el('button', 'mc-bb-tab' + (v === _bbTabType ? ' active' : ''));
       b.textContent = label;
@@ -1381,7 +1382,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const b4 = _bbOverlay._side.querySelector('.mc-bb-sbtn-hide');
     if (b4) {
       b4.innerHTML = _bbSidebarHidden ? _SVG.chevRight : _SVG.chevLeft;
-      b4.title = _bbSidebarHidden ? '展开侧栏' : '隐藏侧栏';
+      b4.title = _bbSidebarHidden ? ezT('Show sidebar') : ezT('Hide sidebar');
     }
     renderFolderSidebar();
   }
@@ -1394,7 +1395,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (ov._searchField) ov._searchField.value = 'all';
     ov._side.classList.remove('collapsed'); _bbSidebarHidden = false;
     const b4 = ov._side.querySelector('.mc-bb-sbtn-hide');
-    if (b4) { b4.innerHTML = _SVG.chevLeft; b4.title = '隐藏侧栏'; }
+    if (b4) { b4.innerHTML = _SVG.chevLeft; b4.title = ezT('Hide sidebar'); }
     ov.classList.add('open');
     renderTabs();
     loadLoraMetaIntoBrowser(ov);
@@ -1414,7 +1415,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       _bbOverlay._side.classList.remove('collapsed');
       _bbSidebarHidden = false;
       const b4 = _bbOverlay._side.querySelector('.mc-bb-sbtn-hide');
-      if (b4) { b4.innerHTML = _SVG.chevLeft; b4.title = '隐藏侧栏'; }
+      if (b4) { b4.innerHTML = _SVG.chevLeft; b4.title = ezT('Hide sidebar'); }
     }
     closeLoraDetail();
   }
@@ -1422,7 +1423,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   async function loadLoraMetaIntoBrowser(ov) {
     const grid = ov._grid;
     grid.innerHTML = '';
-    const loading = el('div', 'mc-bb-loading'); loading.textContent = '加载中…'; grid.appendChild(loading);
+    const loading = el('div', 'mc-bb-loading'); loading.textContent = ezT('Loading…'); grid.appendChild(loading);
     ov._count.textContent = '';
     try {
       const fetcher = api && typeof api.fetchApi === 'function' ? (p) => api.fetchApi(p) : (p) => fetch(p);
@@ -1504,10 +1505,10 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       });
     }
     if (_bbSelFolder) items = items.filter((x) => _itemInFolder(x, _bbSelFolder));
-    ov._count.textContent = items.length + ' 个';
+    ov._count.textContent = items.length + ' ' + ezT('items');
     if (!items.length) {
       const empty = el('div', 'mc-bb-empty');
-      empty.textContent = _bbItems.length ? '没有匹配的模型' : '未找到 LoraManager 元数据（请先让 LoraManager 扫描模型）';
+      empty.textContent = _bbItems.length ? ezT('No matching models') : ezT('No LoraManager metadata found (run a LoraManager scan first)');
       grid.appendChild(empty);
     } else {
       items.forEach((item) => grid.appendChild(buildLoraBrowserCard(item)));
@@ -1574,7 +1575,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const rootRow = el('div', 'mc-bb-trow' + (!_bbSelFolder ? ' sel' : ''));
     const twist = el('div', 'mc-bb-twist leaf');
     const icon = el('span', 'mc-bb-ficon'); icon.innerHTML = _SVG.home;
-    const nameEl = el('div', 'mc-bb-fname'); nameEl.textContent = '全部模型';
+    const nameEl = el('div', 'mc-bb-fname'); nameEl.textContent = ezT('All models');
     rootRow.appendChild(twist); rootRow.appendChild(icon); rootRow.appendChild(nameEl);
     rootRow.addEventListener('click', () => { _bbSelFolder = ''; renderLoraBrowserGrid(); });
     tree.appendChild(rootRow);
@@ -1600,7 +1601,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       const remote = _metaRemoteThumb(item);
       if (remote) { img.onerror = null; img.src = remote; }
       else if (!thumb.querySelector('.mc-b-noph')) {
-        const ph = el('div', 'mc-b-noph'); ph.textContent = '无预览'; thumb.appendChild(ph);
+        const ph = el('div', 'mc-b-noph'); ph.textContent = ezT('No preview'); thumb.appendChild(ph);
       }
     });
     const typeBadge = el('div', 'mc-b-type ' + (item.type || ''));
@@ -1612,7 +1613,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       const added = _isLoaded(_bbNode, item.type, item.file);
       addBtn.textContent = added ? '−' : '+';
       addBtn.classList.toggle('added', added);
-      addBtn.title = added ? '移除加载器' : '添加为加载器';
+      addBtn.title = added ? ezT('Remove loader') : ezT('Add as loader');
     };
     refreshAdd();
     addBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleLoaderFromMeta(_bbNode, item); refreshAdd(); });
@@ -1637,7 +1638,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const head = el('div', 'mc-bd-head');
     const title = el('div', 'mc-bd-title');
     const type = el('div', 'mc-bd-type');
-    const add = el('button', 'mc-bd-add'); add.textContent = '＋ 添加到组合';
+    const add = el('button', 'mc-bd-add'); add.textContent = ezT('＋ Add to combo');
     const close = el('button', 'mc-bd-close'); close.textContent = '✕';
     head.appendChild(title); head.appendChild(type); head.appendChild(add); head.appendChild(close);
     const body = el('div', 'mc-bd-body');
@@ -1647,7 +1648,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     add.addEventListener('click', () => {
       toggleLoaderFromMeta(_bdNode, _bdItem);
       const added = _isLoaded(_bdNode, _bdItem.type, _bdItem.file);
-      add.textContent = added ? '− 移除' : '＋ 添加到组合';
+      add.textContent = added ? ezT('− Remove') : ezT('＋ Add to combo');
       add.classList.toggle('added', added);
     });
     close.addEventListener('click', closeLoraDetail);
@@ -1684,7 +1685,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     ov._title.textContent = item.model_name || item.file_name || item.file || '';
     ov._type.textContent = LABEL[item.type] || item.type || '';
     const has = _isLoaded(_bbNode, item.type, item.file);
-    ov._add.textContent = has ? '− 移除' : '＋ 添加到组合';
+    ov._add.textContent = has ? ezT('− Remove') : ezT('＋ Add to combo');
     ov._add.classList.toggle('added', has);
     let meta = item;
     try {
@@ -1694,26 +1695,26 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       if (r && r.ok) { const d = await r.json(); if (d && typeof d === 'object') meta = d; }
     } catch (_) { /* 忽略 */ }
     const civ = meta.civitai || {};
-    _attachMedia(body, _metaPreviewUrl(item), 'mc-bd-img', '预览', ({ img }) => {
+    _attachMedia(body, _metaPreviewUrl(item), 'mc-bd-img', ezT('Preview'), ({ img }) => {
       const remote = _metaRemoteThumb(item);
       if (remote) { img.onerror = null; img.src = remote; }
       else { img.style.display = 'none'; }
     });
     const grid = el('div', 'mc-bd-grid');
-    _bdField(grid, '版本', civ.name);
-    if (meta.file_name) _bdField(grid, '文件名', meta.file_name + (item.file ? '.' + item.file.split('.').pop() : ''));
-    _bdField(grid, '基础模型', meta.base_model || civ.baseModel);
-    _bdField(grid, '大小', _fmtBytes(meta.size));
-    _bdField(grid, '修改时间', _fmtMtime(meta.modified));
+    _bdField(grid, ezT('Version'), civ.name);
+    if (meta.file_name) _bdField(grid, ezT('File name'), meta.file_name + (item.file ? '.' + item.file.split('.').pop() : ''));
+    _bdField(grid, ezT('Base model'), meta.base_model || civ.baseModel);
+    _bdField(grid, ezT('File size'), _fmtBytes(meta.size));
+    _bdField(grid, ezT('Modified'), _fmtMtime(meta.modified));
     _bdField(grid, 'SHA256', meta.sha256 ? (String(meta.sha256).slice(0, 16) + '…') : '');
     const locParts = (meta.file_path || '').split(/[\\/]/).slice(0, -1).join('/');
-    _bdField(grid, '位置', locParts || (item.file ? item.file.split('/').slice(0, -1).join('/') || '/' : ''));
+    _bdField(grid, ezT('Location'), locParts || (item.file ? item.file.split('/').slice(0, -1).join('/') || '/' : ''));
     body.appendChild(grid);
     // 触发词
     const trained = (meta.trainedWords && meta.trainedWords.length) ? meta.trainedWords : (civ.trainedWords || []);
     if (trained && trained.length) {
       const sec = el('div', 'mc-bd-sec');
-      const st = el('div', 'mc-bd-sec-title'); st.textContent = '触发词';
+      const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('Trigger words');
       sec.appendChild(st);
       const txt = el('div', 'mc-bd-text'); txt.textContent = trained.join(', ');
       sec.appendChild(txt); body.appendChild(sec);
@@ -1729,7 +1730,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (!tipsHtml && meta.usage_tips && meta.usage_tips !== '{}') tipsHtml = meta.usage_tips;
     if (tipsHtml) {
       const sec = el('div', 'mc-bd-sec');
-      const st = el('div', 'mc-bd-sec-title'); st.textContent = '使用提示';
+      const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('Usage tips');
       sec.appendChild(st);
       const txt = el('div', 'mc-bd-text'); txt.textContent = tipsHtml;
       sec.appendChild(txt); body.appendChild(sec);
@@ -1737,7 +1738,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     // 附加备注
     if (meta.notes) {
       const sec = el('div', 'mc-bd-sec');
-      const st = el('div', 'mc-bd-sec-title'); st.textContent = '附加备注';
+      const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('Notes');
       sec.appendChild(st);
       const txt = el('div', 'mc-bd-text'); txt.textContent = meta.notes;
       sec.appendChild(txt); body.appendChild(sec);
@@ -1746,7 +1747,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const descHtml = meta.modelDescription || civ.description || (civ.model && civ.model.description) || '';
     if (descHtml) {
       const sec = el('div', 'mc-bd-sec');
-      const st = el('div', 'mc-bd-sec-title'); st.textContent = '关于此版本';
+      const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('About this version');
       sec.appendChild(st);
       const txt = el('div', 'mc-bd-desc'); txt.innerHTML = descHtml;
       sec.appendChild(txt); body.appendChild(sec);
@@ -1755,7 +1756,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const tags = (meta.tags || []).concat(civ.tags || []).concat((civ.model && civ.model.tags) || []);
     if (tags.length) {
       const sec = el('div', 'mc-bd-sec');
-      const st = el('div', 'mc-bd-sec-title'); st.textContent = '标签';
+      const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('Tags');
       sec.appendChild(st);
       const chips = el('div', 'mc-bd-chips');
       tags.forEach((t) => { const c = el('div', 'mc-bd-chip'); c.textContent = t; chips.appendChild(c); });
@@ -1764,18 +1765,18 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     // Civitai 链接 / 作者 / 统计
     if (civ.modelId || civ.id || civ.creator || civ.stats) {
       const sec = el('div', 'mc-bd-sec');
-      const st = el('div', 'mc-bd-sec-title'); st.textContent = '来源';
+      const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('Source');
       sec.appendChild(st);
       const link = el('a', 'mc-bd-link');
       link.target = '_blank'; link.rel = 'noopener';
       link.textContent = civ.modelId ? ('civitai.com/models/' + civ.modelId + (civ.id ? '?modelVersionId=' + civ.id : '')) : (civ.downloadUrl || '');
       link.href = civ.modelId ? ('https://civitai.com/models/' + civ.modelId + (civ.id ? '?modelVersionId=' + civ.id : '')) : (civ.downloadUrl || '#');
       sec.appendChild(link);
-      if (civ.creator) { const c = el('div', 'mc-bd-text'); c.textContent = '作者: ' + civ.creator; sec.appendChild(c); }
+      if (civ.creator) { const c = el('div', 'mc-bd-text'); c.textContent = ezT('Author: ') + civ.creator; sec.appendChild(c); }
       if (civ.stats) {
         const parts = [];
-        if (civ.stats.downloadCount != null) parts.push('下载 ' + Number(civ.stats.downloadCount).toLocaleString());
-        if (civ.stats.thumbsUpCount != null) parts.push('喜欢 ' + Number(civ.stats.thumbsUpCount).toLocaleString());
+        if (civ.stats.downloadCount != null) parts.push(ezT('Downloads ') + Number(civ.stats.downloadCount).toLocaleString());
+        if (civ.stats.thumbsUpCount != null) parts.push(ezT('Likes ') + Number(civ.stats.thumbsUpCount).toLocaleString());
         if (parts.length) { const c = el('div', 'mc-bd-text'); c.textContent = parts.join(' · '); sec.appendChild(c); }
       }
       body.appendChild(sec);
@@ -1783,7 +1784,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     // 图片来源预览
     if (civ.images && civ.images.length) {
       const sec = el('div', 'mc-bd-sec');
-      const st = el('div', 'mc-bd-sec-title'); st.textContent = '示例图';
+      const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('Example images');
       sec.appendChild(st);
       const gal = el('div', 'mc-bd-gallery');
       civ.images.slice(0, 12).forEach((im) => {
@@ -1874,19 +1875,19 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     cmR(ctx, TB.x, TB.y, TB.w, TB.h, 7);
     ctx.fillStyle = CANVAS_CARD; ctx.fill();
     ctx.strokeStyle = CANVAS_BORDER; ctx.lineWidth = 1; ctx.stroke();
-    cdrawButton(ctx, node, TB.x + 6, TB.y + 5, 116, 20, '+ 添加加载器…', 'add', null, { bg: CANVAS_DD });
+    cdrawButton(ctx, node, TB.x + 6, TB.y + 5, 116, 20, ezT('+ Add loader…'), 'add', null, { bg: CANVAS_DD });
     ctx.fillStyle = CANVAS_MUTED; ctx.font = '11px Inter, system-ui, sans-serif'; ctx.textAlign = 'left';
-    ctx.fillText(st.presetName || '预设名', TB.x + 130, TB.y + 16);
+    ctx.fillText(st.presetName || ezT('Preset name'), TB.x + 130, TB.y + 16);
     addRegion(node, TB.x + 128, TB.y + 3, 120, 24, 'presetName', null);
-    cdrawButton(ctx, node, TB.x + TB.w - 144, TB.y + 5, 46, 20, '保存', 'save', null);
-    cdrawButton(ctx, node, TB.x + TB.w - 94, TB.y + 5, 46, 20, '加载', 'load', null);
-    cdrawButton(ctx, node, TB.x + TB.w - 44, TB.y + 5, 42, 20, '删除', 'delete', null);
+    cdrawButton(ctx, node, TB.x + TB.w - 144, TB.y + 5, 46, 20, ezT('Save'), 'save', null);
+    cdrawButton(ctx, node, TB.x + TB.w - 94, TB.y + 5, 46, 20, ezT('Load'), 'load', null);
+    cdrawButton(ctx, node, TB.x + TB.w - 44, TB.y + 5, 42, 20, ezT('Delete'), 'delete', null);
     let y = TB.y + TB.h + 8;
     const rowX = LG, rowW = W - LG - RG;
 
     if (!st.loaders.length) {
       ctx.fillStyle = CANVAS_MUTED; ctx.font = '12px Inter, system-ui, sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('暂无加载器（点上方「+ 添加加载器…」）', W / 2, y + 30);
+      ctx.fillText(ezT('No loaders yet (click "+ Add loader…" above)'), W / 2, y + 30);
     } else {
       st.loaders.forEach((loader, idx) => {
         const rh = 34;
@@ -1904,7 +1905,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         ctx.fillStyle = CANVAS_BG; ctx.fill();
         ctx.strokeStyle = CANVAS_BORDER; ctx.lineWidth = 1; ctx.stroke();
         ctx.fillStyle = CANVAS_TXT; ctx.font = '10px Inter, system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillText((loader.file || '选择模型…').slice(0, Math.floor(fileW / 5.2)), fileX + 6, ry + rh / 2 + 0.5);
+        ctx.fillText((loader.file || ezT('Select model…')).slice(0, Math.floor(fileW / 5.2)), fileX + 6, ry + rh / 2 + 0.5);
         addRegion(node, fileX, ry + 4, fileW, 26, 'file', { idx });
         cdrawButton(ctx, node, rowX + rowW - 34, ry + 7, 26, 20, '×', 'remove', { idx }, { bg: '#c0392b' });
         y = ry + rh + 6;
@@ -1943,9 +1944,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (!r) return false;
     if (r.name === 'add') {
       openMenu(node, rx, ry, [
-        { label: 'Checkpoint (模型+CLIP+VAE)', value: 'checkpoint', color: '#a78bfa' },
-        { label: 'UNET (模型)', value: 'unet', color: '#60a5fa' },
-        { label: 'CLIP (文本编码)', value: 'clip', color: '#fbbf24' },
+        { label: ezT('Checkpoint (model + CLIP + VAE)'), value: 'checkpoint', color: '#a78bfa' },
+        { label: ezT('UNET (model)'), value: 'unet', color: '#60a5fa' },
+        { label: ezT('CLIP (text encoder)'), value: 'clip', color: '#fbbf24' },
         { label: 'VAE', value: 'vae', color: '#f87171' },
         { label: 'LoRA', value: 'lora', color: '#34d399' },
       ], (type) => { addLoader(node, type); syncToConfig(node); canvasRedraw(node); });
@@ -1983,12 +1984,12 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (r.name === 'save') {
       const st = stateFor(node);
       const presets = readPresets();
-      const name = st.presetName && st.presetName.trim() ? st.presetName.trim() : '预设_' + (presets.length + 1);
+      const name = st.presetName && st.presetName.trim() ? st.presetName.trim() : ezT('Preset ') + (presets.length + 1);
       const obj = { name, loaders: st.loaders.map(function (l) { return JSON.parse(JSON.stringify(l)); }) };
       const i = presets.findIndex(function (p) { return p.name === name; });
       if (i >= 0) presets[i] = obj; else presets.push(obj);
       writePresets(presets);
-      st._mcWarn = '已保存预设：' + name;
+      st._mcWarn = ezT('Saved preset: ') + name;
       canvasRedraw(node);
       return true;
     }
@@ -2212,6 +2213,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         pumpFrames();
       };
       scheduleOnRedraw(update);
+      onLocaleChange(() => { try { render(node); } catch (_) {} update(); });   // 语言切换即时重画
       schedule();
     }
   }
@@ -2286,7 +2288,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (!node || node._mcSetup) return;
     try {
       if (typeof node.addDOMWidget !== 'function') {
-        console.warn('[ModelsCombo] 该 ComfyUI 前端不支持 addDOMWidget，节点控件未启用（改用全屏编辑器）');
+        console.warn('[ModelsCombo] this ComfyUI frontend does not support addDOMWidget; node widget disabled (falling back to the fullscreen editor)');
         return;
       }
       node._mcSetup = true;
@@ -2316,7 +2318,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       node._mcRoot = root;
       makeDomWidgetHitThrough(root);
 
-      const widget = node.addDOMWidget('模型组合', nextWidgetType(), root, {
+      const widget = node.addDOMWidget(ezT('Models combo'), nextWidgetType(), root, {
         serialize: false,
         hideOnZoom: false,
         canvasOnly: !window.__ezflexIsVueNodes(),
