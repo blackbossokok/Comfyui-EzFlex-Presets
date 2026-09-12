@@ -1,17 +1,16 @@
-# 运行环境：ComfyUI 本来就带的依赖（列出来只为说明用途，正常不需要单独安装）
+#comfyui自带
 torch
 numpy
 Pillow
 safetensors
 av
 
-# 本插件额外需要（ComfyUI 不带，必须装）：读音频/视频标签与容器元数据
+# 本插件额外需要）：读音频/视频标签与容器元数据
 mutagen>=1.46.0
 
-# 可选增强：提示词助手「设置·llama设置 → 进程内（llama-cpp-python）」模式需要；改用「llama.cpp 服务器(HTTP)」模式则不用。
-# 版本差异较大（本机验证过 0.3.46，支持 mmproj 看图）；纯文本模型也够用，看图要带 mtmd 的较新构建。
+# 可选：提示词助手「设置·llama设置 → 进程内（llama-cpp-python）」需要；
 llama-cpp-python
 
-# 可选增强：只在读对应格式的模型文件时才用到；缺了会跳过该文件的「模型元数据卡」，不报错
+# 可选：读对应格式的模型文件需要；
 gguf
 onnx

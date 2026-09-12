@@ -31,14 +31,13 @@ Add-Node 顺序：
 
 ```
 Comfyui-EzFlex-Presets/
-├── __init__.py            # 11 节点类 + 全部后端路由（≈6136 行），__version__="1.1.0"
+├── __init__.py            # 11 节点类 + 全部后端路由（6261 行），__version__="1.11"
 ├── pyproject.toml         # version="1.11"，dependencies=["mutagen>=1.46.0"]
-├── README.md              # 使用说明（V1.1）
+├── README.md              # 使用说明（V1.11）
 ├── requirements.txt       # 分组写明：ComfyUI 自带（torch/numpy/Pillow/safetensors/av）｜额外必装 mutagen>=1.46.0｜可选 llama-cpp-python / gguf / onnx
 ├── .gitignore             # 忽略 __pycache__ / user_data（运行期预设）/ _backups / *.corrupt-backup / _dev_tests（整套回归） / 三份手写笔记 / release.ps1 / *.tgz
 ├── user_data/             # 命名预设库（运行期由预设路由写入，每节点一个 json）
-├── _dev_tests/            # 本地回归套件（§7）；其 extensions/ 与 scripts/ 是测试自动生成的副本，别在那改
-├── _backups/              # 删死代码 / 性能优化前的快照，回退时整目录拷回
+├── _dev_tests/            # 本地回归套件（§7）；其 extensions/ / scripts/ / _tmp/ 均为跑测试时自动生成，可随时删（详见 §7）
 └── web/
     ├── ezflex_service.js       # 共享：NODE_TYPES / 注册表 / 事件总线 / 分组匹配 / 预设库 API / 弹窗 / 缩放手柄 / 面板穿透 / TYPE_ICONS / makeAudioPlayer / EZ_PERF
     ├── ezflex_media_index.js   # 媒体编号引擎：扫描画布生成节点媒体端口 → 编号表（@图片N / <Picture N>）
@@ -46,7 +45,7 @@ Comfyui-EzFlex-Presets/
     ├── param_preset_control.js / param_preset_output.js
     ├── modelscombo_node.js / freelatent_node.js
     ├── media_loader.js / media_out.js / preview_any.js
-    ├── prompt_helper.js        # PromptHelper 面板（≈3998 行）
+    ├── prompt_helper.js        # PromptHelper 面板（4064 行）
     └── libs/ utils/ curves/    # three.js 与 GLTF/OBJ/FBX 加载器、NURBS 曲线（本地离线，供 3D 查看器）
 ```
 
@@ -256,7 +255,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - **别留「UI 上看不见、后端还认」的开关**：老版本在 TextGenerate 设置里有个 `enabled`，后来改成通用设置的三个滑块（`autoTextgen`）后，后端还继续读 `textgen.enabled` 作兼容。结果：用户把三个开关全关，老配置里那个看不见的 true 仍会让运行期跑 textgen「关不掉」。已删（前端 `_TG_DEFAULTS` 里的死字段 + 后端两处读取），现在**三个全关 = 一定不优化**。
 - `window.prompt` 在 ComfyUI 不可靠 → 自绘 `uiPrompt` / `uiConfirm`；DOM 拖拽用 **Pointer Events + window 捕获**（克隆影子 + 插入线 + 占位线）。
 - 共享前端工具放 `ezflex_service.js`：`TYPE_ICONS`、`makeAudioPlayer`、`decorateSelect`。⚠️ 装饰器会隐藏原生 `<select>`，很多节点原有 `.value/.options/.change` 逻辑依赖原生元素 → **已回退这些节点到原生 select**（仅媒体加载器预设下拉保留自绘）。
-- **删死代码翻过车**：批量删除脚本过度删除（`_ph_clip_models`、模型列表路由块、`_MEDIA_*_EXTS` 被误删 → 运行期 NameError）。修法：从 `_backups/` 恢复后改用**精确匹配 + 断言**重做，并新增 `undefined_names.py` / `route_audit.py` 作守卫。**静态扫描必须把 `_dev_tests/` 一起算进去**（`indexTargetCount` 被测试用到过）。
+- **删死代码翻过车**：批量删除脚本过度删除（`_ph_clip_models`、模型列表路由块、`_MEDIA_*_EXTS` 被误删 → 运行期 NameError）。修法：从快照恢复后（快照目录 `_backups/` 已清理，回退改走发布仓库 git 历史）改用**精确匹配 + 断言**重做，并新增 `undefined_names.py` / `route_audit.py` 作守卫。**静态扫描必须把 `_dev_tests/` 一起算进去**（`indexTargetCount` 被测试用到过）。
 - 文件恢复操作会产生**相邻重复行** → 合并前先全仓扫相邻重复行。
 - PreviewAny 性能/存档的用户原话：视频/音频「本来就是的不要编码，正常传过去就行」；存档「全屏时用原图」。
 - **DOM 面板控件要在「状态 → UI」函数里统一回填**：ComfyUI 建节点时 `nodeCreated`/`setupNode` **先于** `widgets_values` 恢复（`onConfigure` 才拿到工作流里的 config），所以只在 buildPanel 里写一次的控件，刷新/重启后会**一直显示默认值**（实测：FreeLatent 的「对齐」存的是 32，界面却显示 8，而 config 与后端一直用的是 32 —— 值没丢，纯粹是没人回填）。改法：把这类控件（对齐/最大边下拉+自定义框/批次/算法按钮）都放进 `updateInfo()` 从 `st` 回填，`refresh()` 一调就同步。
@@ -274,6 +273,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - **3D 预览按需渲染**：去掉常驻 `renderer.render()` 自递归，拖拽/滚轮/材质/线框/背景/重置/截图各自触发一次。
 - **总开关 `EZ_PERF`**：`labelFallbackMs` / `mainPollMs` / `indexPollMs` / `groupPollMs` 默认全 0（关闭兜底轮询）、`render3d:'ondemand'`。出问题**只改常数**即可回到旧行为。
 - 当前开销：完全静止 = 0 定时器 / 0 rAF / 0 强制 reflow；交互时每帧一次布局读写；交互结束 300ms 内静默。
+- 原始《性能优化方案·改动前后对比》已随笔记清理删除；**回滚点全在 `EZ_PERF`**（`web/ezflex_service.js:33`）：`labelFallbackMs` / `mainPollMs` / `indexPollMs` / `groupPollMs` / `render3d`，改常数即回旧行为。
 
 ## 7. 本地验证（每次改完必跑）
 
@@ -297,12 +297,13 @@ foreach($f in (Get-ChildItem "$d\web" -Filter *.js -Recurse)){ $tmp=Join-Path $e
 & $py "$t\prompt_helper_test.py"        # 160 条：卡片合并规则 / 卡片管理 / API 调用参数 / 综合媒体 / 规范编译 / 先合并再整体优化
 # 5) Node 套件
 node "$t\import_test.mjs"               # 11 个 registerExtension + NODE_TYPES 一致性
-node "$t\media_index_test.mjs"          # 34 条：编号表（含过期 type / 中转节点穿透）
+node "$t\media_index_test.mjs"          # 38 条：编号表（含过期 type / 中转节点穿透）
 ```
 
-- 实测全绿基线：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、7 个套件全通过。
+- 实测全绿基线：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、8 个套件全通过（6 个 Python + 2 个 Node）。
 - 测试脚本注意：`_dev_tests/_tmp` 用于临时文件（ComfyUI temp 目录在沙箱外会 `PermissionError`）；PreviewAny 存档测试需要 `folder_paths` shim。
-- ⚠️ **源文件改写不要用 PowerShell `Get-Content`/`Set-Content`**（会毁编码，曾把 `web/prompt_helper.js` 写坏，备份 `_prompt_helper.js.corrupt-backup`）；用编辑器工具或 Python `newline=''`。
+- ⚠️ **源文件改写不要用 PowerShell `Get-Content`/`Set-Content`**（会毁编码，曾把 `web/prompt_helper.js` 写坏；那份损坏备份已清理）；用编辑器工具或 Python `newline=''`。
+- `_dev_tests/` 里 `extensions/`（web 副本）、`scripts/`（app.js/api.js 桩）、`_tmp/`（素材与存档）**全是跑测试时自动生成的**：两个 `.mjs` 测试开头就 `mkdirSync + readdirSync(web/) + copyFileSync`，Python 套件自己 `makedirs` 写素材。所以这三个目录随时可删，跑测试会重建；反过来说，**改完 `web/*.js` 直接跑测试拿到的就是最新副本，不存在副本过期**。
 
 ## 8. 待办
 
@@ -315,9 +316,43 @@ node "$t\media_index_test.mjs"          # 34 条：编号表（含过期 type / 
 - [ ] 综合媒体端口目前只做计数/引用提示（编号、@ 菜单可用），**不参与合并文本**。
 - [ ] 图生图 / 视频生视频后续单独拆节点，不再塞进 FreeLatent；图像缩放（按比例/按像素/按固定宽高）、VAE 编码、获取图像尺寸 由内置节点承担，或后续做 EzFlex 单功能节点。
 
+- [ ] **提示词规范仍缺官方条目**（V1.11 核对结论，详见 §9.4）：素材数量/时长上限（Seedance 2.5 图 0-30/视 0-10/音 0-10 且 [4,30]s；2.0 图 1-9/视 0-3/音 0-3 且 [4,15]s）、字幕/Logo/水印约束句模板、素材按上传顺序编号 + `<主体N>@<图片N>` 绑定规则、Kling prompt ≤3072（建议 ≤2500）与每镜头 ≤512 字符、负面提示词处理（Kling 3.0 写在正向提示词里的否定句）、Seedance 按 1.0/1.5/2.0/2.5 拆成多条规范。
 ### 8.2 技术注意（非体验）
 
 - [ ] 类 `RETURN_TYPES` 全局共享（多实例由最后 POST 者决定）—— **PromptHelper 已改为固定最大表、不受影响**；ModelsCombo / ParamPreset* / PreviewAny / MediaLoader / MediaOut 仍在精确同步，多实例卡数不同时高位槽可能取越界（见 §4.1）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 仓库 `blackbossokok/Comfyui-EzFlex-Presets` 落后于本地（建议提交；github.com API 可达，raw.githubusercontent.com 不可达）。
 - [ ] Python 改动（新节点/路由/类）需完整重启 ComfyUI；前端 JS no-store，刷新页面即生效。
+
+## 9. 外部规范核对（已归档）
+
+原独立文件 **`_prompt_spec_audit.md`**（223 行官方核对报告）、**`提示词规范对照_官方与社区.txt`**（699 行素材）、**`性能优化方案_改动前后对比.txt`**（201 行）已清理，结论全部并入本节与 §6 / §8.1。
+
+### 9.1 规范本体在哪
+
+- `web/prompt_helper.js` 的 `_PROMPT_RULES`（2383–2431 行）= **15 条内置条目**：`none`(不编译) / `api`(使用 API) + 13 家厂商 `h3` / `seedance` / `kling` / `wan3` / `wan22` / `ltx` / `hunyuan` / `qwen` / `flux2` / `hailuo` / `vidu` / `pixverse` / `runway`。（README 早先写「16 条」是笔误，已按 15 条改正。）
+- 每条结构：`{ id, label, base, ref{image,video,audio}, ts{tpl|off}, note }`；`alt` = 另一种语言那一份（中|EN 开关切），`base` 标明本体语言，`ts.off` = 该家不用时间戳。
+- 用户改动存 `rules.overrides[id]`（`_applyOverride` 只覆盖 label/ref/ts/note/base/alt），自定义规范存 `rules.custom`；旧 id `seedance_en` 由 `_RULE_ALIAS` 归并到 `seedance`(lang=en)。
+
+### 9.2 官方文档怎么取（下次核实照这个来）
+
+- **火山方舟**（Seedance / Seedream）：文档页是 SPA，正文走内容接口 `https://www.volcengine.com/api/doc/getDocDetail?DocumentID=<id>`（返回 Quill delta）。
+- **可灵**（Kling）：任意文档 URL 末尾加 `.md` 直接拿 Markdown；索引 `https://kling.ai/document-api/llms.txt`。
+- **BytePlus 英文页**（`docs.byteplus.com/en/docs/ModelArk/…`）是 SPA，正文取不到、加 `&Language=en` 也只回中文 → **Seedance 英文引用写法至今没有官方原文**，`alt` 里那一版是「按中文版对应」，不要对外声称与官方一致。
+
+### 9.3 已按核对结果修掉的（V1.11）
+
+| 项 | 官方原文要点 | 现在怎么写 |
+|---|---|---|
+| Kling 分镜第二字段 | `shot n, m, words;`，**m = 该镜头时长秒**（不是起始秒） | `ts.tpl = 'shot {S}, {dur}, {text};'`，note 写明「≤6 段、各段 ≥1s、时长和 = 总时长、每段 ≤512 字符」（后三条官方一致） |
+| Kling 引用 | 3.0 Omni 支持正文 `@image_1` / `@Zhang` / `@video_1` | `ref = { image: '@image{n}', video: '@video{n}' }` |
+| Seedance 引用 | 2.0 用 `<图片N>`、2.5 用 `图片N`、1.0/1.5 正文不写引用（走 API role） | `<图片{n}>`，note 补「参考<图片1>中的<主体1>」「张三@图片1」绑定 |
+| Seedance 时间戳 | 2.0 官方明说精确时间不稳定；2.5 才支持整数秒区间且时间轴要连续 | note 写「2.0 只认镜头1/镜头2；2.5 才认整数秒区间」 |
+| Seedance 声音记号 | 音乐 `()`、音效 `<>`、台词 `{}`、字幕 `【】` | 已进 note |
+| Seedance 结构公式 | 1.5：主体+运动+环境（非必须）+运镜/切镜（非必须）+美学描述（非必须）+声音（非必须） | note 顺序/用词已对齐，不再写「场景/风格/镜头」 |
+
+**未采纳**（官方无原文，属社区写法，保留但已在 note 里标注）：Kling「每段都要重复关键特征」、Kling 画面公式、Seedance 英文引用写法。
+
+### 9.4 仍缺的官方条目（已进 §8.1）
+
+素材数量/时长上限（Seedance 2.5 图 0-30 / 视 0-10 / 音 0-10 且 [4,30]s；2.0 图 1-9 / 视 0-3 / 音 0-3 且 [4,15]s）、字幕/Logo/水印约束句模板、素材按上传顺序编号 + `<主体N>@<图片N>` 绑定规则、Kling prompt ≤3072（建议 ≤2500）、负面提示词处理、Seedance 按 1.0/1.5/2.0/2.5 拆成多条（四版规则互相冲突：时间戳/引用语法/素材数量/时长范围全不同）。
