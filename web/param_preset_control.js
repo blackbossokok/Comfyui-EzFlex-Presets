@@ -15,7 +15,6 @@ const NODE = NODE_TYPES.PARAM_CTRL;
 const API = "/param_preset_control/presets";
 const DEFAULT_PRESET = "default";
 const TYPES = ['int', 'float', 'string', 'bool', 'complex', 'tuple', 'list', 'set', 'dictionary'];
-const COMPLEX_TYPES = new Set(['complex', 'tuple', 'list', 'set', 'dictionary']);
 // 轻量 Python-字面量解析器：字典/列表/元组/集合 + 单引号 + 嵌套 + True/False/None
 function parsePyLiteral(str) {
   const s = String(str);
@@ -86,25 +85,15 @@ function parseParamValue(raw, type) {
   if (type === 'complex') return raw; // 复数按字符串保留（输出即字符串）
   return raw;
 }
-function formatParamValue(val, type) {
-  if (val == null) return '';
-  if (Array.isArray(val)) {
-    if (type === 'tuple') return '(' + val.join(', ') + ')';
-    if (type === 'set') return '{' + val.join(', ') + '}';
-    return '[' + val.join(', ') + ']';
-  }
-  if (typeof val === 'object') return JSON.stringify(val);
-  return String(val);
-}
 
 const CSS = `
 .ezpc-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .ezpc-shell .ezpc-root{pointer-events:auto;}
 .ezpc-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .ezpc-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
-.ezpc-hd{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.ezpc-hd{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;min-width:0;} /* 工具条单行不换行 */
 .ezpc-hd select,.ezpc-row input,.ezpc-row select{appearance:none;background:#f7f9fd;border:1px solid #dce3ec;border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:#1a1f2b;font-family:inherit;outline:none;height:30px;line-height:1;}
-.ezpc-hd select{flex:1 1 auto;min-width:110px;}
+.ezpc-hd select{flex:1 1 0;min-width:0;} /* 基准 0：宽度只按剩余空间分配，不跟随预设名变长；不换行时靠它让位 */
 .ezpc-hd input{flex:1 1 90px;min-width:80px;}
 .ezpc-hd select:focus,.ezpc-row input:focus{border-color:#8fa7c5;}
 .ezpc-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
@@ -116,12 +105,12 @@ const CSS = `
 .ezpc-btn.warn{background:#fffbeb;border-color:#fcd34d;color:#92400e;}
 .ezpc-btn.warn:hover{background:#fef3c7;}
 .ezpc-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezpc-gitem{display:flex;align-items:center;gap:8px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;padding:6px 8px;flex-wrap:wrap;}
+.ezpc-gitem{display:flex;align-items:center;gap:8px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;padding:6px 8px;flex-wrap:nowrap;min-width:0;} /* 单行不换行：名称过长时省略号截断 */
 .ezpc-gitem.dragging{opacity:.4;}
 .ezpc-handle{cursor:grab;color:#8a99ae;font-size:14px;line-height:1;padding:0 2px;}
 .ezpc-handle:hover{color:#1a1a2e;}
-.ezpc-gname{font-size:12px;font-weight:500;flex:1 1 80px;min-width:60px;color:#1a1f2b;}
-.ezpc-gcnt{font-size:10px;color:#5f6b7a;background:#eef2f7;padding:0 10px;border-radius:100px;line-height:20px;}
+.ezpc-gname{font-size:12px;font-weight:500;flex:1 1 80px;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#1a1f2b;}
+.ezpc-gcnt{font-size:10px;color:#5f6b7a;background:#eef2f7;padding:0 10px;border-radius:100px;line-height:20px;white-space:nowrap;flex:0 0 auto;} /* 「N 个参数」不许被压成两行 */
 .ezpc-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
 .ezpc-ph{height:0;border-top:3px solid #2b3a4a;border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
 .ezpc-ph.hidden{display:none;}
@@ -144,7 +133,7 @@ const CSS = `
 .ezpc-enable.on{background:#17a34a;}
 .ezpc-enable.off{background:#e34d4d;}
 .ezpc-enable:hover{filter:brightness(1.1);}
-.ezpc-gsel{appearance:none;-webkit-appearance:none;background-color:#f7f9fd;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='6' viewBox='0 0 12 6'><path d='M1 1l5 4 5-4' fill='none' stroke='%235f6b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");background-repeat:no-repeat;background-position:right 6px center;border:1px solid #dce3ec;border-radius:8px;padding:3px 22px 3px 8px;font-size:11px;font-weight:450;color:#1f2937;font-family:inherit;outline:none;height:24px;line-height:1;max-width:150px;flex:0 1 auto;min-width:64px;}
+.ezpc-gsel{appearance:none;-webkit-appearance:none;background-color:#f7f9fd;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='6' viewBox='0 0 12 6'><path d='M1 1l5 4 5-4' fill='none' stroke='%235f6b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");background-repeat:no-repeat;background-position:right 6px center;border:1px solid #dce3ec;border-radius:8px;padding:3px 22px 3px 8px;font-size:11px;font-weight:450;color:#1f2937;font-family:inherit;outline:none;height:24px;line-height:1;max-width:150px;flex:0 1 120px;min-width:64px;} /* 固定 120px：选项文字（参数名）再长也不撑宽 */
 .ezpc-pvalue{flex:1 1 70px;min-width:60px;min-height:28px;max-height:120px;resize:both;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.4;}
 .ezpc-pvalue::-webkit-resizer{background:transparent;}
 .ezpc-pvalue::-webkit-scrollbar{width:8px;height:8px;}
@@ -696,7 +685,7 @@ function renderGroupItem(node, g) {
   const row = el('div', 'ezpc-gitem');
   row.dataset.id = g.id;
   const handle = el('span', 'ezpc-handle'); handle.textContent = '⠿';
-  const name = el('span', 'ezpc-gname'); name.textContent = g.name || '未命名';
+  const name = el('span', 'ezpc-gname'); name.textContent = g.name || '未命名'; name.title = g.name || '未命名';
   const sel = el('select', 'ezpc-gsel'); sel.title = '输出端口参数';
   fillGroupOutOptions(sel, g);
   sel.addEventListener('mousedown', () => fillGroupOutOptions(sel, g));

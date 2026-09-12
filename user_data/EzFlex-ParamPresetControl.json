@@ -5,108 +5,25 @@
     "groups": []
   },
   {
-    "name": "测试数据",
-    "label": "EzFlex-调试用-对错嵌套",
+    "name": "加速step/cfg",
+    "label": "加速step/cfg",
     "groups": [
       {
-        "id": "g_test",
-        "name": "测试组",
-        "out": "all",
-        "params": [
-          {
-            "id": "p1",
-            "name": "有效list",
-            "type": "list",
-            "value": "[1, 2, 3]",
-            "enabled": true
-          },
-          {
-            "id": "p2",
-            "name": "有效tuple",
-            "type": "tuple",
-            "value": "(1, 2, 3)",
-            "enabled": true
-          },
-          {
-            "id": "p3",
-            "name": "有效set",
-            "type": "set",
-            "value": "{121, 15, (123, 24, 21), {213, 4, 2}, [23]}",
-            "enabled": true
-          },
-          {
-            "id": "p4",
-            "name": "有效dict(单引号)",
-            "type": "dictionary",
-            "value": "{'123': 1244, \"你好\": 123}",
-            "enabled": true
-          },
-          {
-            "id": "p5",
-            "name": "嵌套list(含tuple/set/dict)",
-            "type": "list",
-            "value": "[1, (2, 3), {4, 5}, {'a': 1}, [6]]",
-            "enabled": true
-          },
-          {
-            "id": "p6",
-            "name": "无效list(写成tuple)",
-            "type": "list",
-            "value": "(1, 2, 3)",
-            "enabled": true
-          },
-          {
-            "id": "p7",
-            "name": "无效int",
-            "type": "int",
-            "value": "abc",
-            "enabled": true
-          },
-          {
-            "id": "p8",
-            "name": "有效bool",
-            "type": "bool",
-            "value": "True",
-            "enabled": true
-          },
-          {
-            "id": "p9",
-            "name": "有效float",
-            "type": "float",
-            "value": "3.14",
-            "enabled": true
-          },
-          {
-            "id": "p10",
-            "name": "无效dict(没写冒号)",
-            "type": "dictionary",
-            "value": "{1, 2, 3}",
-            "enabled": true
-          }
-        ]
-      }
-    ]
-  },
-  {
-    "name": "新预设",
-    "label": "新预设",
-    "groups": [
-      {
-        "id": "x_mtnb4qio_q114w",
+        "id": "x_mtxxocau_9samt",
         "name": "参数组 1",
         "out": "all",
         "params": [
           {
-            "id": "x_mtnb4v8y_hlnl6",
-            "name": "参数1",
+            "id": "x_mtxxodxg_x3u1h",
+            "name": "step",
             "type": "int",
             "value": 8,
             "enabled": true,
             "_raw": "8"
           },
           {
-            "id": "x_mtnb4vde_37qj4",
-            "name": "参数2",
+            "id": "x_mtxxoe7f_knz2k",
+            "name": "cfg",
             "type": "float",
             "value": 1,
             "enabled": true,
@@ -117,25 +34,25 @@
     ]
   },
   {
-    "name": "新预设2",
-    "label": "新预设2",
+    "name": "不加速step/cfg",
+    "label": "不加速step/cfg",
     "groups": [
       {
-        "id": "x_mtnb4qio_q114w",
+        "id": "x_mtxxocau_9samt",
         "name": "参数组 1",
         "out": "all",
         "params": [
           {
-            "id": "x_mtnb4v8y_hlnl6",
-            "name": "参数1",
+            "id": "x_mtxxodxg_x3u1h",
+            "name": "step",
             "type": "int",
             "value": 20,
             "enabled": true,
             "_raw": "20"
           },
           {
-            "id": "x_mtnb4vde_37qj4",
-            "name": "参数2",
+            "id": "x_mtxxoe7f_knz2k",
+            "name": "cfg",
             "type": "float",
             "value": 6,
             "enabled": true,

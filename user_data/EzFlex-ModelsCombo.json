@@ -100,5 +100,54 @@
         "targetId": null
       }
     ]
+  },
+  {
+    "name": "MinimaxH3",
+    "loaders": [
+      {
+        "id": 1,
+        "type": "unet",
+        "name": "minimax",
+        "file": "minimaxH3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "extra": {
+          "device": "default",
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 2,
+        "type": "clip",
+        "name": "minimax",
+        "file": "qwen\\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "extra": {
+          "type": "stable_diffusion",
+          "device": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 3,
+        "type": "vae",
+        "name": "vedio",
+        "file": "minimaxH3\\minimax_h3_video_vae_fp16.safetensors",
+        "extra": {
+          "device": "default",
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      },
+      {
+        "id": 4,
+        "type": "vae",
+        "name": "audio",
+        "file": "minimaxH3\\minimax_h3_audio_vae_fp32.safetensors",
+        "extra": {
+          "device": "default",
+          "weight_dtype": "default"
+        },
+        "targetId": null
+      }
+    ]
   }
 ]

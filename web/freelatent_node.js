@@ -3,7 +3,7 @@
 // 状态实时写回 config 输入框，由 config 进 prompt、驱动 Python 节点创建 Latent。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { makeDomWidgetHitThrough } from "./ezflex_service.js";
+import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames } from "./ezflex_service.js";
 
 // ===== 简约现代风样式（浅底 + 靛蓝主色）=====
 const FL_CSS = `
@@ -94,6 +94,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
   const RATIO_API = '/freelatent/presets/custom_ratios';
   const MIN_WIDTH = 520; // 节点初始/最小宽度（容纳信息栏 + 控制行 + 预设/自定义比例行）
   const DEFAULT_LIMIT = 1024;
+  const LIMIT_STEPS = [1024, 2048, 4096, 8192]; // 最大边下拉的预设档
 
   // 比例列表
   const FIXED_RATIOS = ['1:1','2:3','3:2','3:4','4:3','4:5','5:4','9:16','9:21','10:16','16:9','16:10','21:9','2.35:1'];
@@ -200,26 +201,27 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     return opt ? computeOptimized(mp, ratioStr, mult) : computeStandard(mp, ratioStr, mult);
   }
 
+  // 把「最大边」下拉/自定义输入拉回 st.limit 的显示
+  function syncLimitUI(st) {
+    const els = st._els;
+    if (!els || !els.limitSel) return;
+    const custom = els.limitCustom;
+    if (LIMIT_STEPS.indexOf(st.limit) >= 0) {
+      els.limitSel.value = String(st.limit);
+      if (custom) custom.style.display = 'none';
+    } else {
+      els.limitSel.value = 'custom';
+      if (custom) { custom.style.display = 'inline-block'; custom.value = String(st.limit); }
+    }
+  }
+
   function applyBestLimit(theoryW, theoryH, st) {
     const maxDim = Math.max(theoryW, theoryH);
-    const limits = [1024, 2048, 4096, 8192];
     let best = null;
-    for (const lim of limits) { if (lim >= maxDim) { best = lim; break; } }
+    for (const lim of LIMIT_STEPS) { if (lim >= maxDim) { best = lim; break; } }
     if (best === null) best = maxDim;
     st.limit = best;
-    // 同步限制下拉显示
-    if (st._els) {
-      const sel = st._els.limitSel, custom = st._els.limitCustom;
-      if (sel) {
-        if (limits.indexOf(best) >= 0) {
-          sel.value = String(best);
-          if (custom) custom.style.display = 'none';
-        } else {
-          sel.value = 'custom';
-          if (custom) { custom.style.display = 'inline-block'; custom.value = String(best); }
-        }
-      }
-    }
+    syncLimitUI(st);
     return best;
   }
 
@@ -452,21 +454,20 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     };
     const update = () => {
       const rootEl = node._flRoot;
-      if (!rootEl || !rootEl.isConnected) { node._flOutRaf = requestAnimationFrame(update); return; }
+      if (!rootEl || !rootEl.isConnected) return;
       if (app && app.graph && node.graph !== app.graph) {
         (node._flOutEls || []).forEach((x) => { try { x.el.remove(); } catch (_) { /* 忽略 */ } });
         node._flOutEls = [];
         return;
       }
       let rect = null;
-      try { rect = rootEl.getBoundingClientRect(); } catch (_) { node._flOutRaf = requestAnimationFrame(update); return; }
-      if (!rect || rect.width <= 0) { node._flOutRaf = requestAnimationFrame(update); return; }
+      try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
+      if (!rect || rect.width <= 0) return;
       // 节点被缩放/平移到视口外或缩得太小 → 隐藏黑框，避免残留在屏幕左侧
       const nodeW0 = (node.size && node.size[0]) || 1;
       const sx0 = rect.width / nodeW0;
       if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.35) {
         all.forEach((item) => { item.el.style.display = 'none'; });
-        node._flOutRaf = requestAnimationFrame(update);
         return;
       }
       scan();
@@ -495,9 +496,20 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         item.el.style.left = (item.in ? cx - tw - offX : cx + offX) + 'px';
         item.el.style.top = (cy - th / 2) + 'px';
       });
-      node._flOutRaf = requestAnimationFrame(update);
     };
-    update();
+    // 不再每帧自递归：画布重绘（onDrawForeground）+ resize/滚动 触发，一帧最多一次；静止时零开销
+    const schedule = () => pumpFrames();
+    {
+      const prevDraw = node.onDrawForeground;
+      node.onDrawForeground = function (ctx) {
+        if (prevDraw) prevDraw.call(this, ctx);
+        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）
+        update();
+        pumpFrames();
+      };
+      scheduleOnRedraw(update);
+      schedule();
+    }
   }
 
   function buildRoot(node) {
@@ -699,7 +711,6 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       if (b != null) st.batchSize = b;
     }
     updateInfo(st); drawCanvas(node);
-    if (els.batchInput && st.bLinked && !forced && b != null) els.batchInput.value = String(st.batchSize);
     if (node.graph) node.graph.setDirtyCanvas(true, true);
   }
   function refreshForceUI(node) {
@@ -793,6 +804,13 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     els.hInput.value = st.height;
     const mp = calcMP(st.width, st.height);
     els.mpInput.value = mp.toFixed(2);
+    // 控件回填：工作流恢复 config（onConfigure / 400ms 重同步）后要把面板拉回持久化的值，
+    // 否则这些控件会一直显示建面板时的默认值（对齐 8 / 最大边 1024 / 批次 1 / 算法 优）。
+    els.alignInput.value = st.align;
+    syncLimitUI(st);
+    els.batchInput.value = st.batchSize;
+    els.algBtn.textContent = st.useOptimized ? '优' : '标';
+    els.algBtn.classList.toggle('opt', st.useOptimized);
   }
 
   function refresh(node) {

@@ -8,6 +8,7 @@ import {
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
   configWidget, writeConfig, readConfig,
   loadPresets, savePreset, deletePreset, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
+  EZ_PERF, scheduleOnRedraw,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.MASTER;
@@ -53,7 +54,6 @@ function loadFromConfig(node) {
 function syncToConfig(node) {
   writeConfig(node, { current: stateFor(node).current });
 }
-function libraryCache() { return loadPresets(API); }
 
 // 基础总预设：把每个发现的 Group 实例映射到同名基础分组预设
 function baseMapping(node, baseName) {
@@ -227,15 +227,30 @@ function scheduleRefresh() {
 on('ezflex:changed', (type) => { if (type === NODE_TYPES.GROUP) scheduleRefresh(); });
 // 标题实时联动：无 onTitleChanged 钩子，用轻量轮询检测目标节点标题变化（节点标题点击改名后自动刷新行名）
 function startTitleWatch(node) {
-  const iv = setInterval(() => {
+  // 不再 700ms 轮询：画布重绘（onDrawForeground）+ resize/滚动/注册表变化 触发，一帧合并
+  if (node._ezTitleBound) return;
+  node._ezTitleBound = true;
+  const check = () => {
+    node._ezTitlePend = false;
     const targets = nodesOfType(NODE_TYPES.GROUP);
     const sig = targets.map((g) => {
       const api = g._ezGroupAPI;
       return ((g.title || '') + ':' + g.id + ':' + (api ? api.presetNames().join('|') : '') + ':' + (api ? api.current() : ''));
     }).join('|');
     if (sig !== node._ezTitleSig) { node._ezTitleSig = sig; refreshUI(node); }
-  }, 700);
-  node._ezTitleIv = iv;
+  };
+  const schedule = () => {
+    if (node._ezTitlePend) return;
+    node._ezTitlePend = true;
+    node._ezTitleRaf = requestAnimationFrame(check);
+  };
+  {
+    const prevDraw = node.onDrawForeground;
+    node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); schedule(); };
+    scheduleOnRedraw(schedule);
+    if (EZ_PERF.mainPollMs > 0) node._ezTitleIv = setInterval(schedule, EZ_PERF.mainPollMs);
+    schedule();
+  }
 }
 
 // ===== 挂载 =====
@@ -273,7 +288,7 @@ function hookPrototype(nt) {
   if (!nt || nt.__ezMasterHooked) return; nt.__ezMasterHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
   const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezTitleIv); unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezMasterSetup = false; return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezTitleIv); try { if (this._ezTitleRaf) cancelAnimationFrame(this._ezTitleRaf); this._ezTitleRaf = 0; } catch (_) {} unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezMasterSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }
 app.registerExtension({

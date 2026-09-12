@@ -17,7 +17,7 @@ const CSS = `
 .ezpv-shell .ezpv-root{pointer-events:auto;}
 .ezpv-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .ezpv-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
-.ezpv-hd{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.ezpv-hd{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;min-width:0;} /* 顶部工具栏单行不换行 */
 .ezpv-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
 .ezpv-btn:hover{background:#edf2fa;}
 .ezpv-save.on{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;}
@@ -217,7 +217,7 @@ function reorderCard(node, from, to) {
 }
 
 // ===== 预览侧栏 / 文本弹框 =====
-let _modal = null, _media = null, _folderModal = null;
+let _modal = null, _media = null;
 function modalEl() {
   if (_modal && _modal.parentNode) return _modal;
   _modal = document.createElement('div');
@@ -443,7 +443,7 @@ function ext3d(url) {
   try {
     const u = new URL(url, location.href);
     const p = u.searchParams.get('path') || u.searchParams.get('filename') || u.pathname;
-    const m = String(p).toLowerCase().match(/\.(gltf|glb|obj|fbx|stl|dae|ply)$/);
+    const m = String(p).toLowerCase().match(/\.(gltf|glb|obj|fbx)$/);
     return m ? m[1] : '';
   } catch (_) { return ''; }
 }
@@ -600,9 +600,12 @@ function open3DViewer(url, title) {
       } else if (ext === 'fbx') {
         const fbx = await import(THREE_BASE + 'FBXLoader.js');
         loader = new fbx.FBXLoader();
-      } else {
+      } else if (ext === 'obj') {
         const objs = await import(THREE_BASE + 'OBJLoader.js');
         loader = new objs.OBJLoader();
+      } else {
+        // 只随包带了 GLTF / FBX / OBJ 三个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
+        throw new Error(`不支持的 3D 格式 .${ext || '?'}（仅支持 glb / gltf / obj / fbx）`);
       }
       // 让加载器把相对贴图/缓冲 URL 解析到源文件所在目录（外部贴图由此能加载）
       loader.resourcePath = url.slice(0, url.lastIndexOf('/') + 1);
@@ -889,7 +892,7 @@ function renderPreview(entry) {
     box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ image: img.src, image_src: entry.image_src, caption: (entry.caption || '') + '  ' + val, meta: entry.meta, frames: entry.frames, type }); });
     return box;
   }
-  if (type === 'MODEL_3D') {
+  if (type === 'MODEL_3D' || type === 'FILE_3D' || type === 'MESH') {   // MESH：顶点/面张量已在后端导成临时 OBJ
     const box = el('div', 'ezpv-prev long');
     box.textContent = val;
     box.title = '点击打开 3D 查看器（拖拽旋转，滚轮缩放）';
@@ -1056,13 +1059,19 @@ function openDataPreviewModal() {
     ['MASK', '灰度 PNG'],
     ['AUDIO', 'WAV / MP3 / FLAC / OGG / M4A / AAC（播放）'],
     ['VIDEO', 'MP4 / WebM / MOV / GIF / AVI / MKV（封面+播放）'],
-    ['TEXT / INT / FLOAT / BOOL', 'TXT / MD / JSON / CSV / LOG / HTML'],
+    ['STRING / INT / FLOAT / BOOLEAN', 'TXT / MD / JSON / CSV / LOG / HTML'],
     ['DICT', '键值树（键:值）'],
     ['LIST / TUPLE / SET', '索引值树（序号:值）'],
     ['LATENT / CONDITIONING', 'shape + 说明（无文件）'],
     ['MODEL(ckpt/unet)', 'safetensors / gguf / onnx / ckpt / pt（名称/架构/归属/作者/触发词）'],
     ['CLIP / VAE', 'safetensors / gguf / onnx'],
-    ['MODEL_3D', 'glb / gltf / obj / fbx / stl / usdz（three.js 查看器）'],
+    ['MODEL_3D', 'glb / gltf / obj / fbx（three.js 查看器）'],
+    ['FILE_3D', '内置 Load3D 的 FILE_3D 模型（glb / gltf / obj / fbx）'],
+    ['MESH', '顶点/面张量 → 临时 OBJ + three.js 查看器（Hunyuan3D / Trellis / MoGe 等）'],
+    ['SPLAT / VOXEL', '高斯泼溅 / 体素：只给摘要（暂不支持可视化）'],
+    ['CONTROL_NET / CLIP_VISION / STYLE_MODEL / UPSCALE_MODEL / LORA_MODEL / GLIGEN', '文本摘要'],
+    ['SAMPLER / SIGMAS / GUIDER / NOISE / SEGS', '文本摘要'],
+    ['EMPTY', '“(未连接)”'],
   ];
   const list = document.createElement('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:4px;overflow:auto;';
   rows.forEach(([k, v]) => { const r = document.createElement('div'); r.style.cssText = 'display:flex;gap:8px;font-size:12px;'; const kk = document.createElement('b'); kk.textContent = k; kk.style.cssText = 'flex:0 0 180px;color:#1a1f2b;'; const vv = document.createElement('span'); vv.textContent = v; vv.style.cssText = 'flex:1 1 auto;color:#5f6b7a;word-break:break-all;'; r.appendChild(kk); r.appendChild(vv); list.appendChild(r); });
@@ -1070,64 +1079,6 @@ function openDataPreviewModal() {
   attachFullscreen(box, () => { if (_dpModal) { _dpModal.remove(); _dpModal = null; } });
   close.addEventListener('click', () => { _dpModal.remove(); _dpModal = null; });
   _dpModal.addEventListener('click', (e) => { if (e.target === _dpModal) { _dpModal.remove(); _dpModal = null; } });
-}
-function folderModalEl() {
-  if (_folderModal && _folderModal.parentNode) return _folderModal;
-  _folderModal = el('div', 'ezpv-modal');
-  const box = el('div', 'ezpv-modal-box');
-  const hd = el('div', 'ezpv-modal-hd');
-  const title = el('b'); title.textContent = '选择保存位置';
-  const close = el('button', 'ezpv-btn'); close.textContent = '✕';
-  hd.appendChild(title); hd.appendChild(close);
-  const path = el('div', 'ezpv-fpath');
-  const dirs = el('div', 'ezpv-fdirs');
-  const ft = el('div'); ft.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #f0f4fc;padding-top:10px;';
-  const up = el('button', 'ezpv-btn'); up.textContent = '上级';
-  const use = el('button', 'ezpv-btn'); use.textContent = '使用此文件夹';
-  ft.appendChild(up); ft.appendChild(use);
-  box.appendChild(hd); box.appendChild(path); box.appendChild(dirs); box.appendChild(ft);
-  _folderModal.appendChild(box); document.body.appendChild(_folderModal);
-  attachFullscreen(box, () => { _folderModal.classList.remove('active'); });
-  _folderModal._path = path; _folderModal._dirs = dirs; _folderModal._up = up; _folderModal._use = use;
-  up.addEventListener('click', () => {
-    const parts = (_folderModal._cur || '').split('/').filter(Boolean);
-    parts.pop();
-    if (_folderModal._load) _folderModal._load(parts.join('/'));
-  });
-  use.addEventListener('click', () => {
-    if (!_folderModal._node) return;
-    const st = stateFor(_folderModal._node);
-    st.savePath = _folderModal._cur || '';
-    syncToConfig(_folderModal._node);
-    _folderModal.classList.remove('active');
-    refreshUI(_folderModal._node);
-  });
-  close.addEventListener('click', () => _folderModal.classList.remove('active'));
-  _folderModal.addEventListener('click', (e) => { if (e.target === _folderModal) _folderModal.classList.remove('active'); });
-  return _folderModal;
-}
-function openFolderModal(node) {
-  const m = folderModalEl();
-  const st = stateFor(node);
-  const cur = st.savePath || '';
-  m._node = node;
-  m._cur = cur;
-  m.classList.add('active');
-  const load = (rel) => {
-    m._cur = rel || '';
-    fetchApi('/preview_any/folders?path=' + encodeURIComponent(m._cur)).then((r) => r.json()).then((data) => {
-      m._path.textContent = (data.path ? data.path + '/' : '') || 'ComfyUI 输出根目录';
-      m._dirs.innerHTML = '';
-      if (!data.folders || !data.folders.length) m._dirs.appendChild(el('div', 'ezpv-empty')).textContent = '(无子文件夹)';
-      data.folders.forEach((f) => {
-        const b = el('button'); b.textContent = f + '/';
-        b.addEventListener('click', () => load(m._cur ? m._cur + '/' + f : f));
-        m._dirs.appendChild(b);
-      });
-    }).catch(() => {});
-  };
-  m._load = load;
-  load(cur);
 }
 
 // ===== 渲染面板 =====

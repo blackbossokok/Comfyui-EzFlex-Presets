@@ -8,16 +8,85 @@ import {
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
   configWidget, writeConfig, readConfig,
   loadPresets, savePreset, deletePreset, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
+  EZ_PERF, scheduleOnRedraw,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.MAIN;
 const API = "/main_control/presets";
 const MAIN_DEFAULT = 'default';
-// 卡片列表顺序：ModelsCombo、FreeLatent、NodeSwitchMaster、ParamPresetControl
+// 卡片列表：只放「顶层」可控节点（节点开关组由节点总控制管理，不在这里单独列）
 const TARGET_TYPES = [NODE_TYPES.COMBO, NODE_TYPES.LATENT, NODE_TYPES.MASTER, NODE_TYPES.PARAM_CTRL];
-// 加载全部：ModelsCombo 单独一行，FreeLatent 第二行，其余四个节点 2×2
-const SCAFFOLD_TYPES = [NODE_TYPES.COMBO, NODE_TYPES.LATENT, NODE_TYPES.MASTER, NODE_TYPES.GROUP, NODE_TYPES.PARAM_CTRL, NODE_TYPES.PARAM_OUT];
-const SCAFFOLD_GAP = 60;
+// 可加载节点（下拉 + 加载全部）：素材输出 MediaOut 不放（MediaLoader 已经能承接它的输出）
+const SCAFFOLD_TYPES = [
+  NODE_TYPES.COMBO, NODE_TYPES.LATENT, NODE_TYPES.MASTER, NODE_TYPES.GROUP,
+  NODE_TYPES.PARAM_CTRL, NODE_TYPES.PARAM_OUT,
+  NODE_TYPES.PROMPT_HELPER, NODE_TYPES.MEDIA_LOADER, NODE_TYPES.PREVIEW_ANY,
+];
+const SCAFFOLD_LABEL = {
+  [NODE_TYPES.COMBO]: '模型组合加载器',
+  [NODE_TYPES.LATENT]: '分辨率/Latent 选择器',
+  [NODE_TYPES.MASTER]: '节点总控制',
+  [NODE_TYPES.GROUP]: '节点开关组',
+  [NODE_TYPES.PARAM_CTRL]: '参数预设控制',
+  [NODE_TYPES.PARAM_OUT]: '参数输出控制',
+  [NODE_TYPES.PROMPT_HELPER]: '提示词助手',
+  [NODE_TYPES.MEDIA_LOADER]: '素材加载器',
+  [NODE_TYPES.PREVIEW_ANY]: '任意预览',
+};
+// 加载全部的排布（以「总控制」自身为基准，间距 30px）：
+//   左列（右缘对齐，右缘 = 总控制左缘 − 30）：素材加载器（底边与总控制平齐）→ 模型组合 → 提示词助手，依次下移 30px
+//   中列（左缘 = 总控制左缘）：节点总控制、参数预设控制，自总控制底边 +30px 起依次下移 30px
+//   右列（左缘 = 总控制右缘）：节点开关组、参数输出控制，同上
+//   分辨率：总控制右侧 +30px、底部平齐；任意预览：参数输出控制右侧 +30px、底部平齐
+const SCAFFOLD_GAP = 30;
+
+// ⚠️ LiteGraph 的 node.pos 是「标题栏下沿」的左上角，标题栏画在 pos 上方（高 = LiteGraph.NODE_TITLE_HEIGHT，
+// 与渲染时用的那个常数同源）。纵向推进量必须算上标题栏，否则下一个节点的标题会顶在上一个节点身上（贴在一起）。
+// 标题高度只取这个常数，**不要用 node.getBounding()**：它读的是节点的 boundingRect，刚建出来还没测量时是脏值，
+// 拿它会算出离谱的偏移，把整列节点排到屏幕外。
+function visualBox(node) {
+  const p = (node && node.pos) || [0, 0];
+  const s = (node && node.size) || [300, 200];
+  const y = Number(p[1]), w = Number(s[0]), h = Number(s[1]);
+  return { x: Number(p[0]) || 0, y: isFinite(y) ? y : 0, w: isFinite(w) ? w : 300, h: isFinite(h) ? h : 200 };
+}
+
+function scaffoldLayout(mainBox, boxes) {
+  const G = SCAFFOLD_GAP, TITLE = LiteGraph.NODE_TITLE_HEIGHT || 30;
+  const out = new Map();
+  const boxOf = (t) => boxes.get(t) || { w: 300, h: 200 };
+  const putLeft = (t, x, visTop) => { const b = boxOf(t); out.set(t, [Math.round(x), Math.round(visTop + TITLE)]); };
+  const putRight = (t, visRight, visTop) => { const b = boxOf(t); out.set(t, [Math.round(visRight - b.w), Math.round(visTop + TITLE)]); };
+  const putBottom = (t, x, visBottom) => { const b = boxOf(t); out.set(t, [Math.round(x), Math.round(visBottom - b.h)]); };
+
+  const mLeft = mainBox.x, mRight = mainBox.x + mainBox.w, mBottom = mainBox.y + mainBox.h;
+
+  // 左列：素材加载器底边与总控制平齐，模型组合 / 提示词助手依次下移，三者右缘对齐
+  const leftRight = mLeft - G;
+  putBottom(NODE_TYPES.MEDIA_LOADER, leftRight - boxOf(NODE_TYPES.MEDIA_LOADER).w, mBottom);
+  let visTop = mBottom;
+  [NODE_TYPES.COMBO, NODE_TYPES.PROMPT_HELPER].forEach((t) => {
+    const b = boxOf(t); visTop += G; putRight(t, leftRight, visTop); visTop += TITLE + b.h;
+  });
+
+  // 中列：总控制下方，左缘与总控制平齐
+  visTop = mBottom;
+  [NODE_TYPES.MASTER, NODE_TYPES.PARAM_CTRL].forEach((t) => {
+    const b = boxOf(t); visTop += G; putLeft(t, mLeft, visTop); visTop += TITLE + b.h;
+  });
+
+  // 右列：总控制右缘下方（记录末节点右缘/底边，供「任意预览」对齐）
+  visTop = mBottom;
+  let colRight = mRight, colBottom = mBottom;
+  [NODE_TYPES.GROUP, NODE_TYPES.PARAM_OUT].forEach((t) => {
+    const b = boxOf(t); visTop += G; putLeft(t, mRight, visTop); visTop += TITLE + b.h; colRight = mRight + b.w; colBottom = visTop;
+  });
+
+  // 分辨率：总控制右侧、底边平齐；任意预览：参数输出控制右侧、底边平齐
+  putBottom(NODE_TYPES.LATENT, mRight + G, mBottom);
+  putBottom(NODE_TYPES.PREVIEW_ANY, colRight + G, colBottom);
+  return out;
+}
 
 function addNodeToCanvas(type, x, y) {
   try {
@@ -34,27 +103,22 @@ function addOneScaffold(node, type) {
   return addNodeToCanvas(type, base[0] + bs[0] + 20, base[1]);
 }
 function addAllScaffold(node) {
-  const base = node.pos || [0, 0]; const bs = node.size || [320, 230];
-  const x0 = base[0] + bs[0] + 40, y0 = base[1];
-  const CELL_W = 360, CELL_H = 230, GAP = SCAFFOLD_GAP;
-  const created = [];
-  SCAFFOLD_TYPES.forEach((t) => { const n = addNodeToCanvas(t, x0, y0); if (n) created.push(n); });
-  if (!created.length) return 0;
-  // ModelsCombo 单独一行、FreeLatent 第二行，其余 4 个 2×2
-  const positions = {
-    [NODE_TYPES.COMBO]: [0, 0],
-    [NODE_TYPES.LATENT]: [0, 1],
-    [NODE_TYPES.MASTER]: [0, 2],
-    [NODE_TYPES.GROUP]: [1, 2],
-    [NODE_TYPES.PARAM_CTRL]: [0, 3],
-    [NODE_TYPES.PARAM_OUT]: [1, 3],
+  const base = node.pos || [0, 0];
+  const created = new Map();
+  SCAFFOLD_TYPES.forEach((t) => { const n = addNodeToCanvas(t, base[0], base[1]); if (n) created.set(t, n); });
+  if (!created.size) return 0;
+  const apply = () => {
+    const boxes = new Map();
+    created.forEach((n, t) => { if (n) boxes.set(t, visualBox(n)); });
+    const pos = scaffoldLayout(visualBox(node), boxes);
+    created.forEach((n, t) => { const p = pos.get(t); if (n && p && isFinite(p[0]) && isFinite(p[1])) n.pos = p; });
+    if (app.canvas) app.canvas.setDirty(true, true);
   };
-  created.forEach((n) => {
-    const p = positions[n.type] || [0, 2];
-    n.pos = [x0 + p[0] * (CELL_W + GAP), y0 + p[1] * (CELL_H + GAP)];
-  });
-  if (app.canvas) app.canvas.setDirty(true, true);
-  return created.length;
+  apply();
+  // 各节点 DOM 面板高度下一帧才定型（fitNode 会按内容改高），稍后再按新尺寸对一次齐
+  clearTimeout(node._ezScaffoldTimer);
+  node._ezScaffoldTimer = setTimeout(apply, 350);
+  return created.size;
 }
 
 const CSS = `
@@ -178,7 +242,7 @@ function buildRoot(node) {
   const delBtn = el('button', 'ezc-btn danger'); delBtn.textContent = '删除';
   const loadSel = el('select', 'ezc-hd-load'); loadSel.title = '加载单个节点';
   const placeholder = el('option'); placeholder.value = ''; placeholder.textContent = '— 加载节点 —'; loadSel.appendChild(placeholder);
-  SCAFFOLD_TYPES.forEach((t) => { const o = el('option'); o.value = t; o.textContent = t; loadSel.appendChild(o); });
+  SCAFFOLD_TYPES.forEach((t) => { const o = el('option'); o.value = t; o.textContent = SCAFFOLD_LABEL[t] || t; loadSel.appendChild(o); });
   const loadAllBtn = el('button', 'ezc-btn'); loadAllBtn.textContent = '加载全部';
   hd.appendChild(masterSel); hd.appendChild(saveBtn); hd.appendChild(delBtn); hd.appendChild(loadSel); hd.appendChild(loadAllBtn);
   const list = el('div', 'ezc-list');
@@ -194,7 +258,7 @@ function buildRoot(node) {
 
     list.innerHTML = '';
     const targets = collectTargets(node);
-    if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = '画布上还没有 ModelsCombo / FreeLatent / NodeSwitchMaster / ParamPresetControl 节点';
+    if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = '画布上还没有可控制的节点（模型组合加载器 / 分辨率 / 节点总控制 / 参数预设控制），点右上「加载全部」一键铺开';
     targets.forEach((t) => { const row = renderRow(node, t.node); row._ezKey = t.key; list.appendChild(row); });
     attachCardDnD(list, node);
     fitNode(node);
@@ -338,7 +402,7 @@ function refreshUI(node) {
   const list = root.querySelector('.ezc-list');
   list.innerHTML = '';
   const targets = collectTargets(node);
-  if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = '画布上还没有 ModelsCombo / FreeLatent / NodeSwitchMaster / ParamPresetControl 节点';
+  if (!targets.length) list.appendChild(el('div', 'ezc-empty')).textContent = '画布上还没有可控制的节点（模型组合加载器 / 分辨率 / 节点总控制 / 参数预设控制），点右上「加载全部」一键铺开';
   targets.forEach((t) => { const row = renderRow(node, t.node); row._ezKey = t.key; list.appendChild(row); });
   attachCardDnD(list, node);
   loadPresets(API).then((lib) => {
@@ -376,7 +440,9 @@ function syncCards(node) {
   });
 }
 function startTitleWatch(node) {
-  const iv = setInterval(() => {
+  // 不再定时轮询：画布重绘（onDrawForeground）+ 节点注册表变化事件 触发，一帧合并；全静止时零开销。
+  const check = () => {
+    node._ezTitlePend = false;
     const targets = nodesOfType(NODE_TYPES.COMBO).concat(nodesOfType(NODE_TYPES.LATENT), nodesOfType(NODE_TYPES.MASTER), nodesOfType(NODE_TYPES.PARAM_CTRL));
     const ids = targets.map((g) => String(g.id)).join(',');
     const detail = targets.map((g) => { const a = targetAPI(g); return ((g.title || '') + ':' + (a ? a.current() : '')); }).join('|');
@@ -386,8 +452,20 @@ function startTitleWatch(node) {
       if (node._ezTitleIds !== ids) { node._ezTitleIds = ids; refreshUI(node); } // 目标增/删 → 重建卡片
       else syncCards(node); // 仅标题/当前值变化 → 就地更新，避免闪烁
     }
-  }, 700);
-  node._ezTitleIv = iv;
+  };
+  const schedule = () => {
+    if (node._ezTitlePend) return;
+    node._ezTitlePend = true;
+    node._ezTitleRaf = requestAnimationFrame(check);
+  };
+  node._ezTitleSchedule = schedule;
+  {
+    const prevDraw = node.onDrawForeground;
+    node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); schedule(); };
+    scheduleOnRedraw(schedule);   // resize / 滚动 / 节点注册表变化 都会醒一次
+    if (EZ_PERF.mainPollMs > 0) node._ezTitleIv = setInterval(schedule, EZ_PERF.mainPollMs);
+    schedule();
+  }
 }
 
 // ===== 挂载 =====
@@ -426,7 +504,7 @@ function hookPrototype(nt) {
   if (!nt || nt.__ezMainHooked) return; nt.__ezMainHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
   const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezTitleIv); unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezMainSetup = false; return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezTitleIv); clearTimeout(this._ezScaffoldTimer); try { if (this._ezTitleRaf) cancelAnimationFrame(this._ezTitleRaf); this._ezTitleRaf = 0; } catch (_) {} unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezMainSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }
 app.registerExtension({

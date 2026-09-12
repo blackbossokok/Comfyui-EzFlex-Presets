@@ -24,9 +24,9 @@ const CSS = `
 .ezo-status{font-size:10px;color:#8a99ae;white-space:nowrap;}
 .ezo-status.on{color:#065f46;font-weight:500;}
 .ezo-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezo-row{display:flex;align-items:center;gap:8px;background:#fbfcfe;border:1px solid #f0f4fc;border-radius:10px;padding:5px 8px;flex-wrap:wrap;}
+.ezo-row{display:flex;align-items:center;gap:8px;background:#fbfcfe;border:1px solid #f0f4fc;border-radius:10px;padding:5px 8px;flex-wrap:nowrap;min-width:0;} /* 单行不换行：名称过长时省略号截断 */
 .ezo-name{font-size:12px;font-weight:480;flex:1 1 80px;min-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1a1f2b;}
-.ezo-type{font-size:10px;color:#5f6b7a;background:#eef2f7;padding:0 10px;border-radius:100px;line-height:20px;}
+.ezo-type{font-size:10px;color:#5f6b7a;background:#eef2f7;padding:0 10px;border-radius:100px;line-height:20px;white-space:nowrap;flex:0 0 auto;}
 .ezo-type-bad{color:#d94848;background:#fdecec;}
 .ezo-value{font-size:11px;color:#1a1f2b;font-family:monospace;min-width:40px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ezo-value-long{cursor:pointer;text-decoration:underline dotted #9aa7b5;}

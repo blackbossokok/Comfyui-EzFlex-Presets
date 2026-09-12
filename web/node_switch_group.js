@@ -9,6 +9,7 @@ import {
   configWidget, writeConfig, readConfig,
   uiPrompt,
   allGraphGroups, groupNodes, changeModeOfNodes, normalizeColor, installResizeHandles, makeDomWidgetHitThrough,
+  EZ_PERF, scheduleOnRedraw,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.GROUP;
@@ -439,17 +440,27 @@ function fitNode(node) {
 // ⚠️ 定时器必须**按节点**存放（node._ezScanTimer），不能共用全局变量——否则多个 NodeSwitchGroup
 //    同屏时彼此的 scheduleScan 会互相 clearTimeout，导致只有最后一个节点在刷新分组列表（表现成分组/预设串）。
 function scheduleScan(node) {
+  // 前沿节流：距上次扫描够久就立刻扫（刚加了组/改了组马上能看到），连续拖动时最多 2.5 次/秒
   clearTimeout(node._ezScanTimer);
-  node._ezScanTimer = setTimeout(() => {
+  const run = () => {
+    node._ezScanAt = Date.now();
     const st = stateFor(node);
     const groups = discoverGroups(node);
     const sig = sigOf(groups);
     if (sig !== st._lastSig) { st._lastSig = sig; st._groups = groups; refreshRows(node); }
-  }, 500);
+  };
+  const gap = 400 - (Date.now() - (node._ezScanAt || 0));
+  if (gap <= 0) { run(); return; }
+  node._ezScanTimer = setTimeout(run, gap);
 }
 function startAutoScan(node) {
-  const iv = setInterval(() => scheduleScan(node), 1000);
-  node._ezScanIv = iv;
+  // 不再 1s 轮询：画布重绘（onDrawForeground）+ resize/滚动/节点注册表变化 触发；scheduleScan 内部还有 500ms 去抖
+  if (node._ezScanBound) return;
+  node._ezScanBound = true;
+  const prevDraw = node.onDrawForeground;
+  node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); scheduleScan(this); };
+  scheduleOnRedraw(() => scheduleScan(node));
+  if (EZ_PERF.groupPollMs > 0) node._ezScanIv = setInterval(() => scheduleScan(node), EZ_PERF.groupPollMs);
 }
 
 // ===== 挂载 =====
@@ -487,7 +498,7 @@ function hookPrototype(nt) {
   if (!nt || nt.__ezGroupHooked) return; nt.__ezGroupHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
   const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezScanIv); clearTimeout(this._ezScanTimer); unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezGroupSetup = false; return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezScanIv); clearTimeout(this._ezScanTimer); try { if (this._ezTitleRaf) cancelAnimationFrame(this._ezTitleRaf); this._ezTitleRaf = 0; } catch (_) {} unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezGroupSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }
 app.registerExtension({

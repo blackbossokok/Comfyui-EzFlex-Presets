@@ -1,20 +1,42 @@
-# Python
+# ===== Python =====
 __pycache__/
 *.py[cod]
 *.pyo
 *.egg-info/
 build/
 dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.log
 
-# Node / tooling backup & junk
+# ===== 运行期数据（插件导入时会自己 makedirs，见 __init__.py 的 _USER_DIR）=====
+# 里面是各节点的预设存档（模型组合 / 分辨率 / 参数预设…），属使用者的本地数据，不该进仓库
+user_data/
+
+# ===== 本地备份 / 事故文件（回退用，14 MB 上下，不入库）=====
+_backups/
+*.corrupt-backup
 *.bak
 *.bak_*
+*.orig
+*.rej
+*~
+
+# ===== 本地开发资产（回归套件 + 手写研究笔记，都不进仓库）=====
+_dev_tests/
+_prompt_spec_audit.md
+提示词规范对照_官方与社区.txt
+性能优化方案_改动前后对比.txt
+
+# ===== 打包 / 发布产物 =====
+release.ps1
+*.tgz
+
+# ===== OS / 编辑器 =====
 .DS_Store
 Thumbs.db
-
-# Editor
 .vscode/
 .idea/
-
-# Local release helper (not published)
-release.ps1
+node_modules/

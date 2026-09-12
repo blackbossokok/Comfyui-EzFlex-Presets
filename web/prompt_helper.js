@@ -1,48 +1,64 @@
 // EzFlex-PromptHelper 提示词卡片合并节点。
-// 前端面板：完整富文本编辑器（卡片列表 + 格式工具条 + 颜色/字号/缩进 + 查找替换 + 取色器 + 规则弹窗 + API 厂商/模型/链接）。
+// 前端面板：完整富文本编辑器（卡片列表 + 格式工具条 + 颜色/字号/缩进 + 查找替换 + 取色器 + 媒体引用芯片）
+// + 「设置」弹窗（通用 / 规则 / API / TextGenerate / llama / 路径）+ 「卡片管理」弹窗（userdata/prompts 存取卡片）。
 // 固定输入 clip；动态「综合媒体」输入（红色 ANY，可接图像/视频/音频/3D 模型等，连接后自动补一个空槽）；
 // 动态输入 = 卡片数 1:1（card_in_1..N，按顺序链接到卡片，连接后对应卡片变灰）；
 // 输出固定「合并提示词」+ 动态卡片输出 = 卡片数 1:1。
 // 复用 ModelsCombo/ParamPreset/PreviewAny 动态端口经验：卡片增删/排序后复用 socket、回写 slot、
-// POST /prompt_helper/outputs 同步类 RETURN_TYPES/RETURN_NAMES。
+// 类 RETURN_TYPES/RETURN_NAMES 固定成「最大卡片数 + 1」（全 STRING），不按实例收缩 —— 见 __init__.py 的说明。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
-  configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, uiConfirm, TYPE_ICONS, makeAudioPlayer,
+  configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, uiConfirm, uiPrompt, TYPE_ICONS, makeAudioPlayer,
+  scheduleOnRedraw, pumpFrames,
 } from "./ezflex_service.js";
+import {
+  mediaKeyOf, mediaIndex, indexTargets, indexTargetById, activeIndexTarget,
+  mediaSizeText, mediaFormatOf, startIndexWatcher, onIndexChange, nodeInputMedia,
+  refreshIndexNow, refreshIndexSoon,
+} from "./ezflex_media_index.js";
 
 const NODE = NODE_TYPES.PROMPT_HELPER;
-const OUT_API = "/prompt_helper/outputs";
 const MAX_CARDS = 32;
 const MAX_MEDIA = 16;
 const MEDIA_PORT_COLOR = '#d94848';
+// 加载标记：用于确认浏览器实际加载的是哪一版（改动本文件时请更新）
+const PH_BUILD = '2026-09-12-uifix';
+console.log('[PromptHelper] 模块已加载 · build ' + PH_BUILD);
 
-// ===== 分层弹出的关闭协调：点击外层才关一层；拖动·松开不关 =====
+// ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
 const _phLayers = [];
-let _phClosedEl = null;
+let _phClosedEl = null;   //  本次点击已经关掉的那一层（下层弹窗看到它就不再自己关，避免一次点击连关两层）
 let _phDownOpen = new Set();
 function phLayerPush(el) { if (el && !_phLayers.includes(el)) _phLayers.push(el); }
-let _phDown = { x: 0, y: 0 };
-document.addEventListener('pointerdown', (e) => { _phDown.x = e.clientX; _phDown.y = e.clientY; _phClosedEl = null; _phDownOpen = new Set(_phLayers); }, true);
+function phLayerIsOpen(el) { return !!(el && el.classList && (el.classList.contains('active') || el.classList.contains('open'))); }
+// 受协调器自动跟踪的弹出层：下拉菜单/字体列表/颜色面板 + 图片查看器/取色器/查找替换。
+// 有了它们，点「图片查看器 / 取色器 / 查找替换」的背景时只关自己那一层，不会连带关掉下面的卡片弹窗或总体编辑弹窗。
+const _PH_POPUP = ['eph-dd-menu', 'eph-tools-dropdown', 'eph-font-list', 'eph-color-dropdown', 'eph-mv', 'eph-picker', 'eph-fr', 'eph-rb', 'eph-ctx'];
+let _phDown = { x: 0, y: 0 }, _phDownTarget = null;
+document.addEventListener('pointerdown', (e) => { _phDown.x = e.clientX; _phDown.y = e.clientY; _phClosedEl = null; _phDownTarget = e.target; _phDownOpen = new Set(_phLayers); }, true);
 document.addEventListener('pointerup', (e) => {
   if (Math.max(Math.abs(e.clientX - _phDown.x), Math.abs(e.clientY - _phDown.y)) > 6) return;   // 拖动松开不关
   const t = e.target;
   for (let i = _phLayers.length - 1; i >= 0; i--) {
     const el = _phLayers[i];
-    if (!_phDownOpen.has(el)) continue;                     // 本次刚打开的层（点开关按钮）不立刻关
-    const open = el && el.classList && (el.classList.contains('active') || el.classList.contains('open'));
+    if (!_phDownOpen.has(el)) continue;                     //  本次刚打开的层（点开关按钮）不立刻关
+    const open = phLayerIsOpen(el);
     if (!el || !el.isConnected) { _phLayers.splice(i, 1); continue; }
     if (!open) { _phLayers.splice(i, 1); continue; }
     if (el.contains(t) && t !== el) break;               // 点在层内内容 → 保留这一层及以下
-    el.classList.remove('active'); el.classList.remove('open'); _phLayers.splice(i, 1); _phClosedEl = el; break;   // 只关最上面这一层
-  }
+    el.classList.remove('active'); el.classList.remove('open'); _phLayers.splice(i, 1); _phClosedEl = el;
+    // 该层自己的收尾（如引用媒体窗口要停掉里面正在播的视频/音频并关掉放大预览）
+    try { if (typeof el._phOnClose === 'function') el._phOnClose(); } catch (_) {}
+    break;   //  只关最上面这一层
+    }
 }, true);
 let _phWatchStarted = false;
 function phLayerWatch() {
   if (_phWatchStarted) return; _phWatchStarted = true;
   const ob = new MutationObserver((muts) => {
-    muts.forEach((m) => { const el = m.target; if (!el || el.nodeType !== 1) return; if (!/(^|\s)eph-/.test(el.className || '')) return; const open = el.classList.contains('active') || el.classList.contains('open'); if (open) { if (!_phLayers.includes(el)) _phLayers.push(el); } else { const i = _phLayers.indexOf(el); if (i >= 0) _phLayers.splice(i, 1); } });
+    muts.forEach((m) => { const el = m.target; if (!el || el.nodeType !== 1) return; if (!/(^|\s)eph-/.test(el.className || '')) return; if (!_PH_POPUP.some((c) => el.classList.contains(c))) return; const open = el.classList.contains('active') || el.classList.contains('open'); if (open) { if (!_phLayers.includes(el)) _phLayers.push(el); } else { const i = _phLayers.indexOf(el); if (i >= 0) _phLayers.splice(i, 1); } });
   });
   ob.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
 }
@@ -53,7 +69,7 @@ const CSS = `
 .eph-shell .eph-root{pointer-events:auto;}
 .eph-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .eph-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
-.eph-hd{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
+.eph-hd{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;min-width:0;} /* 顶部工具栏单行不换行 */
 .eph-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
 .eph-btn:hover{background:#edf2fa;}
 .eph-btn.success{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;}
@@ -77,24 +93,29 @@ const CSS = `
 .eph-ph{height:0;border-top:3px solid #2b3a4a;border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
 .eph-ph.hidden{display:none;}
 
-/* 卡片：样式化标题 + 链接后变灰 */
+/* 卡片：样式化标题  + 链接后变灰 */
 .eph-ctitle{flex:0 0 30%;min-width:0;display:inline-flex;align-items:center;gap:6px;max-width:30%;}
 .eph-ctitle-input{display:inline-block;min-width:24px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border:none;border-radius:8px;background:transparent;font:600 12px Inter,sans-serif;color:#1a1f2b;outline:none;padding:2px 4px;cursor:text;text-align:left;flex:1 1 auto;min-width:0;}
 .eph-ctitle-input:empty::before{content:attr(data-ph);color:#c4cdda;}  /* 空标题占位 */
 .eph-badge{font-size:9px;font-weight:480;color:#fff;background:#5f6b7a;padding:0 6px;border-radius:100px;line-height:15px;white-space:nowrap;flex:0 0 auto;}
+.eph-badge-opt{background:#2563eb;}
 .eph-preview{flex:1 1 auto;min-width:0;font-size:11px;color:#8a9aa8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left;}
 .eph-card.linked{opacity:.55;background:#f3f5f9;border-color:#e2e8f0;}
 .eph-card.linked .eph-title{opacity:.5;}
 
-/* 黑框 socket 标签（仿 ModelsCombo installOutsideLabels） */
+/* 黑框  socket 标签（仿 ModelsCombo installOutsideLabels） */
 .eph-socket-label{position:fixed;z-index:40;pointer-events:none;background:rgba(16,22,32,.5);color:#e8eef6;font-size:9px;line-height:1;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,.18);white-space:nowrap;user-select:none;display:inline-flex;align-items:center;box-shadow:0 1px 4px rgba(0,0,0,.25);}
 .eph-socket-label .eph-socket-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;margin-right:5px;border:1px solid rgba(255,255,255,.35);}
 
 /* 编辑器弹窗 */
 .eph-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);}
 .eph-modal.active{display:flex;}
-.eph-modal-box{background:#fff;border-radius:14px;padding:0 0 12px;width:92%;max-width:760px;max-height:88vh;display:flex;flex-direction:column;gap:0;box-shadow:0 24px 80px rgba(0,0,0,.22);font-family:Inter,sans-serif;box-sizing:border-box;}
+.eph-modal-box{background:#fff;border-radius:14px;padding:0 0 12px;width:94%;max-width:880px;max-height:88vh;display:flex;flex-direction:column;gap:0;box-shadow:0 24px 80px rgba(0,0,0,.22);font-family:Inter,sans-serif;box-sizing:border-box;}
 .eph-modal-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #edf2f8;}
+.eph-modal-hd-right{display:flex;align-items:center;gap:8px;}
+.eph-modal-full{height:26px;padding:0 10px;font-size:12px;}
+.eph-modal.full .eph-modal-box{width:100%;max-width:none;height:100%;max-height:none;border-radius:0;}
+.eph-modal.full .eph-editor{max-height:none;}
 .eph-modal-hd b{font-size:14px;color:#0f141f;}
 .eph-modal-close{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:13px;cursor:pointer;font-family:inherit;color:#5f6b7a;}
 .eph-modal-close:hover{background:#edf2fa;}
@@ -139,6 +160,12 @@ const CSS = `
 .eph-tools-dropdown.active{display:block;}
 .eph-tool-item{display:block;padding:7px 11px;border-radius:8px;cursor:pointer;font-size:12px;color:#1a1f2b;background:transparent;border:none;width:100%;text-align:left;font-family:inherit;}
 .eph-tool-item:hover{background:#f1f4fa;}
+.eph-mref-ico{display:inline-flex;width:14px;height:14px;vertical-align:-2px;}
+.eph-mref-ico svg{width:14px;height:14px;display:block;}
+.eph-mref-num{color:#2563eb;font-weight:500;margin-right:5px;}
+.eph-mref-num.off{color:#9aa7b5;}
+.eph-mref-off{opacity:.5;}
+.eph-mref-warn{font-size:10px;color:#c2410c;padding:2px 11px 5px;line-height:1.5;}
 .eph-indent-group{display:flex;align-items:center;gap:6px;}
 .eph-indent-group label{font-size:11px;color:#5f6b7a;}
 .eph-indent-input{width:52px;text-align:center;border:1px solid #dce3ec;border-radius:7px;padding:3px 6px;font-size:12px;font-family:inherit;outline:none;height:26px;}
@@ -147,7 +174,9 @@ const CSS = `
 .eph-tab{position:relative;z-index:1;flex:1 1 50%;padding:6px 12px;font-size:12px;font-weight:500;color:#5f6b7a;cursor:pointer;background:transparent;border:none;border-radius:999px;transition:color .2s;font-family:inherit;}
 .eph-tab:hover{color:#1a1f2b;}
 .eph-tab.active{color:#1a1a2e;font-weight:600;}
-.eph-editor{min-height:200px;max-height:46vh;border:1px solid #dce3ec;border-radius:10px;padding:12px;outline:none;line-height:1.7;color:#1a1a2e;background:#fff;overflow:auto;font-size:14px;}
+.eph-editor{min-height:200px;max-height:46vh;border:1px solid #dce3ec;border-radius:10px;padding:12px;outline:none;line-height:1.6;color:#1a1a2e;background:#fff;overflow:auto;font-size:14px;}
+/* 粘贴/浏览器默认的 <p> 自带上下 margin，会让换行看起来多一行；编辑器内统一清零 */
+.eph-editor p,.eph-editor div,.eph-editor h1,.eph-editor h2,.eph-editor h3,.eph-all-editor p,.eph-all-editor div,.eph-all-block-body p,.eph-all-block-body div{margin:0;padding:0;}
 .eph-editor:focus{border-color:#94a3b8;}
 .eph-timeline{display:flex;align-items:center;gap:6px;font-size:12px;color:#5f6b7a;}
 .eph-timeline input{width:48px;text-align:center;border:1px solid #dce3ec;border-radius:7px;padding:3px 6px;font-size:12px;font-family:inherit;outline:none;height:26px;}
@@ -163,7 +192,7 @@ const CSS = `
 .eph-api-row .eph-api-prov{flex:0 0 108px;}
 .eph-api-row .eph-api-model{flex:1 1 140px;min-width:110px;}
 
-/* 调用设置弹窗 */
+/* 设置弹窗 */
 .eph-settings{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100003;background:rgba(0,0,0,.35);}
 .eph-settings.active{display:flex;}
 .eph-settings-box{background:#fff;border-radius:16px;width:680px;max-width:94vw;height:50vh;max-height:52vh;display:flex;flex-direction:column;box-shadow:0 26px 80px rgba(0,0,0,.28);overflow:hidden;font-family:Inter,sans-serif;box-sizing:border-box;}
@@ -191,12 +220,12 @@ const CSS = `
 .eph-seg-item{font-style:normal;font-size:11px;font-weight:600;padding:4px 12px;border-radius:7px;color:#94a3b8;transition:all .15s;}
 .eph-seg-item.on.active{background:#d9f2e4;color:#15803d;}
 .eph-seg-item.off.active{background:#fdecec;color:#c0392b;}
-/* 调用设置下拉（图三风格：白底圆角列表 + 滚动条）*/
+/* 设置下拉（图三风格：白底圆角列表 + 滚动条）*/
 .eph-dd{width:100%;position:relative;}
 .eph-dd-trigger{display:flex;align-items:center;justify-content:space-between;width:100%;box-sizing:border-box;font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:8px;padding:6px 9px;background:#fff;color:#1a1f2b;cursor:pointer;outline:none;}
 .eph-dd-trigger:hover{border-color:#b7c1cf;}
 .eph-dd-input{padding-right:26px;}
-.eph-dd-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.eph-dd-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:15px;}
 .eph-dd-arrow{flex:0 0 auto;width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:5px solid #94a3b8;margin-left:6px;}
 .eph-dd-menu{position:fixed;z-index:100020;background:#fff;border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.16);max-height:220px;overflow-y:auto;padding:4px;display:none;}
 .eph-dd-menu.active{display:block;}
@@ -204,17 +233,39 @@ const CSS = `
 .eph-dd-item:hover{background:#f1f4fa;}
 .eph-dd-item.active{background:#1a1a2e;color:#fff;}
 .eph-dd-empty{font-size:12px;color:#94a3b8;padding:8px 10px;text-align:center;}
-.eph-login-btn{display:inline-flex;align-items:center;gap:6px;background:#1a1a2e;color:#fff;border:none;border-radius:8px;padding:6px 12px;font-size:12px;font-family:inherit;cursor:pointer;font-weight:500;}
-.eph-login-btn:hover{background:#2d2d4a;}
 .eph-settings-note{font-size:10px;color:#94a3b8;line-height:1.4;padding:0 12px 10px;}
 .eph-settings-nav-btn:hover{background:#f1f4fa;}
 .eph-settings-nav-btn.active{background:#1a1a2e;color:#fff;}
 .eph-settings-pane .eph-settings-grid{display:none;}
 .eph-settings-pane .eph-settings-grid.active{display:grid;}
-/* 去掉数字输入框的上下箭头 */
+/* 去掉数字输入框的上下箭头  */
 .eph-settings-grid input[type=number]{appearance:textfield;-moz-appearance:textfield;}
 .eph-settings-grid input[type=number]::-webkit-outer-spin-button,
 .eph-settings-grid input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
+.eph-settings-sub{display:flex;flex-direction:column;gap:10px;}
+.eph-custom-list{display:flex;flex-direction:column;gap:6px;max-height:200px;overflow-y:auto;}
+.eph-custom-item{display:flex;align-items:center;gap:8px;padding:6px 9px;border:1px solid #eef2f8;border-radius:9px;font-size:12px;color:#1a1f2b;cursor:pointer;background:#fbfcfe;}
+.eph-custom-item:hover{border-color:#b7c1cf;}
+.eph-custom-item.sel{background:#1a1a2e;color:#fff;border-color:#1a1a2e;}
+.eph-custom-item.sel .eph-custom-del{color:#cdd!important;}
+.eph-custom-name{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.eph-custom-del{background:transparent;border:none;color:#b7c1cf;font-size:14px;line-height:1;cursor:pointer;padding:1px 4px;flex:0 0 auto;}
+.eph-custom-del:hover{color:#e34d4d;background:#fdecec;border-radius:6px;}
+.eph-custom-empty{font-size:11px;color:#94a3b8;padding:8px 4px;text-align:center;}
+.eph-path-row{display:flex;align-items:center;gap:6px;}
+.eph-path-row input{flex:1 1 auto;min-width:0;}
+.eph-path-row .eph-btn{flex:0 0 auto;}
+.eph-mode{display:flex;background:#f1f4fa;border-radius:9px;padding:2px;}
+.eph-mode-opt{flex:1;font-style:normal;font-size:11px;font-weight:600;padding:5px 12px;border-radius:7px;color:#94a3b8;border:none;background:transparent;cursor:pointer;font-family:inherit;transition:background .15s;}
+.eph-mode-opt.active{background:#1a1a2e;color:#fff;}
+.eph-settings-btnrow{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;}
+.eph-set-sec{font-size:11px;font-weight:600;color:#1a1a2e;letter-spacing:.4px;padding:9px 2px 1px;margin-top:2px;border-top:1px solid #eef2f8;}
+.eph-set-sec:first-child{border-top:none;padding-top:1px;}
+.eph-settings-sub input,.eph-settings-sub textarea,.eph-settings-sub select,.eph-settings-sub .eph-dd-trigger{pointer-events:auto;user-select:auto;-webkit-user-select:auto;}
+.eph-settings-grid label[data-tip]>span:first-child,.eph-settings-grid label.eph-switch[data-tip]>.eph-sw-label{border-bottom:1px dotted #b7c1cf;}
+/* 参数说明浮层：鼠标在 [data-tip] 元素上停留 2 秒才显示（原生 title 延迟太长且不能换行）；只给 TextGenerate / llama 参数用 */
+.eph-tip{position:fixed;left:0;top:0;z-index:100100;max-width:330px;background:#1a1a2e;color:#fff;font-family:Inter,sans-serif;font-size:11px;line-height:1.65;padding:7px 10px;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.28);white-space:pre-line;display:none;pointer-events:none;}
+.eph-tip.active{display:block;}
 
 /* 总体编辑弹窗 */
 .eph-all{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100004;background:rgba(0,0,0,.35);}
@@ -222,26 +273,98 @@ const CSS = `
 .eph-all-box{background:#fff;border-radius:16px;width:96%;max-width:1080px;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 26px 80px rgba(0,0,0,.28);font-family:Inter,sans-serif;box-sizing:border-box;}
 .eph-all-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #edf2f8;}
 .eph-all-hd b{font-size:14px;color:#0f141f;}
-.eph-btn.skill-on{background:#d9f2e4;border-color:#b7e5c9;color:#15803d;}
+.eph-all-hd-right{display:flex;align-items:center;gap:8px;}
+.eph-all-hd-right .eph-all-full{height:28px;padding:0 12px;font-size:12px;}
 .eph-all-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 16px;border-bottom:1px solid #edf2f8;background:#fbfcfe;}
 .eph-all-toolbar label{display:flex;align-items:center;gap:4px;font-size:11px;color:#5f6b7a;}
 .eph-all-toolbar input[type=color]{width:26px;height:26px;border:1px solid #dce3ec;border-radius:7px;padding:2px;background:#fff;cursor:pointer;}
-.eph-all-editor{flex:1 1 auto;min-height:0;overflow:auto;padding:6px 16px;outline:none;line-height:1.7;color:#1a1a2e;font-size:14px;}
+.eph-all-editor{flex:1 1 auto;min-height:0;overflow:auto;padding:6px 16px;outline:none;line-height:1.6;color:#1a1a2e;font-size:14px;}
 .eph-all-block{padding:4px 0 10px;}
-.eph-all-block-hd{display:flex;align-items:center;gap:8px;font-size:11px;color:#9aa7b5;padding:6px 8px;border-radius:8px;margin-bottom:6px;background:#f4f6fa;}
+.eph-all-block-hd{display:flex;align-items:center;gap:8px;font-size:11px;color:#9aa7b5;padding:6px 18px;border-radius:0;margin:0 -8px 6px;background:#f4f6fa;}
+.eph-all-block-hd .eph-merge-btn{margin-left:auto;}
+.eph-all-block-hd .eph-all-ref{margin-left:0;}
 .eph-all.collapsed .eph-all-block-hd{display:none;}
 .eph-all-num{font-weight:700;color:#8a99ae;flex:0 0 auto;}
-.eph-all-title{flex:0 0 150px;min-width:0;width:150px;font-weight:600;color:#2b3448;cursor:text;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;line-height:22px;height:22px;padding:0 6px;border:1px solid #dce3ec;border-radius:6px;background:#fff;outline:none;text-align:left;}
+.eph-all-title{flex:0 0 150px;min-width:0;width:150px;font-weight:600;color:#2b3448;cursor:text;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;line-height:22px;height:22px;padding:0 6px;border:1px solid transparent;border-radius:6px;background:transparent;outline:none;text-align:left;}
+.eph-all-title:focus{border-color:#dce3ec;background:#fff;}
 .eph-all-title:focus{border-color:#8a99ae;}
 .eph-all-title:empty::before{content:attr(data-ph);color:#a5b1c0;}
-.eph-all-time{flex:0 0 auto;display:inline-flex;align-items:center;gap:2px;font-size:10px;color:#9aa7b5;}
-.eph-all-ts{width:34px;height:22px;border:1px solid #dce3ec;border-radius:6px;background:#fff;font-size:11px;line-height:20px;text-align:center;outline:none;color:#5f6b7a;padding:0;box-shadow:none;}
 .eph-all-tspreview{color:#2563eb;font-size:10px;margin-left:4px;white-space:nowrap;}
 .eph-all-del{margin-left:auto;background:transparent;border:none;color:#b7c1cf;font-size:14px;line-height:1;cursor:pointer;padding:1px 4px;}
 .eph-all-del:hover{color:#e34d4d;background:#fdecec;border-radius:6px;}
+.eph-all-ref{margin-left:auto;background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;color:#334155;font-size:11px;line-height:18px;cursor:pointer;padding:0 8px;font-family:inherit;}
+.eph-all-rulebar{display:flex;align-items:center;gap:6px;margin-right:auto;min-height:22px;}
+.eph-all-ref:hover{background:#edf2fa;}
+.eph-all-ref + .eph-all-del{margin-left:6px;}
 .eph-all-block-body{outline:none;min-height:60px;background:transparent;}
+/* 收起小标题：各卡片之间用一条细灰线分隔，并隐藏空白行 */
+.eph-all.collapsed .eph-all-block{padding:2px 0 6px;}
+.eph-all.collapsed .eph-all-block + .eph-all-block{border-top:1px solid #e8ecf2;margin-top:2px;padding-top:8px;}
+.eph-all.collapsed .eph-all-block-body{min-height:0;}
+.eph-all.collapsed .eph-all-block-body div:empty,
+.eph-all.collapsed .eph-all-block-body p:empty{display:none;}
+.eph-all-blank{display:none;}
+/* 全屏 */
+.eph-all.full .eph-all-box{width:100%;max-width:none;height:100%;max-height:none;border-radius:0;}
 .eph-all-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:16px;}
 .eph-all-ft{display:flex;justify-content:flex-end;gap:8px;padding:10px 16px;border-top:1px solid #edf2f8;}
+
+/* 引用媒体：一个生成节点一块，块内是该节点各媒体端口上的素材卡片（预览效果与 MediaLoader 一致） */
+.eph-rb{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100060;background:rgba(0,0,0,.35);font-family:Inter,sans-serif;}
+.eph-rb.active{display:flex;}
+.eph-rb-box{background:#fff;border-radius:14px;width:94%;max-width:1020px;max-height:86vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.24);box-sizing:border-box;}
+.eph-rb-hd{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid #edf2f8;}
+.eph-rb-hd b{font-size:14px;color:#0f141f;}
+.eph-rb-hd .eph-modal-close{margin-left:auto;}
+.eph-rb-body{flex:1 1 auto;min-height:0;overflow:auto;padding:12px 16px;display:flex;flex-direction:column;gap:14px;}
+.eph-rb-node{border:1px solid #eef2f8;border-radius:12px;padding:10px 12px 12px;background:#fbfcfe;}
+.eph-rb-node.current{border-color:#86d3a4;background:#f2fbf5;}
+.eph-rb-nhd{display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer;padding:2px 4px;border-radius:8px;}
+.eph-rb-nhd:hover{background:rgba(0,0,0,.03);}
+.eph-rb-node.current .eph-rb-nhd:hover{background:rgba(22,163,74,.07);}
+.eph-rb-num{font-size:12px;font-weight:600;color:#8a99ae;flex:0 0 auto;min-width:14px;}
+.eph-rb-name{flex:1 1 160px;min-width:120px;font-size:12px;color:#1a1f2b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.eph-rb-node.current .eph-rb-name{color:#15803d;font-weight:600;}
+.eph-rb-cnt{font-size:11px;color:#5f6b7a;background:#eef2f7;border-radius:100px;padding:2px 10px;flex:0 0 auto;}
+.eph-rb-grid{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;}
+.eph-rb-hint{background:#fef2f2;border:1px solid #fecaca;color:#991b1b;border-radius:8px;padding:7px 10px;font-size:11px;line-height:1.6;}
+.eph-rb-tile{width:168px;background:#fbfcfe;border:1px solid #eef1f6;border-radius:9px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:.15s;position:relative;}
+.eph-rb-tile:hover{border-color:#d0d5dd;box-shadow:0 4px 12px rgba(0,0,0,.06);}
+.eph-rb-tile.added{border-color:#a7f0c6;background:#f6fffa;}
+.eph-rb-tile.flash{box-shadow:0 0 0 2px rgba(22,163,74,.4);}
+.eph-rb-pv{width:100%;background:#eef1f6;display:flex;align-items:center;justify-content:center;position:relative;aspect-ratio:16/9;overflow:hidden;flex-shrink:0;}
+.eph-rb-pv img{width:100%;height:100%;object-fit:contain;background:#eef1f6;display:block;}
+.eph-rb-pv video{width:100%;height:100%;object-fit:contain;background:#eef1f6;}
+.eph-rb-pv audio{width:100%;height:44px;background:#e2e8f0;border-radius:0;}
+.eph-rb-pv .ez-ap{width:100%;}
+.eph-rb-pv .eph-rb-ph{font-size:28px;color:#94a3b8;opacity:.6;}
+.eph-rb-type{position:absolute;top:5px;left:5px;display:inline-flex;align-items:center;gap:3px;background:rgba(255,255,255,.86);border-radius:30px;padding:1px 8px;font-size:10px;font-weight:600;color:#1a1f2b;box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid #eef1f6;pointer-events:none;z-index:3;}
+.eph-rb-type-ico{display:inline-flex;color:#4d5b6d;}
+.eph-rb-type-ico svg{width:11px;height:11px;display:block;}
+.eph-rb-pv .eph-rb-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:6;font-size:14px;padding:0;opacity:0;pointer-events:none;transition:.15s;font-family:inherit;}
+.eph-rb-tile:hover .eph-rb-play{opacity:1;pointer-events:auto;}
+.eph-rb-tile.playing .eph-rb-play{opacity:0;pointer-events:none;}
+.eph-rb-add{position:absolute;top:8px;right:8px;z-index:7;width:28px;height:28px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.55);color:#1a1f2b;font-size:17px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;font-family:inherit;padding:0;}
+.eph-rb-add:hover{background:rgba(255,255,255,.8);transform:scale(1.05);}
+.eph-rb-add.added{background:rgba(74,106,90,.85);border-color:rgba(74,106,90,.9);color:#fff;}
+.eph-rb-add.added:hover{background:rgba(61,90,77,.95);}
+.eph-rb-info{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:2px;padding:5px 8px 6px;background:rgba(255,255,255,.62);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,.5);opacity:0;transform:translateY(4px);transition:.15s;pointer-events:none;z-index:5;}
+.eph-rb-tile:hover .eph-rb-info{opacity:1;transform:none;}
+.eph-rb-tile.playing .eph-rb-info{opacity:0;}
+.eph-rb-fname{font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#1a1f2b;}
+.eph-rb-fmeta{font-size:10px;color:#64748b;display:flex;justify-content:space-between;gap:6px;}
+.eph-rb-suffix{background:rgba(255,255,255,.7);padding:0 6px;border-radius:4px;border:1px solid rgba(255,255,255,.6);}
+.eph-rb-foot{display:flex;align-items:center;gap:6px;padding:5px 8px 6px;border-top:1px solid #eef1f6;background:#fff;}
+.eph-rb-minus{margin-left:auto;background:transparent;border:1px solid #e2e8f0;border-radius:6px;color:#94a3b8;font-size:12px;line-height:1;cursor:pointer;padding:1px 6px;font-family:inherit;}
+.eph-rb-minus:hover{color:#c0392b;background:#fdecec;border-color:#fecaca;}
+.eph-rb-foot .eph-rb-cnt{font-size:10px;color:#15803d;background:#f2fbf5;border:1px solid #bbf7d0;border-radius:6px;padding:0 5px;line-height:16px;}
+.eph-rb-lab{font-size:12px;font-weight:600;color:#2563eb;}
+.eph-rb-tile.added .eph-rb-lab{color:#16a34a;}
+.eph-rb-ins{font-size:10px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:0 5px;line-height:16px;}
+.eph-rb-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:18px;line-height:1.8;}
+/* 引用媒体窗口的右键菜单 */
+.eph-ctx{position:fixed;z-index:100075;width:auto;min-width:210px;max-width:340px;padding:4px;}
+.eph-ctx .eph-tool-item{white-space:nowrap;}
 
 /* 优化调用进度弹窗 */
 .eph-prog{position:fixed;z-index:100030;width:290px;background:#fff;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.18);padding:10px 12px;display:none;font-family:Inter,sans-serif;box-sizing:border-box;cursor:pointer;}
@@ -264,12 +387,14 @@ const CSS = `
 /* 媒体引用：插入的 @ 芯片 + 悬停预览 + 点击查看器 */
 .eph-mref{color:#2563eb;cursor:pointer;font-weight:500;white-space:nowrap;user-select:none;background:transparent;border:none;padding:0;border-radius:0;}
 .eph-mref:hover{color:#1d4ed8;}
+.eph-mref .eph-mref-ico{width:13px;height:13px;vertical-align:-2.5px;margin-left:3px;}
+.eph-mref .eph-mref-ico svg{width:13px;height:13px;}
 .eph-tools-sep{font-size:10px;color:#94a3b8;padding:8px 10px 2px;letter-spacing:.5px;font-weight:500;}
 .ph-mref-item{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .eph-rp{position:fixed;z-index:100040;background:#fff;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.2);padding:8px;width:240px;box-sizing:border-box;font-family:Inter,sans-serif;}
 .eph-rp-media{display:block;width:100%;max-height:180px;border-radius:6px;object-fit:contain;background:#000;}
 .eph-rp-cap{font-size:10px;color:#5f6b7a;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.eph-mv{position:fixed;inset:0;z-index:100050;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);}
+.eph-mv{position:fixed;inset:0;z-index:100080;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);}
 .eph-mv.active{display:flex;}
 .eph-mv-box{background:#fff;border-radius:14px;padding:10px;padding-top:40px;max-width:82vw;max-height:82vh;display:flex;flex-direction:column;gap:8px;box-shadow:0 26px 80px rgba(0,0,0,.4);font-family:Inter,sans-serif;box-sizing:border-box;}
 .eph-mv-box .eph-modal-close{position:absolute;top:8px;right:8px;z-index:20;}
@@ -289,24 +414,6 @@ audio.eph-mv-media::-webkit-media-controls-timeline,audio.eph-rp-media::-webkit-
 .eph-fr-match-t{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;}
 .eph-ph-overlay{position:fixed;z-index:100006;background:#aab2c0;pointer-events:none;border-radius:2px;opacity:.5;}
 .eph-ph-overlay.current{background:#4b5563;opacity:.62;}
-
-/* skill 设置弹窗（文件夹树） */
-.eph-skb{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100005;background:rgba(0,0,0,.35);}
-.eph-skb.active{display:flex;}
-.eph-skb-box{background:#fff;border-radius:16px;width:92%;max-width:560px;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 26px 80px rgba(0,0,0,.28);overflow:hidden;font-family:Inter,sans-serif;box-sizing:border-box;}
-.eph-skb-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #edf2f8;}
-.eph-skb-hd b{font-size:14px;color:#0f141f;}
-.eph-skb-sideroot{flex:1 1 auto;min-height:0;display:flex;}
-.eph-skb-tree{flex:0 0 190px;min-width:0;overflow:auto;padding:8px;border-right:1px solid #eef2f8;display:flex;flex-direction:column;gap:3px;}
-.eph-skb-dir{text-align:left;padding:7px 9px;border:1px solid #eef2f8;border-radius:8px;font-size:12px;color:#1a1f2b;background:#fff;cursor:pointer;font-family:inherit;word-break:break-all;}
-.eph-skb-dir:hover{border-color:#dce3ec;background:#f7f9fd;}
-.eph-skb-dir.on{background:#1a1a2e;color:#fff;border-color:#1a1a2e;}
-.eph-skb-main{flex:1 1 auto;min-width:0;overflow:auto;padding:8px 10px;display:flex;flex-direction:column;gap:5px;}
-.eph-skb-maint{font-size:11px;color:#5f6b7a;font-weight:600;padding-bottom:4px;border-bottom:1px solid #eef2f8;margin-bottom:4px;}
-.eph-skb-card{text-align:left;padding:7px 10px;border:1px solid #eef2f8;border-radius:8px;font-size:12px;color:#1a1f2b;background:#fff;cursor:pointer;font-family:inherit;}
-.eph-skb-card:hover{border-color:#dce3ec;background:#f7f9fd;}
-.eph-skb-card.on{background:#1a1a2e;color:#fff;border-color:#1a1a2e;}
-.eph-skb-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:16px;}
 
 /* 对齐工具图标（Word 同款） */
 .eph-tb-btn svg{display:block;}
@@ -352,25 +459,75 @@ audio.eph-mv-media::-webkit-media-controls-timeline,audio.eph-rp-media::-webkit-
 .eph-picker-cancel{background:#f1f4fa;color:#4d5b6d;padding:8px 14px;border-radius:8px;border:none;cursor:pointer;font-family:inherit;}
 .eph-picker-confirm{background:#1a1a2e;color:#fff;padding:8px 14px;border-radius:8px;border:none;cursor:pointer;font-family:inherit;}
 
-/* 规则弹窗 */
-.eph-rules{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100002;background:rgba(0,0,0,.3);}
-.eph-rules.active{display:flex;}
-.eph-rules-box{background:#fff;border-radius:16px;width:640px;max-height:82vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.2);overflow:hidden;}
-.eph-rules-hd{display:flex;justify-content:space-between;padding:16px 20px;border-bottom:1px solid #e6edf7;}
-.eph-rules-body{padding:14px 20px;overflow-y:auto;}
+/* 设置·规则设置页 */
 .eph-rule-sel{display:flex;flex-direction:column;gap:6px;margin-bottom:14px;}
 .eph-rule-sel>span{font-size:12px;color:#1a1a2e;font-weight:600;}
 .eph-rule-note{font-size:11px;color:#5f6b7a;background:#f2f5fa;border-radius:8px;padding:8px 10px;line-height:1.6;}
 .eph-rule-custom{display:flex;flex-direction:column;gap:6px;margin-top:6px;}
 .eph-rule-custom>span{font-size:12px;color:#1a1a2e;font-weight:600;}
 .eph-rule-custom input{font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:8px;padding:6px 9px;outline:none;background:#fff;color:#1a1f2b;box-sizing:border-box;width:100%;}
-.eph-rules-body .eph-btn-save{margin-top:10px;}
-.eph-rule-sec{margin-bottom:16px;}
-.eph-rule-title{font-weight:700;font-size:14px;margin-bottom:8px;color:#1a1a2e;}
-.eph-rule-card{background:#f7f9fd;border-radius:8px;padding:10px;margin-bottom:6px;border-left:4px solid #3b82f6;}
-.eph-rule-card strong{display:block;margin-bottom:3px;color:#1a1a2e;}
-.eph-rule-card p{font-size:12px;color:#5f6b7a;line-height:1.5;}
-.eph-rule-card code{background:#e2e8f0;padding:1px 3px;border-radius:4px;font-family:monospace;}
+
+/* 卡片管理弹窗（保存 / 加载 / 删除 userdata/prompts 里的提示词卡片） */
+.eph-cm{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100004;background:rgba(0,0,0,.35);font-family:Inter,sans-serif;}
+.eph-cm.active{display:flex;}
+.eph-cm-box{background:#fff;border-radius:16px;width:640px;max-width:94vw;max-height:86vh;display:flex;flex-direction:column;box-shadow:0 26px 80px rgba(0,0,0,.28);overflow:hidden;box-sizing:border-box;}
+.eph-cm-hd{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #edf2f8;}
+.eph-cm-hd b{font-size:14px;color:#0f141f;}
+.eph-cm-body{padding:12px 16px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;flex:1 1 auto;min-height:0;}
+.eph-cm-row{display:flex;align-items:center;gap:8px;}
+.eph-cm-row input{flex:1 1 auto;min-width:0;font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:8px;padding:6px 9px;outline:none;background:#fff;color:#1a1f2b;box-sizing:border-box;}
+.eph-cm-row .eph-dd{flex:1 1 auto;min-width:0;}
+.eph-cm-row .eph-btn{flex:0 0 auto;}
+.eph-cm-pick{display:flex;flex-wrap:wrap;gap:6px;border:1px solid #eef2f8;background:#fbfcfe;border-radius:10px;padding:8px;min-height:54px;align-content:flex-start;}
+.eph-cm-chip{border:1px solid #dce3ec;background:#fff;border-radius:8px;padding:5px 9px;font-size:11px;color:#1a1f2b;cursor:pointer;user-select:none;-webkit-user-select:none;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:inherit;}
+.eph-cm-chip:hover{border-color:#b7c1cf;background:#f7f9fd;}
+.eph-cm-chip.on{background:#e7f7ec;border-color:#86d3a4;color:#15803d;font-weight:600;}
+.eph-cm-idx{color:#8a99ae;margin-right:4px;}
+.eph-cm-chip.on .eph-cm-idx{color:#16a34a;}
+.eph-cm-empty{color:#8a9aa8;font-size:11px;padding:6px;}
+.eph-cm-hint{font-size:11px;color:#5f6b7a;background:#f2f5fa;border-radius:8px;padding:7px 10px;line-height:1.6;min-height:16px;word-break:break-all;}
+.eph-cm-hint.err{background:#fef2f2;color:#991b1b;}
+.eph-cm-hint.ok{background:#f2fbf5;color:#15803d;}
+/* 提示词规范：卡片/总体编辑左下角下拉 + 提示气泡（不遮挡，向下弹） */
+.eph-rule-row{display:flex;align-items:center;gap:4px;flex:0 0 auto;}
+.eph-rule-dd{width:136px;}
+.eph-rule-dd .eph-dd-trigger{padding:2px 6px;font-size:11px;min-height:22px;}
+.eph-rule-hint{height:22px;border-radius:7px;border:1px solid #dce3ec;background:#fff;color:#5f6b7a;font-size:11px;line-height:1;cursor:pointer;font-family:inherit;flex:0 0 auto;padding:0 8px;}
+.eph-rule-hint:hover{border-color:#8a99ae;color:#1a1a2e;}
+.eph-merge-btn{height:22px;min-width:26px;padding:0 7px;border-radius:6px;border:1px solid #dce3ec;background:#f1f4fa;color:#94a3b8;font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;flex:0 0 auto;line-height:1;}
+.eph-merge-btn.on{background:#d9f2e4;border-color:#86d3a4;color:#15803d;}
+.eph-rule-pop{position:fixed;z-index:100040;width:440px;max-width:92vw;max-height:70vh;overflow:auto;background:#fff;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.2);padding:10px 12px;font-family:Inter,sans-serif;font-size:11px;color:#334155;line-height:1.6;box-sizing:border-box;}
+.eph-rule-pop-t{font-size:12px;font-weight:600;color:#0f141f;margin-bottom:6px;}
+.eph-rule-pop-hd{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+.eph-rule-pop-hd .eph-rule-pop-t{margin-bottom:0;flex:1 1 auto;min-width:0;}
+.eph-lang{display:flex;flex:0 0 auto;border:1px solid #dce3ec;border-radius:7px;overflow:hidden;}
+.eph-lang-btn{border:0;border-radius:0;background:#fff;color:#5f6b7a;font-family:inherit;font-size:10px;line-height:1;padding:4px 8px;cursor:pointer;}
+.eph-lang-btn+.eph-lang-btn{border-left:1px solid #dce3ec;}
+.eph-lang-btn.active{background:#2563eb;color:#fff;}
+.eph-lang-wrap{margin:2px 0 2px;}
+.eph-rule-pop-note{background:#f2f5fa;border-radius:8px;padding:7px 9px;white-space:pre-line;}
+.eph-rule-pop-ex{margin-top:8px;border-top:1px solid #eef2f8;padding-top:6px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;}
+.eph-rule-pop-ts{margin-top:8px;border-top:1px solid #eef2f8;padding-top:6px;display:flex;flex-direction:column;gap:6px;}
+.eph-rule-shots-in{display:flex;flex-direction:column;gap:4px;user-select:none;-webkit-user-select:none;}
+.eph-rule-shot-row{display:flex;align-items:center;gap:5px;}
+.eph-rule-shot-row input{width:46px;text-align:center;border:1px solid #dce3ec;border-radius:6px;padding:3px 5px;font-size:11px;font-family:inherit;outline:none;height:24px;box-sizing:border-box;user-select:none;-webkit-user-select:none;}
+.eph-rule-shot-btn{width:20px;height:20px;border-radius:6px;border:1px solid #dce3ec;background:#fff;color:#5f6b7a;font-size:12px;line-height:1;cursor:pointer;font-family:inherit;padding:0;flex:0 0 auto;user-select:none;-webkit-user-select:none;}
+.eph-rule-shot-btn:hover{border-color:#8a99ae;color:#1a1a2e;}
+/* 生成结果集中成一块，方便一次框选 */
+.eph-rule-shots-out{display:flex;flex-direction:column;gap:2px;user-select:text;-webkit-user-select:text;}
+.eph-rule-shot-pv{color:#2563eb;font-size:11px;white-space:pre;overflow-x:auto;max-width:100%;}
+.eph-rule-pop-pair{display:inline-flex;align-items:center;gap:3px;font-size:11px;}
+.eph-rule-pop-from{color:#5f6b7a;}
+.eph-rule-pop-arrow{color:#b7c1cf;}
+.eph-rule-pop-to{color:#2563eb;font-weight:500;}
+.eph-dd-sep{height:1px;background:#eef2f8;margin:4px 6px;}
+/* 规范设置页 */
+.eph-rule-box{display:flex;flex-direction:column;gap:8px;}
+.eph-rule-grid{display:grid;grid-template-columns:1fr;gap:8px;}
+.eph-rule-grid label{display:flex;flex-direction:column;gap:4px;font-size:11px;color:#5f6b7a;}
+.eph-rule-grid input,.eph-rule-grid textarea{font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:8px;padding:6px 9px;outline:none;background:#fff;color:#1a1f2b;box-sizing:border-box;width:100%;}
+.eph-rule-grid textarea{min-height:160px;resize:none;line-height:1.5;}
+.eph-rule-btns{display:flex;gap:8px;flex-wrap:wrap;}
 `;
 
 let _styleInjected = false;
@@ -378,8 +535,59 @@ function injectStyle() { if (_styleInjected || !document.head) return; _styleInj
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 function genId() { return 'ph_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7); }
 function deepClone(o) { try { return JSON.parse(JSON.stringify(o)); } catch (_) { return Array.isArray(o) ? [] : {}; } }
-function plainTextOf(html) { const d = document.createElement('div'); d.innerHTML = html || ''; return (d.textContent || '').trim(); }
+function plainTextOf(html) {
+  const d = document.createElement('div'); d.innerHTML = html || '';
+  // 按块级边界补换行：直接取 textContent 会把多行提示词粘成一行（<div>a</div><div>b</div> 之间没有换行）。
+  const out = [];
+  const walk = (n) => {
+    if (n.nodeType === 3) { out.push(n.nodeValue || ''); return; }
+    if (n.nodeType !== 1) return;
+    const tag = n.tagName.toLowerCase();
+    if (tag === 'br') { out.push('\n'); return; }
+    const block = /^(div|p|li|h[1-6]|tr|blockquote)$/.test(tag);
+    if (block && out.length && out[out.length - 1] !== '\n') out.push('\n');
+    Array.from(n.childNodes).forEach(walk);
+    if (block && out.length && out[out.length - 1] !== '\n') out.push('\n');
+  };
+  Array.from(d.childNodes).forEach(walk);
+  return out.join('').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
 const fetchApi = (p, o) => (api && typeof api.fetchApi === 'function') ? api.fetchApi(p, o) : fetch(p, o);
+
+// 参数说明：给任意元素挂 data-tip，鼠标停留 2 秒后才弹出说明浮层（含换行，原生 title 做不到）。
+// 目前只挂在「TextGenerate设置」「llama设置」两类参数上（API 厂商/模型/路径等不给，误挡输入框）。
+// 停留时间不能太短：一放上去就弹会挡住正在看的输入框。
+  const _TIP_DELAY = 2000;
+let _tipEl = null, _tipTimer = null, _tipFor = null;
+function setTip(node, text) { if (node && text) node.dataset.tip = text; return node; }
+function placeTip(t) {
+  if (!_tipEl || !_tipEl.parentNode) { _tipEl = el('div', 'eph-tip'); document.body.appendChild(_tipEl); }
+  _tipEl.textContent = t.dataset.tip; _tipEl.classList.add('active');
+  const r = t.getBoundingClientRect(); const b = _tipEl.getBoundingClientRect();
+  _tipEl.style.left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - b.width - 8)) + 'px';
+  const below = r.bottom + 8;
+  _tipEl.style.top = ((below + b.height > window.innerHeight - 8) ? Math.max(8, r.top - b.height - 8) : below) + 'px';
+}
+function hideTip() {
+  if (_tipTimer) { clearTimeout(_tipTimer); _tipTimer = null; }
+  _tipFor = null;
+  if (_tipEl) _tipEl.classList.remove('active');
+}
+document.addEventListener('mouseover', (e) => {
+  const t = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+  if (t === _tipFor) return;              // 还在同一个字段内部移动：既不重计时也不隐藏
+  if (!t) return;
+  _tipFor = t;
+  _tipTimer = setTimeout(() => { _tipTimer = null; if (_tipFor === t) placeTip(t); }, _TIP_DELAY);
+});
+document.addEventListener('mouseout', (e) => {
+  const t = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+  if (!t || t !== _tipFor) return;
+  const to = e.relatedTarget;
+  if (to && to.nodeType === 1 && t.contains(to)) return;   // 字段内的子元素之间移动，不算移出
+  hideTip();
+});
+window.addEventListener('scroll', hideTip, true);
 
 // Word 同款对齐图标（横线表示对齐方式）
 function alignSVG(type) {
@@ -390,7 +598,12 @@ function alignSVG(type) {
 }
 
 function stateFor(node) {
-  if (!node._ezPh) node._ezPh = { cards: [], optimize: {}, rules: {}, editingId: null, currentTab: 'default', dirty: false };
+  if (!node._ezPh) node._ezPh = {
+    cards: [], optimize: {}, rules: {},
+    // 「总体编辑」那份整体优化内容（所有卡片合并后优化一次）+ 是否用它输出（对应卡片级的 contentOptimized / useOptimized）
+    overallOptimized: '', overallOptimizedHTML: '', overallUseOptimized: false,
+    editingId: null, currentTab: 'default', dirty: false,
+  };
   return node._ezPh;
 }
 function loadFromConfig(node) {
@@ -399,12 +612,41 @@ function loadFromConfig(node) {
   st.cards = Array.isArray(cfg.cards) ? deepClone(cfg.cards) : [];
   st.optimize = (cfg.optimize && typeof cfg.optimize === 'object') ? deepClone(cfg.optimize) : {};
   st.rules = (cfg.rules && typeof cfg.rules === 'object') ? deepClone(cfg.rules) : {};
+  st.overallOptimized = String(cfg.overallOptimized || '');
+  st.overallOptimizedHTML = String(cfg.overallOptimizedHTML || '');
+  st.overallUseOptimized = !!cfg.overallUseOptimized;
   st.dirty = false;
 }
 function syncToConfig(node) {
   const st = stateFor(node);
-  writeConfig(node, { optimize: st.optimize || {}, cards: st.cards, rules: st.rules || {} });
+  // 规范是「节点级」的一份选择：所有卡片都用它（后端编译直接用，不动配置里的规范表）
+  const customs = (st.rules && Array.isArray(st.rules.custom)) ? st.rules.custom : _customRules(node);
+  const ovs = (st.rules && st.rules.overrides && typeof st.rules.overrides === 'object') ? st.rules.overrides : {};
+  const lang = (st.rules && st.rules.lang === 'en') ? 'en' : 'zh';
+  const ruleId = _normRuleId((st.rules && st.rules.ruleId) || 'none');
+  const rule = _PROMPT_RULES.map((x) => _pickLang(_applyOverride(x, ovs[x.id]), lang))
+    .concat(customs.map((c) => _pickLang(c, lang))).find((x) => x.id === ruleId) || _PROMPT_RULES[0];
+  st.cards.forEach((c) => { c.rule = { ref: rule.ref || {}, ts: rule.ts || {} }; });
+  writeConfig(node, {
+    optimize: st.optimize || {}, cards: st.cards, rules: st.rules || {},
+    overallOptimized: st.overallOptimized || '', overallOptimizedHTML: st.overallOptimizedHTML || '',
+    overallUseOptimized: !!st.overallUseOptimized,
+  });
   markDirtyFalse(node);
+}
+// 规范下拉在卡片弹窗 / 总体编辑 / 设置页三处任意一处改动，其余都跟着走
+function syncRuleUI(node, id) {
+  id = _normRuleId(id);
+  try { if (_editModal && _editModal.classList.contains('active') && _editModal._ruleDD) _editModal._ruleDD.value = id; } catch (_) {}
+  try { if (_allModal && _allModal.classList.contains('active') && _allModal._ruleDD) _allModal._ruleDD.value = id; } catch (_) {}
+  try { const g = _settingsModal && _settingsModal._grid1r; if (g && g._setRule) g._setRule(id); } catch (_) {}
+}
+function setNodeRule(node, id) {
+  const st = stateFor(node);
+  id = _normRuleId(id);
+  st.rules = Object.assign({}, st.rules || {}, { ruleId: id });
+  syncToConfig(node);
+  syncRuleUI(node, id);
 }
 function markDirtyFalse(node) { /* kept for clarity; no untracked dirty on config write */ }
 
@@ -414,7 +656,7 @@ function addCard(node) {
   st.cards.push({
     id: genId(), title: `第${st.cards.length + 1}幕`,
     content: '', contentHTML: '', contentOptimized: '', contentOptimizedHTML: '',
-    timelineStart: '', timelineEnd: '', skill: '', modelType: 'text', model: '', provider: '', apiUrl: '', indent: 0, useOptimized: false,
+    timelineStart: '', timelineEnd: '', modelType: 'text', model: '', provider: '', apiUrl: '', indent: 0, useOptimized: false,
   });
   syncToConfig(node); updatePorts(node); refreshUI(node);
 }
@@ -433,16 +675,13 @@ function reorderCard(node, from, to) {
   syncToConfig(node); updatePorts(node); refreshUI(node);
 }
 
-// ===== 动态端口（输入 card_in_1..N / 输出 合并提示词 + card_out_1..N）=====
-function syncOutputTypes(count) {
-  try { fetchApi(OUT_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ count: count || 0 }) }).catch(() => {}); } catch (_) {}
-}
+// ===== 动态端口（输入 card_in_1..N / 输出 合并提示词 + card_out_1..N）====
 function removeConfigInput(node) {
   try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && _in.name === 'config') { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 }
 function deferSync(node) {
   if (node._ezPhSyncTimer) clearTimeout(node._ezPhSyncTimer);
-  node._ezPhSyncTimer = setTimeout(() => { node._ezPhSyncTimer = null; try { updatePorts(node); refreshUI(node); } catch (_) {} }, 120);
+  node._ezPhSyncTimer = setTimeout(() => { node._ezPhSyncTimer = null; try { updatePorts(node); refreshUI(node); } catch (e) { console.error('[PromptHelper] 端口同步失败（面板可能不显示）:', e); } }, 120);
 }
 function linksOf(o) {
   const ids = [];
@@ -456,15 +695,15 @@ function updatePorts(node, noRedraw) {
   const st = stateFor(node);
   const count = Math.min(MAX_CARDS, st.cards.length);
 
-  // 链路未恢复守卫：先不动 socket，延后再重排/删槽（否则保存的 target_slot/origin_slot 接不回去）
+  // 链路变更复用守卫：先不动 socket，延后再重排/删槽（否则保存的 target_slot/origin_slot 接不回去）。
   const pending = (node.inputs || []).some((i) => i.link != null && !(node.graph && node.graph.links && node.graph.links[i.link]))
     || (node.outputs || []).some((o) => linksOf(o).some((lid) => lid != null && !(node.graph && node.graph.links && node.graph.links[lid])));
   if (pending) { deferSync(node); return false; }
 
-  // ---- 输入：综合媒体动态（红色 ANY，连接后自动补一个空槽）+ 卡片输入按序（clip 输入口已移除，TextGenerate 走调用设置配置）----
+  // ---- 输入：综合媒体动态（红色 ANY，连接后自动补一个空槽）+ 卡片输入按序（clip 输入口已移除，TextGenerate 走设置）----
 
-  // 综合媒体：任意类型(ANY)红色端口，可接 图像/视频/音频/3D 模型等。已连接的媒体端口数 + 1 个空槽。
-  const mediaExists = (node.inputs || []).filter((i) => i._ezMedia != null || /^media_in_\d+$/.test(i.name || ''));
+  // 综合媒体：任意类型(ANY)红色端口，可接 图像/视频/音频/3D 模型等。已连接的媒体端口数 + 1  个空槽。
+    const mediaExists = (node.inputs || []).filter((i) => i._ezMedia != null || /^media_in_\d+$/.test(i.name || ''));
   const connectedMedia = mediaExists.filter((s) => linksOf(s).length > 0).length;
   const mediaWant = Math.min(MAX_MEDIA, Math.max(1, connectedMedia + 1));
   const mediaSeq = [];
@@ -489,7 +728,7 @@ function updatePorts(node, noRedraw) {
   mediaExists.forEach((o, i) => { if (!usedMedia.has(i)) { const idx = node.inputs.indexOf(o); if (idx >= 0) node.removeInput(idx); } });
 
   // 提示词文本输入：卡片数 1:1，逻辑不变；某卡输入口被连接则对应卡片变灰。
-  const allCardSocks = (node.inputs || []).filter((i) => (i._ezCardId != null || /^card_in_\d+$/.test(i.name || '')));
+    const allCardSocks = (node.inputs || []).filter((i) => (i._ezCardId != null || /^card_in_\d+$/.test(i.name || '')));
   const used = new Set();
   const cardSeq = [];
   st.cards.forEach((card, idx) => {
@@ -511,7 +750,7 @@ function updatePorts(node, noRedraw) {
     }
   });
   // 记录「卡片输入口已连接」→ 渲染时卡片变灰
-  const linked = {};
+    const linked = {};
   cardSeq.forEach((sock, idx) => { if (linksOf(sock).length > 0 && st.cards[idx]) linked[st.cards[idx].id] = true; });
   node._ezLinkedCards = linked;
 
@@ -558,7 +797,6 @@ function updatePorts(node, noRedraw) {
   });
 
   if (node.graph) node.graph.setDirtyCanvas(true, true);
-  syncOutputTypes(count);
   return true;
 }
 
@@ -636,22 +874,32 @@ function buildCardRow(node, card, index) {
   const prov = (card.provider || card.apiUrl) ? (card.provider || 'API') : '';
   if (prov) { badge = el('span', 'eph-badge'); badge.textContent = prov; badge.title = [card.provider, card.model, card.apiUrl].filter(Boolean).join(' · '); }
   if (badge) ctitle.appendChild(badge);
-  const preview = el('span', 'eph-preview'); preview.textContent = card.content || '';
+  // 「优 / 默」跟随该卡滑块：在「优化提示词」页签显示优，在「默认」页签显示默
+  const ob = el('span', 'eph-badge' + (card.useOptimized ? ' eph-badge-opt' : ''));
+  ob.textContent = card.useOptimized ? '优' : '默';
+  ob.title = card.useOptimized
+    ? '输出用「优化提示词」页签' + (card.contentOptimized ? '：' + String(card.contentOptimized).slice(0, 200) : '（还是空的）')
+    : '输出用「默认」页签';
+  ctitle.appendChild(ob);
+  // 预览文字跟随该卡滑块：在「优化提示词」页签显示优化后的正文，在「默认」页签显示默认正文
+  const preview = el('span', 'eph-preview'); preview.textContent = (card.useOptimized ? card.contentOptimized : card.content) || '';
   const time = el('span', 'eph-time'); time.textContent = (card.timelineStart && card.timelineEnd) ? `${card.timelineStart}-${card.timelineEnd}s` : '';
+  const mg = el('button', 'eph-merge-btn' + (card.mergeOff ? '' : ' on')); mg.textContent = '合'; mg.title = '合并进「合并提示词」：绿=合并，灰=不合并';
+  mg.addEventListener('click', (e) => { e.stopPropagation(); card.mergeOff = !card.mergeOff; syncToConfig(node); refreshUI(node); });
   const del = el('button', 'eph-del'); del.textContent = '×'; del.title = '删除卡片';
   del.addEventListener('click', async (e) => {
     e.stopPropagation();
     if (await uiConfirm(`确定删除提示词卡片「${card.title || ''}」吗？`)) deleteCard(node, card.id);
   });
-  // 只有「单点」卡片（无拖动位移）才打开编辑弹窗，避免在标题里拖动误触。
-  let _rowDown = null;
+  //  只有「单点」卡片（无拖动位移）才打开编辑弹窗，避免在标题里拖动误触。
+    let _rowDown = null;
   row.addEventListener('pointerdown', (e) => { _rowDown = { x: e.clientX, y: e.clientY }; });
   row.addEventListener('click', (e) => {
     if (e.target.closest('button') || e.target.closest('.eph-handle') || e.target.closest('[contenteditable]')) return;
     if (_rowDown) { const dx = e.clientX - _rowDown.x, dy = e.clientY - _rowDown.y; if (Math.hypot(dx, dy) > 4) { _rowDown = null; return; } _rowDown = null; }
     openEditModal(node, card.id);
   });
-  row.appendChild(handle); row.appendChild(idx); row.appendChild(ctitle); row.appendChild(preview); row.appendChild(time); row.appendChild(del);
+  row.appendChild(handle); row.appendChild(idx); row.appendChild(ctitle); row.appendChild(preview); row.appendChild(time); row.appendChild(mg); row.appendChild(del);
   return row;
 }
 function updateSocketLabels(node, cardId, label) {
@@ -677,11 +925,21 @@ function renderCards(node) {
 // ===== 编辑器弹窗 =====
 let _editModal = null;
 let _phActiveEditor = null;   // 当前居中的富文本编辑器（卡片弹窗 / 总体编辑），供颜色等工具作用到正确的编辑器
-let _editorRange = null;
+  let _editorRange = null;
 function saveSelection() { const sel = window.getSelection(); if (sel.rangeCount) _editorRange = sel.getRangeAt(0); }
 function restoreSelection() {
   if (!_editorRange) return;
   const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(_editorRange);
+}
+// 光标放到编辑器末尾（打开卡片弹窗时用：接着往下写，或直接点「引用媒体」的 + / 打 @，引用都落在末尾）。
+function caretToEditorEnd(ed) {
+  if (!ed) return;
+  try {
+    const r = document.createRange(); r.selectNodeContents(ed); r.collapse(false);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    saveSelection();
+  } catch (_) {}
+  try { ed.scrollTop = ed.scrollHeight; } catch (_) {}
 }
 function editModalEl() {
   if (_editModal && _editModal.parentNode) return _editModal;
@@ -690,9 +948,19 @@ function editModalEl() {
   const hd = el('div', 'eph-modal-hd');
   const t = el('b'); t.textContent = '编辑提示词';
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
-  hd.appendChild(t); hd.appendChild(close);
+  const fullBtn = el('button', 'eph-btn eph-modal-full'); fullBtn.type = 'button'; fullBtn.textContent = '全屏'; fullBtn.title = '全屏 / 退出全屏';
+  const hdRight = el('div', 'eph-modal-hd-right');
+  hdRight.appendChild(fullBtn); hdRight.appendChild(close);
+  hd.appendChild(t); hd.appendChild(hdRight);
+  fullBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const m = _editModal; if (!m) return;
+    m.classList.toggle('full');
+    fullBtn.textContent = m.classList.contains('full') ? '退出全屏' : '全屏';
+    requestAnimationFrame(() => { try { moveTabThumb(); } catch (_) {} });
+  });
   // 工具条
-  const toolbar = el('div', 'eph-toolbar');
+    const toolbar = el('div', 'eph-toolbar');
   const tb = (cls, title, cmd, inner) => { const b = el('button', 'eph-tb-btn ' + (cls || '')); b.title = title; b.dataset.cmd = cmd; b.innerHTML = inner; toolbar.appendChild(b); return b; };
   tb('word-glyph bold-glyph', '加粗', 'bold', '<span>B</span>');
   tb('word-glyph italic-glyph', '斜体', 'italic', '<span>I</span>');
@@ -734,9 +1002,8 @@ function editModalEl() {
   toolbar.appendChild(toolsGroup);
 
   const refGroup = el('div', 'eph-tb-group');
-  const refBtn = el('button', 'eph-btn'); refBtn.textContent = '插入引用';
-  const refDD = el('div', 'eph-tools-dropdown');
-  refGroup.appendChild(refBtn); refGroup.appendChild(refDD);
+  const refBtn = el('button', 'eph-btn'); refBtn.textContent = '引用媒体';
+  refGroup.appendChild(refBtn);
   toolbar.appendChild(refGroup);
 
   const tabDefault = el('button', 'eph-tab active'); tabDefault.textContent = '默认提示词';
@@ -750,21 +1017,41 @@ function editModalEl() {
   editorWrap.appendChild(tabDefault); editorWrap.appendChild(tabOptimized);
   body.appendChild(editorWrap);
   const editor = el('div', 'eph-editor'); editor.contentEditable = 'true';
-  attachMention(editor, () => _editModal._node);
+  attachMention(editor, () => ({ node: _editModal._node, card: sameNodeCard(_editModal._node) }));
+  toolbar.appendChild(skillButton(editor));
+  // 「合」放在 skill 后面：绿=合并进「合并提示词」，灰=不进（例如这张卡片是负面提示词/备选）
+  const mergeBtn = el('button', 'eph-merge-btn'); mergeBtn.type = 'button'; mergeBtn.textContent = '合'; mergeBtn.title = '合并进「合并提示词」：绿=合并，灰=不合并';
+  const updMerge = () => { const c = sameNodeCard(_editModal && _editModal._node); mergeBtn.classList.toggle('on', !(c && c.mergeOff)); };
+  mergeBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const nd = _editModal && _editModal._node; const c = sameNodeCard(nd); if (!nd || !c) return;
+    c.mergeOff = !c.mergeOff; syncToConfig(nd); updMerge(); refreshUI(nd);   // 同步面板卡片列表上的「合」
+  });
+  toolbar.appendChild(mergeBtn);
   body.appendChild(editor);
 
   const ft = el('div', 'eph-modal-ft');
   const timeline = el('div', 'eph-timeline');
-  const tsLabel = el('span'); tsLabel.textContent = '时间轴';
-  const tsStart = el('input');
-  const tsDash = el('span'); tsDash.textContent = '—';
-  const tsEnd = el('input');
-  const tsUnit = el('span'); tsUnit.textContent = 's';
-  const tsPreview = el('span', 'eph-all-tspreview');
-  const updTsPreview = () => { const nd = _editModal && _editModal._node; const rules = nd ? phRulesModel(nd) : {}; tsPreview.textContent = formatTimeText(rules.tsModel, tsStart.value, tsEnd.value); };
-  [tsStart, tsEnd].forEach((inp) => inp.addEventListener('input', updTsPreview));
-  timeline.appendChild(tsLabel); timeline.appendChild(tsStart); timeline.appendChild(tsDash); timeline.appendChild(tsEnd); timeline.appendChild(tsUnit); timeline.appendChild(tsPreview);
-  _editModal._tsPreview = tsPreview; _editModal._updTsPreview = updTsPreview;
+  // 左下角：规范「参考卡」（下拉只切换看哪条规范，不写进卡片）+「?」提示
+  const ruleRow = el('div', 'eph-rule-row');
+  const ruleDD = makeDropdown(ruleDropdownItems(null, false));
+  ruleDD.el.classList.add('eph-rule-dd');
+  const hintBtn = el('button', 'eph-rule-hint'); hintBtn.type = 'button'; hintBtn.textContent = '提示'; hintBtn.title = '看该规范的书写规则 / 引用写法';
+  ruleRow.appendChild(ruleDD.el); ruleRow.appendChild(hintBtn);
+  timeline.appendChild(ruleRow);
+  ruleDD.addEventListener('change', (v) => {
+    const nd = _editModal && _editModal._node; if (!nd) return;
+    setNodeRule(nd, v);   // 节点级选择：设置页 / 总体编辑同步
+    if (_rulePop && _rulePop._anchor === hintBtn) { const p = openRulePop(hintBtn, nd, { ruleId: v }); p._anchor = hintBtn; }
+  });
+  hintBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (_rulePop && _rulePop._anchor === hintBtn) { closeRulePop(); return; }
+    const nd = _editModal && _editModal._node; if (!nd) return;
+    const p = openRulePop(hintBtn, nd, { ruleId: ruleDD.value });
+    p._anchor = hintBtn;
+  });
+  _editModal._ruleDD = ruleDD; _editModal._hintBtn = hintBtn; _editModal._updMerge = updMerge;
   ft.appendChild(timeline);
   const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = '取消';
   const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = '保存';
@@ -789,7 +1076,7 @@ function editModalEl() {
   hlBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); hlDD.classList.toggle('active'); fcDD.classList.remove('active'); if (hlDD.classList.contains('active')) phCenterPopup(hlDD); });
   fcBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); fcDD.classList.toggle('active'); hlDD.classList.remove('active'); if (fcDD.classList.contains('active')) phCenterPopup(fcDD); });
   toolsBtn.addEventListener('click', (e) => { e.stopPropagation(); toolsDD.classList.toggle('active'); if (toolsDD.classList.contains('active')) phFixedDD(toolsBtn, toolsDD); });
-  refBtn.addEventListener('click', (e) => { e.stopPropagation(); refDD.classList.toggle('active'); if (refDD.classList.contains('active')) { phFixedDD(refBtn, refDD); addMediaFileItems(refDD, editor, (_m) => insertMediaRef(editor, _m), _editModal._node); } });
+  refBtn.addEventListener('click', (e) => { e.stopPropagation(); openRefBrowser(_editModal._node, editor, sameNodeCard(_editModal._node)); });
 
   // 颜色下拉 / 工具下拉 / 引用下拉
   initColorDropdown(hlDD, 'highlight');
@@ -801,19 +1088,20 @@ function editModalEl() {
     b.addEventListener('click', () => { toolsDD.classList.remove('active'); if (id === 'find') openFindModal('find', _editModal && _editModal._editor); else runTool(id); });
     toolsDD.appendChild(b);
   });
-  // 插入引用：扫描节点已连接的「综合媒体」输入端口（编辑期仅能列出端口/标签，预览需运行期拿到媒体值）。
-  addMediaFileItems(refDD, editor, (_m) => insertMediaRef(editor, _m), _editModal._node);
+  // 插入引用：改由「引用浏览器」按生成节点分块预览素材后点击插入（见 openRefBrowser）。
 
   _editModal._box = box; _editModal._editor = editor; _editModal._tabDefault = tabDefault; _editModal._tabOptimized = tabOptimized; _editModal._tabThumb = tabThumb;
-  _editModal._fontInput = fontInput; _editModal._fontList = fontList; _editModal._indentInput = indentInput; _editModal._tsStart = tsStart; _editModal._tsEnd = tsEnd;
-  _editModal._hlDD = hlDD; _editModal._fcDD = fcDD; _editModal._toolsDD = toolsDD; _editModal._refDD = refDD;
-  [fontList, hlDD, fcDD, toolsDD, refDD].forEach((el) => { if (el && el.classList.contains('active')) phLayerPush(el); });
+  _editModal._fontInput = fontInput; _editModal._fontList = fontList; _editModal._indentInput = indentInput;
+  _editModal._hlDD = hlDD; _editModal._fcDD = fcDD; _editModal._toolsDD = toolsDD;
+  [fontList, hlDD, fcDD, toolsDD].forEach((el) => { if (el && el.classList.contains('active')) phLayerPush(el); });
   editor.addEventListener('keyup', saveSelection);
   editor.addEventListener('mouseup', saveSelection);
   // 点击弹窗外（backdrop）→ 关闭并保存；卡片内部拖动到外面松开不关闭（避免误关）。
+  // _phDownTarget 守卫：全屏浮层（图片查看器/取色器）在 mousedown 时就把自己藏起来了，鼠标松开时命中的会变成下层弹窗，
+  // 若不比对按下目标，就会“一次点击连关两层”。
   let _ecStartInBox = false;
   _editModal.addEventListener('mousedown', (e) => { _ecStartInBox = box.contains(e.target); });
-  _editModal.addEventListener('mouseup', (e) => { if (e.target === _editModal && !_ecStartInBox && (_phClosedEl === null || _phClosedEl === _editModal)) closeEditModal(true); _ecStartInBox = false; });
+  _editModal.addEventListener('mouseup', (e) => { if (e.target === _editModal && _phDownTarget === _editModal && !_ecStartInBox && (_phClosedEl === null || _phClosedEl === _editModal)) closeEditModal(true); _ecStartInBox = false; });
   return _editModal;
 }
 
@@ -823,7 +1111,7 @@ function openEditModal(node, cardId) {
   if (!card) return;
   st.editingId = cardId;
   const tab = card.editTab || 'default';   // 记住上次所选页签
-  st.currentTab = tab;
+    st.currentTab = tab;
   const m = editModalEl(); m._node = node;
   if (tab === 'optimized') {
     m._tabOptimized.classList.add('active'); m._tabDefault.classList.remove('active');
@@ -832,13 +1120,14 @@ function openEditModal(node, cardId) {
     m._tabDefault.classList.add('active'); m._tabOptimized.classList.remove('active');
     m._editor.innerHTML = card.contentHTML || card.content || '';
   }
-  m._tsStart.value = card.timelineStart || ''; m._tsEnd.value = card.timelineEnd || '';
-  if (m._updTsPreview) m._updTsPreview();
+  if (m._ruleDD) { m._ruleDD.setItems(ruleDropdownItems(node, false)); m._ruleDD.value = _normRuleId(phRulesModel(node).ruleId) || 'none'; }
+  if (m._updMerge) m._updMerge();
   m._indentInput.value = String(card.indent || 0);
   m.classList.add('active');
   _phActiveEditor = m._editor;
   requestAnimationFrame(moveTabThumb);
-  setTimeout(() => { try { applyIndent(m._indentInput.value); m._editor.focus(); } catch (_) {} }, 100);
+  // applyIndent 会重建编辑器 DOM（光标丢失），所以重建完再把光标放到末尾：接着写 / 插引用都在末尾
+  setTimeout(() => { try { applyIndent(m._indentInput.value); m._editor.focus(); caretToEditorEnd(m._editor); } catch (_) {} }, 100);
 }
 function switchTab(tab) {
   const nd = _editModal && _editModal._node;
@@ -848,14 +1137,15 @@ function switchTab(tab) {
   if (!card) return;
   if (st.currentTab !== tab) {
     // 切页签前先把当前页签未保存内容写回卡片
-    const html = _editModal._editor.innerHTML; const plain = plainTextOf(html);
+        const html = _editModal._editor.innerHTML; const plain = plainTextOf(html);
     if (st.currentTab === 'optimized') { card.contentOptimizedHTML = html; card.contentOptimized = plain; }
     else { card.contentHTML = html; card.content = plain; }
   }
   st.currentTab = tab;
   card.editTab = tab;   // 记住本次所选页签
-  card.useOptimized = (tab === 'optimized');   // 滑块决定输出用默认还是优化
-  syncToConfig(nd);
+    card.useOptimized = (tab === 'optimized');   // 滑块决定输出用默认还是优化
+    syncToConfig(nd);
+  refreshUI(nd);   // 卡片列表的预览文字 / 优默标记跟着滑块走
   if (tab === 'default') {
     _editModal._tabDefault.classList.add('active'); _editModal._tabOptimized.classList.remove('active');
     _editModal._editor.innerHTML = card.contentHTML || card.content || '';
@@ -864,7 +1154,8 @@ function switchTab(tab) {
     _editModal._editor.innerHTML = card.contentOptimizedHTML || card.contentOptimized || '';
   }
   requestAnimationFrame(moveTabThumb);
-  try { applyIndent(_editModal._indentInput.value); } catch (_) {}
+  // 切页签会把编辑器内容整段换掉（光标跟着丢），跟打开弹窗一样把光标落回正文末尾
+  try { applyIndent(_editModal._indentInput.value); _editModal._editor.focus(); caretToEditorEnd(_editModal._editor); } catch (_) {}
 }
 function closeEditModal(save) {
   const nd = _editModal && _editModal._node;
@@ -876,8 +1167,6 @@ function closeEditModal(save) {
       const plain = plainTextOf(html);
       if (st.currentTab === 'optimized') { card.contentOptimizedHTML = html; card.contentOptimized = plain; }
       else { card.contentHTML = html; card.content = plain; }
-      card.timelineStart = _editModal._tsStart.value.trim();
-      card.timelineEnd = _editModal._tsEnd.value.trim();
       card.indent = parseFloat(_editModal._indentInput.value) || 0;
       syncToConfig(nd); updatePorts(nd); refreshUI(nd);
     }
@@ -895,11 +1184,10 @@ function moveTabThumb() {
   thumb.style.left = active.offsetLeft + 'px';
   thumb.style.width = active.offsetWidth + 'px';
 }
-function nodeOfEditModal() { return (_editModal && _editModal._node && _editModal._node instanceof Object) ? _editModal._node : null; }
 function execCmd(cmd, val = null) { const ed = _editModal && _editModal._editor; if (ed) { ed.focus(); document.execCommand(cmd, false, val); saveSelection(); } }
 function populateFontList(list) {
   if (!list || list._populated) return; list._populated = true;
-  const sizeMap = { 初号: '48px', 小初: '36px', 一号: '26pt', 小一: '24pt', 二号: '22pt', 小二: '18pt', 三号: '16pt', 小三: '15pt', 四号: '14pt', 小四: '12pt', 五号: '10.5pt', 小五: '9pt' };
+  const sizeMap = { 初号: '48px', 小初: '36px',  一号:  '26pt', 小一: '24pt', 二号: '22pt', 小二: '18pt', 三号: '16pt', 小三: '15pt', 四号: '14pt', 小四: '12pt', 五号: '10.5pt', 小五: '9pt' };
   Object.keys(sizeMap).forEach((label) => { const li = el('li'); li.textContent = label; li.dataset.value = sizeMap[label]; list.appendChild(li); });
   [5, 6.5, 8, 9, 10.5, 12, 14, 16, 18, 22, 26, 36, 48, 72].forEach((n) => { const li = el('li'); li.textContent = String(n); li.dataset.value = n + 'px'; list.appendChild(li); });
 }
@@ -915,8 +1203,8 @@ function applyFontSize(val) {
 function applyIndent(val) {
   const ed = _editModal && _editModal._editor; if (!ed) return;
   const n = parseFloat(val) || 0;
-  // 首行缩进（Word 式）：对每个「回车产生的段落块」设 text-indent，首行缩进、换行不缩进。
-  const blocks = _collectBlocks(ed);
+  // 首行缩进（Word 式）：对每个「回车产生的段落块」设  text-indent，首行缩进、换行不缩进。
+    const blocks = _collectBlocks(ed);
   ed.innerHTML = '';
   const out = blocks.map((arr) => {
     let block;
@@ -929,9 +1217,9 @@ function applyIndent(val) {
   if (_editModal._indentInput && _editModal._indentInput.value !== String(n)) _editModal._indentInput.value = String(n);
   ed.focus();
 }
-// 把 contenteditable 编辑器内容切成「段落」数组（每段 = 一组顶部节点）。
-// 段 = 块元素 DIV/P/LI；回车产生的块元素与裸文本 \n 作为段落分隔；<br> 是段内软换行（留在段内，不缩进）。
-function _collectBlocks(ed) {
+// 把 contenteditable 编辑器内容切成「段落」数组（每个 = 一组顶部节点）。
+// 块元素 DIV/P/LI；回车产生的块元素与裸文本 \n 作为段落分隔；<br> 是段内软换行（留在段内，不缩进）。
+  function _collectBlocks(ed) {
   const paras = [];
   let cur = [];
   const flush = () => { if (cur.length) { paras.push(cur); cur = []; } };
@@ -942,7 +1230,7 @@ function _collectBlocks(ed) {
       const tag = node.tagName;
       if (tag === 'DIV' || tag === 'P' || tag === 'LI') { flush(); paras.push([node]); }
       else if (tag === 'BR') { cur.push(node); }
-      else cur.push(node); // 内联元素整体并入当前段（含 <br> 软换行）
+      else cur.push(node); // 内联元素整体并入当前段（含 <br>  软换行）
     } else { cur.push(node); }
   });
   flush();
@@ -954,7 +1242,7 @@ function applyColorOn(ed, target, color) {
   const clear = (target === 'highlight') && (color === 'transparent' || color === '');
   const sel = window.getSelection();
   const hasSel = !!(sel.rangeCount && !sel.isCollapsed && ed.contains(sel.getRangeAt(0).commonAncestorContainer));
-  // —— 清除高亮：有选中只清选中；没选中清整块（所有卡片正文） ——
+  // ── 清除高亮：有选区只清选区；没选中清整块（所有卡片正文） ──
   if (clear) {
     if (hasSel) {
       const range = sel.getRangeAt(0);
@@ -968,7 +1256,7 @@ function applyColorOn(ed, target, color) {
     return;
   }
   ed.focus();
-  // —— 上色：有选中只包选中；没选中则整块（卡片编辑器整块 / 总体编辑每张卡片正文） ——
+  // ── 上色：有选区只改选区；没选中则整块（卡片编辑器整段 / 总体编辑每张卡片正文） ──
   if (hasSel) {
     const range = sel.getRangeAt(0);
     const sp = document.createElement('span'); sp.style[prop] = color;
@@ -1009,7 +1297,7 @@ function runTool(id) {
     saveSelection(); return;
   }
   if (id === 'halfToFull') {
-    // 只把半角标点转全角，不碰字母/数字/文字/空格。
+    // 把半角标点转全角，不碰字母/数字/文字/空格。
     const map = { ',': '，', '.': '。', '!': '！', '?': '？', ':': '：', ';': '；', '"': '“', "'": '‘', '(': '（', ')': '）', '[': '【', ']': '】', '<': '《', '>': '》', '~': '～', '-': '—' };
     ed.textContent = text.replace(/[,\.!\?:;"'\(\)\[\]<>~-]/g, (ch) => map[ch] || ch);
     saveSelection(); return;
@@ -1022,7 +1310,7 @@ function phProgEl(node) {
   if (_phProg && _phProg.parentNode) return _phProg;
   _phProg = el('div', 'eph-prog');
   const hd = el('div', 'eph-prog-hd');
-  const title = el('span', 'eph-prog-title'); title.textContent = '调用中…';
+  const title = el('span', 'eph-prog-title'); title.textContent = '设置';
   const count = el('span', 'eph-prog-count'); count.textContent = '';
   const close = el('button', 'eph-prog-close'); close.textContent = '✕'; close.title = '关闭进度';
   hd.appendChild(title); hd.appendChild(count); hd.appendChild(close);
@@ -1048,6 +1336,7 @@ function phProgShow(node, total, method) {
   m._fill.style.width = '0%';
   m._fill.className = 'eph-prog-fill' + (m._total > 1 ? '' : ' indeterminate');
   m._detail.innerHTML = '';
+  if (m._hideTimer) { clearTimeout(m._hideTimer); m._hideTimer = null; }   // 上一轮的自动收起作废
   m.classList.add('active'); m.classList.remove('open');
   phProgPos(node);
 }
@@ -1064,24 +1353,19 @@ function phProgErr(node, msg) {
   m._title.textContent = '调用失败';
   m._fill.style.width = '100%'; m._fill.className = 'eph-prog-fill'; m._fill.style.background = '#e34d4d';
   const line = el('div', 'eph-prog-line err'); line.textContent = '✕ ' + msg; m._detail.appendChild(line);
+  // 失败信息留 6 秒后自动收起：否则它一直浮在卡片弹窗上层，挡住编辑器点不进去
+  if (m._hideTimer) clearTimeout(m._hideTimer);
+  m._hideTimer = setTimeout(() => { m._hideTimer = null; phProgHide(); }, 6000);
 }
 function phProgDone(node) {
   const m = phProgEl(node);
   m._fill.className = 'eph-prog-fill'; m._fill.style.width = '100%';
   if (m._total > 1) { m._count.textContent = m._total + '/' + m._total; }
   m._title.textContent = '完成';
-  setTimeout(() => phProgHide(), 1200);
+  if (m._hideTimer) clearTimeout(m._hideTimer);
+  m._hideTimer = setTimeout(() => { m._hideTimer = null; phProgHide(); }, 1200);
 }
 function phProgHide() { if (_phProg) { _phProg.classList.remove('active'); _phProg.classList.remove('open'); } }
-function phProgToggle(node) {
-  const m = phProgEl(node);
-  phProgPos(node);
-  if (m.classList.contains('active')) { m.classList.toggle('open'); return; }
-  m._title.textContent = '暂无进行中的优化'; m._count.textContent = '';
-  m._fill.style.width = '0%'; m._fill.className = 'eph-prog-fill';
-  m._detail.innerHTML = '';
-  m.classList.add('active'); m.classList.remove('open');
-}
 // 把下拉定位到按钮正下方（fixed，永不裁剪），解决「颜色/工具在弹窗下面操作不了」的层叠问题。
 function phFixedDD(btn, dd) {
   if (!btn || !dd) return;
@@ -1096,125 +1380,363 @@ function phCenterPopup(dd) {
   dd.style.position = 'fixed'; dd.style.zIndex = '100090'; dd.style.pointerEvents = 'auto';
   try { const w = dd.offsetWidth || 210, h = dd.offsetHeight || 200; dd.style.left = Math.max(10, (window.innerWidth - w) / 2) + 'px'; dd.style.top = Math.max(10, (window.innerHeight - h) / 2) + 'px'; } catch (_) {}
 }
-// ===== 媒体引用：扫描画布媒体文件 + 下拉悬停预览 + 点击查看 =====
-let _MEDIA_CACHE = null;
-async function loadMediaFiles() {
-  if (_MEDIA_CACHE && _MEDIA_CACHE.length) return _MEDIA_CACHE;
-  try { const r = await fetchApi('/prompt_helper/media_files'); const d = await r.json().catch(() => ({})); _MEDIA_CACHE = d.media || []; } catch (_) { _MEDIA_CACHE = []; }
-  return _MEDIA_CACHE;
+// ===== 媒体引用：画布媒体 + 悬停预览 + 点击查看（编号见下）=====
+
+// ===== 媒体引用编号：编号表由画布上「生成节点的媒体输入端口」实时给出（每个生成节点一张，互不冲突）=====
+// 每个提示词卡片绑定一个生成节点（card.refTarget，缺省用画布上第一个接入素材的生成节点），编号按该节点自己的端口表算。
+// ===== 媒体引用编号：编号表由「生成节点的媒体输入端口」实时给出（每个生成节点一张，互不冲突）=====
+// 没有接入任何生成节点的素材不编号：@ 菜单里标黄、且不能插入。
+function mediaRefLabel(m, targetId) {
+  const hit = mediaIndex(mediaKeyOf(m), targetId);
+  return hit ? hit.label : '';
 }
-// 读取 EzFlex-MediaLoader / EzFlex-MediaOut 节点里的素材文件（供 @ 媒体提及）。
-function ezMediaFilesOfNode(n, g) {
+// 接线/换素材后编号表会变：把编辑器里已插入的 @引用芯片同步成新编号（同一个素材始终同一个号）。
+function refreshMediaChips() {
+  const editors = new Set();
+  document.querySelectorAll('.eph-mref').forEach((sp) => {
+    const hit = mediaIndex(sp.dataset.key || sp.dataset.path || sp.dataset.url || '', sp.dataset.target || '');
+    const lab = sp.querySelector('.eph-mref-txt');
+    if (!hit || (lab ? lab.textContent : sp.textContent) === hit.label) return;
+    sp.dataset.n = String(hit.n);
+    if (lab) lab.textContent = hit.label; else sp.textContent = hit.label;
+    if (hit.tag) { sp.dataset.tag = hit.tag; sp.title = '目标节点引用标签：' + hit.tag; }
+    const ed = sp.closest ? sp.closest('.eph-editor, .eph-all-editor') : null;
+    if (ed) editors.add(ed);
+  });
+  editors.forEach((ed) => ed.dispatchEvent(new Event('input', { bubbles: true })));
+}
+// 该编辑器里这个素材的引用芯片（可能有多个——同一个媒体允许在提示词里被引用多次）
+function mediaChipsOf(ed, m) {
   const out = [];
-  const pushFile = (f) => {
-    if (f && f.path) {
-      const typ = (f.type || 'other') === 'model_3d' ? 'model' : (f.type || 'other');
-      const url = f.url || ('/view?type=input&filename=' + encodeURIComponent(f.name || '') + (f.subfolder ? '&subfolder=' + encodeURIComponent(f.subfolder) : ''));
-      out.push({ name: f.name || '', path: f.path, type: typ, url });
-    }
-  };
-  const parseCfg = (origin) => {
-    let cfg = {};
-    try { const w = (origin && origin.widgets || []).find((x) => x.name === 'config'); cfg = JSON.parse(w ? (w.value || '{}') : '{}') || {}; } catch (_) { cfg = {}; }
-    return cfg;
-  };
-  try {
-    if (n && n.type === 'EzFlex-MediaLoader') {
-      const cfg = parseCfg(n);
-      (cfg.groups || []).forEach((gr) => (gr.cards || []).forEach((c) => (c.items || []).forEach((it) => (it.files || []).forEach(pushFile))));
-      return out;
-    }
-    if (n && n.type === 'EzFlex-MediaOut') {
-      const inp = (n.inputs || [])[0];
-      if (!inp || inp.link == null) return [];
-      const link = (g.links || {})[inp.link];
-      if (!link || link.origin_id == null) return [];
-      const origin = ((g._nodes || g.nodes) || []).find((x) => x && x.id === link.origin_id);
-      if (!origin || origin.type !== 'EzFlex-MediaLoader') return [];
-      const slot = link.origin_slot;
-      const sock = (origin.outputs || [])[slot];
-      let cardId = sock && sock._ezCardId;
-      const cfg = parseCfg(origin);
-      if (cardId == null) { const order = []; (cfg.groups || []).forEach((gr) => (gr.cards || []).forEach((c) => order.push(c))); const c = order[slot]; if (c) cardId = c.id; }
-      let card = null;
-      (cfg.groups || []).forEach((gr) => (gr.cards || []).forEach((c) => { if (String(c.id) === String(cardId)) card = c; }));
-      if (!card) return [];
-      (card.items || []).forEach((it) => (it.files || []).forEach(pushFile));
-    }
-  } catch (_) {}
+  if (!ed) return out;
+  const key = mediaKeyOf(m);
+  if (!key) return out;
+  ed.querySelectorAll('.eph-mref').forEach((c) => { if ((c.dataset.key || c.dataset.path || c.dataset.url) === key) out.push(c); });
   return out;
 }
-// 读取「当前工作流画布」里加载了媒体的节点（Load Image / 视频 / 音频 等）对应的文件，只列出本工作流用到的媒体。
-function graphMediaFiles(node) {
+// 插入一份引用芯片（每次调用都插入一份：同一媒体可多次引用）。返回是否插入成功。
+function insertMediaRefOnce(ed, m, targetId) {
+  if (!ed) return false;
+  const hit = mediaIndex(mediaKeyOf(m), targetId);
+  const label = (hit && hit.label) || mediaRefLabel(m, targetId);
+  if (!label) return false;   // 没接入生成节点的素材没有编号，不插入
+  const t = indexTargetById(targetId);
+  const sp = el('span', 'eph-mref'); sp.contentEditable = 'false';
+  sp.dataset.url = m.url || ''; sp.dataset.type = m.type || 'image'; sp.dataset.name = m.name || ''; sp.dataset.path = m.path || '';
+  sp.dataset.key = mediaKeyOf(m); sp.dataset.n = String(label.replace(/[^\d]/g, ''));
+  if (hit) { sp.dataset.target = hit.targetId; sp.dataset.tag = hit.tag || ''; sp.title = hit.targetKey + ' · ' + hit.port + (hit.tag ? ' → ' + hit.tag : ''); }
+  else if (t) sp.title = t.title;
+  const lab = el('span', 'eph-mref-txt'); lab.textContent = label; sp.appendChild(lab);
+  // 芯片带 MediaOut 同款类型小图标（图像/视频/音频/模型），图标沿用芯片的蓝色，放在 @xx 之后
+  const ico = el('span', 'eph-mref-ico'); ico.innerHTML = mediaIcon(m.type || 'image'); sp.appendChild(ico);
+  // 按 Range 直接插「芯片 + 逗号」，并把光标放到逗号后面。
+  // （用 execCommand('insertHTML') 时，不可编辑的芯片会把光标留在芯片前面，还可能多包一层块导致自动换行）
+  let range = null;
+  try { if (_editorRange && ed.contains(_editorRange.commonAncestorContainer)) { range = _editorRange.cloneRange(); range.collapse(false); } } catch (_) { range = null; }
+  if (!range) { range = document.createRange(); range.selectNodeContents(ed); range.collapse(false); }
+  const comma = document.createTextNode(',');
   try {
-    const g = node && node.graph;
-    if (!g) return [];
-    const all = [];
-    const pushNodes = (arr) => { (arr || []).forEach((n) => { if (n) all.push(n); }); };
-    pushNodes(g._nodes || g.nodes);
-    // 额外把本节点「综合媒体」输入连到的上游节点也纳入（这才是当前画布真正用到的媒体）。
-    try {
-      (node.inputs || []).forEach((inp) => {
-        if (!inp || inp._ezMedia == null || inp.link == null) return;
-        const link = (g.links || {})[inp.link];
-        if (!link || link.origin_id == null) return;
-        const up = all.find((n2) => n2 && n2.id === link.origin_id);
-        if (up) all.push(up);
-      });
-    } catch (_) {}
-    const out = []; const seen = new Set();
-    all.forEach((n) => {
-      const t = String((n && n.type) || '').toLowerCase();
-      // EzFlex 媒体节点：直接把素材文件供 @ 菜单使用。
-      if (t === 'ezflex-medialoader' || t === 'ezflex-mediaout') {
-        try { (ezMediaFilesOfNode(n, g) || []).forEach((m) => { if (m.path != null && !seen.has(m.path)) { seen.add(m.path); out.push(m); } }); } catch (_) {}
-        return;
-      }
-      const widgets = (n.widgets) || [];
-      let subfolder = '';
-      widgets.forEach((w2) => { if (/subfolder|folder/i.test(String(w2 && w2.name || '')) && typeof w2.value === 'string' && w2.value) subfolder = w2.value; });
-      widgets.forEach((w) => {
-        const v = w && w.value;
-        if (typeof v !== 'string' || !v) return;
-        const base = v.split(/[\\/]/).pop();
-        const mt = base.match(/\.([a-z0-9]{2,5})$/i);
-        if (!mt) return;
-        const ext = mt[1].toLowerCase();
-        const typ = /mp4|webm|mov|mkv|avi/.test(ext) ? 'video' : /mp3|wav|flac|ogg|m4a|opus/.test(ext) ? 'audio' : /obj|glb|gltf|fbx|stl/.test(ext) ? 'model' : /png|jpe?g|webp|gif|bmp|tif?f/.test(ext) ? 'image' : null;
-        if (!typ || seen.has(v)) return; seen.add(v);
-        const url = '/view?filename=' + encodeURIComponent(base) + (subfolder ? '&subfolder=' + encodeURIComponent(subfolder) : '') + '&type=input';
-        out.push({ name: base, path: v, type: typ, url });
-      });
-    });
-    const dedup = []; const su = new Set();
-    out.forEach((m) => { if (!su.has(m.url)) { su.add(m.url); dedup.push(m); } });
-    return dedup;
-  } catch (_) { return []; }
-}
-function mediaRefLabel(type, ed) {
-  const t = (type === 'video') ? '视频' : (type === 'audio') ? '音频' : (type === 'model' || type === '3d') ? '3D模型' : '图片';
-  const n = (ed.querySelectorAll ? ed.querySelectorAll('.eph-mref[data-type="' + type + '"]').length : 0) + 1;
-  return '@' + t + n;
-}
-function insertMediaRef(ed, m) {
-  if (!ed) return;
+    range.insertNode(sp); range.setStartAfter(sp); range.collapse(true);
+    range.insertNode(comma); range.setStart(comma, 1); range.collapse(true);
+  } catch (_) {
+    const r2 = document.createRange(); r2.selectNodeContents(ed); r2.collapse(false);
+    r2.insertNode(sp); r2.setStartAfter(sp); r2.collapse(true);
+    r2.insertNode(comma); r2.setStart(comma, 1); r2.collapse(true);
+    range = r2;
+  }
   ed.focus();
   const sel = window.getSelection();
-  let range = (sel.rangeCount && sel.getRangeAt(0)) || null;
-  if (!range || !ed.contains(range.commonAncestorContainer)) { range = document.createRange(); range.selectNodeContents(ed); range.collapse(false); }
-  const type = m.type || 'image';
-  const sp = el('span', 'eph-mref'); sp.contentEditable = 'false';
-  sp.dataset.url = m.url || ''; sp.dataset.type = type; sp.dataset.name = m.name || ''; sp.dataset.path = m.path || '';
-  sp.textContent = mediaRefLabel(type, ed);   // 超链接样式，显示 @图片1 / @视频1 …（按类型顺序编号）
-  range.deleteContents(); range.insertNode(sp);
-  // 后面自动补一个逗号
-  const comma = document.createTextNode(',');
-  range.setStartAfter(sp); range.collapse(true); range.insertNode(comma);
-  range.setStartAfter(comma); range.collapse(true);
-  sel.removeAllRanges(); sel.addRange(range);
-  saveSelection && saveSelection(); ed.dispatchEvent(new Event('input', { bubbles: true }));
+  if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+  saveSelection(); ed.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
 }
+
+// ===== 引用浏览器：一个生成节点一块，块内是该节点各媒体端口上的素材预览，点一下就把 @引用 插进提示词 =====
+let _refBrowser = null;
+function sameNodeCard(node) {
+  if (!node) return null;
+  try { const st = stateFor(node); return st.cards.find((c) => c.id === st.editingId) || null; } catch (_) { return null; }
+}
+// 总体编辑里光标所在块对应的卡片
+function caretCard(node) {
+  try {
+    const st = stateFor(node); const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return st.cards[0] || null;
+    let n = sel.getRangeAt(0).startContainer;
+    while (n && n.nodeType === 3) n = n.parentNode;
+    const blk = n && n.closest ? n.closest('.eph-all-block') : null;
+    if (!blk) return st.cards[0] || null;
+    return st.cards[parseInt(blk.dataset.idx, 10)] || st.cards[0] || null;
+  } catch (_) { return null; }
+}
+// 引用目标只体现在「引用媒体」窗口里（选中的生成节点卡片标浅绿），工具条上不做任何提示。
+// 引用媒体窗口的收尾：停掉窗口里正在播放的视频/音频，并顺手关掉放大预览层。
+function refBrowserCleanup() {
+  stopMediaIn(_refBrowser);
+  if (_mvModal && _mvModal.classList.contains('active')) phMediaViewerStop();
+}
+function refBrowserEl() {
+  if (_refBrowser && _refBrowser.parentNode) return _refBrowser;
+  _refBrowser = el('div', 'eph-rb');
+  const box = el('div', 'eph-rb-box');
+  const hd = el('div', 'eph-rb-hd');
+  const t = el('b'); t.textContent = '引用媒体';
+  const close = el('button', 'eph-modal-close'); close.textContent = '✕';
+  hd.appendChild(t); hd.appendChild(close);
+  const body = el('div', 'eph-rb-body');
+  box.appendChild(hd); box.appendChild(body);
+  _refBrowser.appendChild(box); document.body.appendChild(_refBrowser);
+  _refBrowser._box = box; _refBrowser._body = body;
+  const closeBrowser = () => { refBrowserCleanup(); _refBrowser.classList.remove('active'); };
+  _refBrowser._close = closeBrowser;
+  _refBrowser._phOnClose = refBrowserCleanup;   // 点外侧时由层协调器调用（只关这一层，不连带关下面的弹窗）
+  close.addEventListener('click', closeBrowser);
+  phLayerPush(_refBrowser);
+  return _refBrowser;
+}
+const MEDIA_SHORT = { image: '图像', video: '视频', audio: '音频', model: '模型' };
+// 素材卡片：预览效果对齐 EzFlex-MediaLoader（左上类型角标 / 悬停信息条 / 视频播放 / 音频播放器），
+// 引用数量变化后刷新所有卡片上的计数/按钮状态（同一个素材可能插了多份）
+function refreshRefTiles() {
+  const l = (_refBrowser && _refBrowser._refreshers) || [];
+  l.forEach((f) => { try { f(); } catch (_) {} });
+}
+// 右上角是 ModelsCombo 同款 +/− 按钮：＋ 每次插入一份引用（同一个素材可多次引用），− 移除一份。
+function rbTile(ed, node, card, target, port, m) {
+  const tile = el('div', 'eph-rb-tile');
+  const pv = el('div', 'eph-rb-pv');
+  const type = port.type;
+  if (type === 'image') {
+    const im = el('img'); im.src = m.url; im.alt = m.name || ''; im.loading = 'lazy'; im.draggable = false; pv.appendChild(im);
+  } else if (type === 'video') {
+    const v = document.createElement('video'); v.src = m.url; v.muted = true; v.preload = 'metadata'; pv.appendChild(v);
+    const play = el('button', 'eph-rb-play'); play.textContent = '▶'; play.title = '播放预览';
+    v.addEventListener('play', () => { v.controls = true; tile.classList.add('playing'); play.textContent = '❚❚'; });
+    v.addEventListener('pause', () => { v.controls = false; tile.classList.remove('playing'); play.textContent = '▶'; });
+    play.addEventListener('click', (e) => { e.stopPropagation(); try { if (v.paused) { v.muted = false; v.play(); } else v.pause(); } catch (_) {} });
+    pv.appendChild(play);
+  } else if (type === 'audio') {
+    const ap = makeAudioPlayer(m.url); ap.style.cssText = 'width:100%;'; pv.appendChild(ap);
+  } else {
+    const ph = el('span', 'eph-rb-ph'); ph.textContent = '🧊'; pv.appendChild(ph);
+  }
+  const badge = el('span', 'eph-rb-type');
+  const bico = el('span', 'eph-rb-type-ico'); bico.innerHTML = mediaIcon(type); badge.appendChild(bico);
+  badge.appendChild(document.createTextNode(MEDIA_SHORT[type] || '文件')); pv.appendChild(badge);
+  const addBtn = el('button', 'eph-rb-add');
+  const info = el('div', 'eph-rb-info');
+  const fn = el('div', 'eph-rb-fname'); fn.textContent = m.name || m.path || ''; fn.title = m.path || '';
+  const meta = el('div', 'eph-rb-fmeta');
+  const sz = el('span'); sz.textContent = mediaSizeText(m.size);
+  const sf = el('span', 'eph-rb-suffix'); sf.textContent = mediaFormatOf(m) ? '.' + mediaFormatOf(m) : '';
+  meta.appendChild(sz); meta.appendChild(sf);
+  info.appendChild(fn); info.appendChild(meta); pv.appendChild(info);
+  tile.appendChild(pv);
+  const foot = el('div', 'eph-rb-foot');
+  const lab = el('span', 'eph-rb-lab'); lab.textContent = port.label;
+  const cnt = el('span', 'eph-rb-cnt'); cnt.style.display = 'none';
+  const minus = el('button', 'eph-rb-minus'); minus.textContent = '−'; minus.title = '移除一份该引用';
+  foot.appendChild(lab);
+  // 本卡片的引用目标不是这个生成节点时，插进去的号会按目标节点算：把「实际插入的号」也标出来，免得看着对不上。
+  const insLabel = (cardRefId(card) && cardRefId(card) !== String(target.id))
+    ? (mediaIndex(mediaKeyOf(m), cardRefId(card)) || {}).label || '' : '';
+  if (insLabel && insLabel !== port.label) {
+    const ins = el('span', 'eph-rb-ins'); ins.textContent = '→ ' + insLabel;
+    ins.title = '本卡片的引用目标不是「' + (target.title || target.type) + '」，点 + 插入的是目标节点上的编号 ' + insLabel;
+    foot.appendChild(ins);
+  }
+  foot.appendChild(cnt); foot.appendChild(minus);
+  tile.appendChild(foot);
+  const refresh = () => {
+    const n = mediaChipsOf(ed, m).length;
+    addBtn.textContent = '+';
+    addBtn.classList.toggle('added', n > 0);
+    addBtn.title = n ? ('再插入一份引用（已引用 ' + n + ' 次）') : '插入该引用';
+    tile.classList.toggle('added', n > 0);
+    cnt.style.display = n ? '' : 'none';
+    cnt.textContent = '×' + n;
+    minus.style.display = n ? '' : 'none';
+  };
+  addBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // 编号一定要按「本卡片的引用目标」算：同一个素材可能同时接在多个生成节点上（都编号 @图片1），
+    // 而这张卡片的提示词只会喂给它自己的目标节点，用素材所在节点的号会串号。
+    // 卡片没设引用目标时，才退回用素材所在节点。
+    const want = cardRefId(card) || target.id;
+    if (!insertMediaRefOnce(ed, m, want)) {
+      const tn = indexTargetById(want);
+      rbHint('「' + (m.name || m.path || '') + '」不在本卡片引用目标「' + ((tn && tn.title) || want) + '」的输入端口上，插进去的 @编号 对不上：'
+        + '把素材接到该生成节点上，或右键「' + (target.title || target.type) + '」把它设为本卡片的引用目标。');
+      return;
+    }
+    refreshRefTiles();
+    tile.classList.add('flash'); setTimeout(() => tile.classList.remove('flash'), 420);
+  });
+  minus.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const list = mediaChipsOf(ed, m);
+    const last = list[list.length - 1];
+    if (last) {
+      const nxt = last.nextSibling;
+      if (nxt && nxt.nodeType === 3 && nxt.nodeValue === ',') nxt.remove();
+      last.remove();
+      ed.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    refreshRefTiles();
+  });
+  // 点卡片本体 = 放大预览（同 MediaLoader），插/移引用用右上角 +/− 按钮。
+  tile.addEventListener('click', (e) => {
+    if (e.target.closest('button') || e.target.closest('audio') || e.target.closest('.ez-ap')) return;
+    const vid = tile.querySelector('video'); if (vid && !vid.paused) return;
+    if (type === 'audio') return;
+    if (type === 'model') { window.open(m.url, '_blank'); return; }
+    phMediaViewer(m.url, type, m.name);
+  });
+  refresh();
+  tile.title = port.name + (port.tag ? ' → ' + port.tag : '') + (insLabel ? '（点 + 插入 ' + insLabel + '：按本卡片的引用目标编号）' : '');
+  pv.appendChild(addBtn);
+  // 别的卡片/端口插入后，本卡的计数也要跟着变
+  if (!_refBrowser._refreshers) _refBrowser._refreshers = [];
+  _refBrowser._refreshers.push(refresh);
+  return tile;
+}
+// 引用媒体窗口里的一条提示（比如「该素材不在本卡片的引用目标上」），几秒后自动消失。
+let _rbHintTimer = 0;
+function rbHint(text) {
+  const m = _refBrowser;
+  if (!m || !m._body) return;
+  let h = m._body.querySelector('.eph-rb-hint');
+  if (!h) { h = el('div', 'eph-rb-hint'); m._body.insertBefore(h, m._body.firstChild); }
+  h.textContent = text;
+  if (_rbHintTimer) clearTimeout(_rbHintTimer);
+  _rbHintTimer = setTimeout(() => { try { h.remove(); } catch (_) {} }, 3600);
+}
+// 本卡片引用的生成节点 id（'' = 都不引用/未选）
+function cardRefId(card) { return (card && card.refTarget) ? String(card.refTarget) : ''; }
+// 设为「总体引用库」：所有卡片都引用这个生成节点（右键菜单）。
+function setGlobalRefTarget(node, targetId) {
+  const st = node ? stateFor(node) : null;
+  if (!st) return;
+  st.cards.forEach((c) => { c.refTarget = targetId ? String(targetId) : ''; });
+  syncToConfig(node);
+  refreshMediaChips();
+}
+// 引用媒体窗口的右键菜单（一个生成节点卡片 = 一个菜单）
+let _rbMenu = null;
+function rbMenuEl() {
+  if (_rbMenu && _rbMenu.parentNode) return _rbMenu;
+  _rbMenu = el('div', 'eph-tools-dropdown eph-ctx');
+  _rbMenu.style.position = 'fixed';
+  document.body.appendChild(_rbMenu);
+  phLayerPush(_rbMenu);
+  return _rbMenu;
+}
+function hideRbMenu() { if (_rbMenu) _rbMenu.classList.remove('active'); }
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideRbMenu(); }, true);
+function openRbMenu(x, y, node, card, target, ed) {
+  const menu = rbMenuEl();
+  menu.innerHTML = '';
+  const st = stateFor(node);
+  const total = (st.cards || []).length;
+  const allSet = total > 0 && (st.cards || []).every((c) => cardRefId(c) === String(target.id));
+  const item = (label, fn, tip) => {
+    const b = el('button', 'eph-tool-item'); b.type = 'button'; b.textContent = label;
+    if (tip) b.title = tip;
+    b.addEventListener('click', () => { hideRbMenu(); fn(); });
+    menu.appendChild(b);
+    return b;
+  };
+  const sep = (text) => { const d = el('div', 'eph-tools-sep'); d.textContent = text; menu.appendChild(d); };
+  sep((target.title || target.type) + ' · #' + target.id);
+  item('设为全体引用库（' + total + ' 张卡片都用它）', () => {
+    setGlobalRefTarget(node, target.id);
+    renderRefBrowser(node, ed, card);
+  }, '所有提示词卡片的引用目标都改成本节点');
+  if (allSet) item('取消全体引用（所有卡片都不引用）', () => {
+    setGlobalRefTarget(node, '');
+    renderRefBrowser(node, ed, card);
+  }, '所有卡片都不指定引用目标（编号退回自动：画布上第一个接入素材的生成节点）');
+  item(cardRefId(card) === String(target.id) ? '本卡片取消引用它' : '仅本卡片引用它', () => {
+    if (card) { card.refTarget = cardRefId(card) === String(target.id) ? '' : String(target.id); syncToConfig(node); }
+    renderRefBrowser(node, ed, card);
+  });
+  menu.classList.add('active');
+  const r = menu.getBoundingClientRect();
+  menu.style.left = Math.max(6, Math.min(x, window.innerWidth - r.width - 6)) + 'px';
+  menu.style.top = Math.max(6, Math.min(y, window.innerHeight - r.height - 6)) + 'px';
+}
+function renderRefBrowser(node, ed, card) {
+  const m = refBrowserEl();
+  if (m._building) return;   // 防重入：refreshIndexNow 会同步通知监听者回调本函数，只用外层那次的结果
+  m._building = true;
+  try {
+  m._node = node; m._ed = ed; m._card = card;
+  try { refreshIndexNow(); } catch (_) {}   // 先同步刷编号表（可能触发一次嵌套渲染，被上面的闸门挡掉）
+  const body = m._body;
+  body.innerHTML = '';
+  hideRbMenu();          // 重建时顺手收起右键菜单
+  m._refreshers = [];   // 重建后重新收集各卡片的计数刷新回调
+  const targets = indexTargets().filter((t) => t.ports.length);
+  if (!targets.length) {
+    const e = el('div', 'eph-rb-empty');
+    e.innerHTML = '画布上还没有接入素材的生成节点。<br>把素材接到生成节点（视频 / 音频 / 模型）的媒体输入端口，例如 MiniMax H3 的 first_frame / ref_image_1，这里就会实时列出编号与编译标签。';
+    body.appendChild(e);
+  }
+  const cur = cardRefId(card);
+  targets.forEach((t, i) => {
+    const on = cur === String(t.id);
+    const box = el('div', 'eph-rb-node' + (on ? ' current' : ''));
+    const hd = el('div', 'eph-rb-nhd');
+    const num = el('span', 'eph-rb-num'); num.textContent = String(i + 1);
+    const nm = el('span', 'eph-rb-name'); nm.textContent = t.title || t.type;
+    const files = t.ports.reduce((n, p) => n + p.files.length, 0);
+    const cnt = el('span', 'eph-rb-cnt'); cnt.textContent = '媒体 ' + files;
+    hd.appendChild(num); hd.appendChild(nm); hd.appendChild(cnt);
+    // 点卡片面板 = 本卡片引用它；再点一次 = 取消引用（可以都不引用）
+    hd.title = on ? '再点一次取消引用（本卡片不引用任何生成节点）' : '点击：本卡片引用这个生成节点';
+    hd.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!card) return;
+      card.refTarget = on ? '' : String(t.id);
+      syncToConfig(node);
+      renderRefBrowser(node, ed, card);
+    });
+    // 右键：弹出菜单，可把这个生成节点设为「全体引用库」（所有卡片一起改）
+    const ctx = (e) => { e.preventDefault(); e.stopPropagation(); openRbMenu(e.clientX, e.clientY, node, card, t, ed); };
+    hd.addEventListener('contextmenu', ctx);
+    box.addEventListener('contextmenu', ctx);
+    box.appendChild(hd);
+    const grid = el('div', 'eph-rb-grid');
+    t.ports.forEach((p) => p.files.forEach((f) => grid.appendChild(rbTile(ed, node, card, t, p, f))));
+    box.appendChild(grid);
+    body.appendChild(box);
+  });
+  } finally { m._building = false; }
+}
+function openRefBrowser(node, ed, card) {
+  if (!ed) return;
+  const m = refBrowserEl();
+  renderRefBrowser(node, ed, card);
+  m.classList.add('active');
+  _phActiveEditor = ed;
+}
+// 编号表/节点重命名变化时，若浏览器开着就实时刷新（下拉框里的节点名字同步）。
+function refreshRefBrowser() {
+  const m = _refBrowser;
+  if (!m || !m.classList.contains('active') || !m._ed) return;
+  renderRefBrowser(m._node, m._ed, m._card);
+}
+
 let _mvModal = null;
+// 停掉某个容器里正在播放的媒体（原生 video/audio + 自定义音频播放器里的 audio）。
+function stopMediaIn(root) {
+  if (!root) return;
+  try { root.querySelectorAll('video,audio').forEach((v) => { try { v.pause(); } catch (_) {} }); } catch (_) {}
+}
+function phMediaViewerStop() {
+  const m = _mvModal; if (!m) return;
+  stopMediaIn(m._box); m.classList.remove('active');
+}
 function phMediaViewer(url, type, name) {
   if (!url) return;
   if (type === 'model' || type === '3d') { let w = window; try { w.open(url, '_blank'); } catch (_) {} return; }   // 3D 模型浏览器无法内联渲染，新标签打开
@@ -1225,11 +1747,12 @@ function phMediaViewer(url, type, name) {
     box.appendChild(close);
     m.appendChild(box); document.body.appendChild(m);
     m._box = box; m._cap = el('div', 'eph-mv-cap');
-    const stop = () => { m._box.querySelectorAll('video,audio').forEach((v) => { try { v.pause(); } catch (_) {} }); m.classList.remove('active'); };
-    close.addEventListener('click', stop);
-    m.addEventListener('mousedown', (e) => { if (e.target === m && (_phClosedEl === null || _phClosedEl === m)) stop(); });
+    m._phOnClose = phMediaViewerStop;   // 被层协调器关掉时也要把里面播放的视频/音频停掉
+    close.addEventListener('click', phMediaViewerStop);
+    m.addEventListener('mousedown', (e) => { if (e.target === m && (_phClosedEl === null || _phClosedEl === m)) { _phClosedEl = m; phMediaViewerStop(); } });
   }
   const box = m._box;
+  stopMediaIn(box);   // 换素材前先停掉上一个
   box.querySelectorAll('.eph-mv-media, .ez-ap').forEach((x) => x.remove());
   const isVid = /\.(mp4|webm|mov|mkv|avi)([?#]|$)/i.test(url), isAud = /\.(mp3|wav|flac|ogg|m4a|opus)([?#]|$)/i.test(url);
   const tag = isVid ? 'video' : isAud ? 'audio' : 'img';
@@ -1268,8 +1791,8 @@ function mentionMenuEl() {
   return _mentionMenu;
 }
 function hideMention() { if (_mentionMenu) _mentionMenu.classList.remove('active'); }
-// 在编辑器文本里定位第 charIndex 个字符所在的文本节点+偏移（递归走全部文本节点，含芯片内文本）。
-function _frLocateChar(ed, charIndex) {
+// 在编辑器文本里定位到 charIndex 字符所在的文本节点+偏移（递归走全部文本节点，跳过芯片内文本）。
+  function _frLocateChar(ed, charIndex) {
   let n = 0;
   const walk = (node) => {
     if (node.nodeType === 3) { const len = (node.nodeValue || '').length; if (charIndex <= n + len) return { node, offset: charIndex - n }; n += len; return null; }
@@ -1281,7 +1804,7 @@ function _frLocateChar(ed, charIndex) {
   };
   return walk(ed) || { node: null, offset: 0 };
 }
-// 读出光标前的「可编辑文本」（跳过媒体芯片），保证与 _frLocateChar 一致。
+// 读出光标前的「可编辑文本」（跳过媒体芯片），保证与 _frLocateChar  一致。
 function _frBeforeText(ed, container, offset) {
   const out = []; let reached = false;
   const walk = (node) => {
@@ -1295,46 +1818,92 @@ function _frBeforeText(ed, container, offset) {
   walk(ed);
   return out.join('');
 }
-function attachMention(ed, nodeGetter) {
+function attachMention(ed, ctxGetter) {
   ed.addEventListener('keyup', () => {
     const sel = window.getSelection();
     if (!sel.rangeCount) return hideMention();
     const rng = sel.getRangeAt(0);
     const before = _frBeforeText(ed, rng.startContainer, rng.startOffset);
-    const m = before.match(/(@[^\s\n\u200b\u3000]*)$/);
-    if (!m) return hideMention();
-    const token = m[1]; const q = token.slice(1);
-    const startPos = _frLocateChar(ed, before.length - token.length);
+    // 从「最后一个 @」起算搜索词：用正则从头匹配的话，前面残留的 @ 会被一起吞进来
+    // （如 "@,@图片1" 会把搜索词算成 ",@"），菜单就变成「无匹配媒体」＝看起来列表没了。
+    const at = before.lastIndexOf('@');
+    if (at < 0) return hideMention();
+    const q = before.slice(at + 1);
+    if (/[\s\n\u200b\u3000]/.test(q)) return hideMention();   // 搜索词里出现空白 → 已经不是在打 @ 引用了
+    const startPos = _frLocateChar(ed, at);
     if (!startPos || !startPos.node) return hideMention();
-    mentionShow(nodeGetter ? nodeGetter() : null, q, startPos.node, startPos.offset, rng, ed);
+    mentionShow(ctxGetter ? ctxGetter() : null, q, startPos.node, startPos.offset, rng, ed);
   });
 }
-async function mentionShow(node, q, startNode, startOff, rng, ed) {
-  const list = graphMediaFiles(node) || [];   // 只列当前画布接入的媒体
-  const matched = list.filter((m) => ((m.name || m.path || '').toLowerCase().indexOf(q.toLowerCase()) >= 0));
+// @ 菜单：优先列「当前卡片引用的生成节点」端口上的媒体；该卡片还没指定/该节点没素材时，
+// 退回列出画布上其他生成节点的素材（免得菜单空着像"消失了"）。
+function cardRefFiles(card) {
+  try { refreshIndexSoon(); } catch (_) {}   // 编号表有变化时下一帧补齐（不阻塞本帧）
+  const own = card && card.refTarget ? indexTargetById(card.refTarget) : null;
+  const t = own || activeIndexTarget();
+  const out = [];
+  const push = (tg, fallback) => (tg.ports || []).forEach((p) => p.files.forEach((f) => out.push({ m: f, port: p, from: tg, fallback: !!fallback })));
+  if (t) push(t, false);
+  if (!out.length) indexTargets().filter((x) => x.ports.length).forEach((x) => push(x, true));
+  return out;
+}
+async function mentionShow(ctx, q, startNode, startOff, rng, ed) {
+  const card = ctx && ctx.card;
+  const targetId = (card && card.refTarget) || '';
+  const all = cardRefFiles(card);
+  const matched = all.filter((x) => ((x.m.name || x.m.path || '').toLowerCase().indexOf(q.toLowerCase()) >= 0));
   const menu = mentionMenuEl(); menu.innerHTML = '';
   if (matched.length) menu.appendChild(el('div', 'eph-tools-sep')).textContent = '媒体';
-  else menu.appendChild(el('div', 'eph-dd-empty')).textContent = q ? '无匹配媒体' : '未检测到画布媒体（请先给节点接入媒体）';
-  matched.forEach((m) => {
+  else menu.appendChild(el('div', 'eph-dd-empty')).textContent = q ? '无匹配媒体' : '画布上没有可作为素材引用的媒体';
+  matched.forEach((x) => {
+    const m = x.m;
+    // 编号按本卡片的引用目标算（素材可能同时接在多个生成节点上，都编 @图片1）；卡片没设目标时用素材所在节点。
+    const want = targetId || x.from.id;
+    const canInsert = !!mediaIndex(mediaKeyOf(m), want);
     const b = el('button', 'eph-tool-item ph-mref-item'); b.type = 'button';
-    const ico = document.createElement('span'); ico.className = 'eph-mref-ico'; ico.innerHTML = mediaIcon(m.type);
-    b.appendChild(ico); b.appendChild(document.createTextNode(' ' + (m.name || m.path)));
+    const ico = document.createElement('span'); ico.className = 'eph-mref-ico'; ico.innerHTML = mediaIcon(x.port.type);
+    const tag = el('span', 'eph-mref-num'); tag.textContent = x.port.label;
+    b.appendChild(tag); b.appendChild(ico); b.appendChild(document.createTextNode(' ' + (m.name || m.path)));
+    b.title = (x.fallback ? x.from.title + ' · ' : '') + x.port.name + ' · ' + (x.port.tag || x.port.label);
+    if (!canInsert) {
+      // 不在本卡片的引用目标端口上：插进去的编号对不上，标灰不给点（先用「引用媒体」把引用目标改过来）
+      b.classList.add('eph-mref-off');
+      const tn = indexTargetById(want);
+      b.title = '不在本卡片引用目标「' + ((tn && tn.title) || want) + '」的输入端口上，无法引用；' +
+        '把素材接到该生成节点上，或在「引用媒体」里把引用目标改成「' + (x.from.title || x.from.type) + '」。';
+    }
     b.addEventListener('mouseenter', () => refPreviewShow(b, m));
     b.addEventListener('mouseleave', refPreviewHide);
     b.addEventListener('mousedown', (ev) => ev.preventDefault());
     b.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      const s = window.getSelection(); const rr = document.createRange();
-      try { rr.setStart(startNode, startOff); rr.setEnd(rng.startContainer, rng.startOffset); } catch (_) {}
-      s.removeAllRanges(); s.addRange(rr);
-      insertMediaRef(ed, m);
+      if (!canInsert) return;   // 标灰项：不插入，避免插入一个对不上的编号
+      const s = window.getSelection();
+      let rr = null;
+      try { rr = document.createRange(); rr.setStart(startNode, startOff); rr.setEnd(rng.startContainer, rng.startOffset); } catch (_) { rr = null; }
+      if (rr) {
+        // 先把用户敲的「@关键词」删掉，芯片顶替它；不删就会留下一个多余的 @（变成 @@图片1），
+        // 而且残留的 @ 会让下一次的 @ 触发把逗号等一起算进搜索词（@ 菜单看起来"没有文件"）。
+        try { rr.deleteContents(); } catch (_) {}
+        s.removeAllRanges(); s.addRange(rr);
+        saveSelection();
+      }
+      // 每次都插入一份新引用（同一媒体可以多次引用），已存在也照插
+      insertMediaRefOnce(ed, m, want);
       hideMention();
     });
     menu.appendChild(b);
   });
-  try { const rect = rng.getBoundingClientRect(); menu.style.left = rect.left + 'px'; menu.style.top = (rect.bottom + 4) + 'px'; menu.style.minWidth = '180px'; menu.style.width = '180px'; }
-  catch (_) { menu.style.left = '20px'; menu.style.top = '20px'; }
   menu.classList.add('active');
+  // 先显示再量尺寸：光标靠下/靠右时把菜单翻到上方、往左收，否则菜单会跑到屏幕外（看起来像"@ 列表没了"）。
+  try {
+    const rect = rng.getBoundingClientRect();
+    menu.style.minWidth = '180px'; menu.style.width = '180px';
+    const mw = menu.offsetWidth || 180, mh = menu.offsetHeight || 0;
+    menu.style.left = Math.max(8, Math.min(rect.left, window.innerWidth - mw - 8)) + 'px';
+    const below = rect.bottom + 4;
+    menu.style.top = ((below + mh > window.innerHeight - 8) ? Math.max(8, rect.top - mh - 4) : below) + 'px';
+  } catch (_) { menu.style.left = '20px'; menu.style.top = '20px'; }
 }
 
 function mediaIcon(type) {
@@ -1345,53 +1914,92 @@ function mediaIcon(type) {
   if (t === 'text' || t === 'txt' || t === 'other') return TYPE_ICONS.text;
   return TYPE_ICONS.image;
 }
-async function addMediaFileItems(dd, ed, insertFn, node) {
-  dd.querySelectorAll('.ph-mref-item').forEach((x) => x.remove());
-  Array.from(dd.querySelectorAll('.eph-tools-sep')).forEach((s) => s.remove());
-  // 优先列「当前工作流画布」里的媒体节点（真正做到只读本工作流）；画布里没有就用 input 目录扫描兜底。
-  let files = graphMediaFiles(node);
-  if (!files.length) files = await loadMediaFiles();
-  if (!files.length) return;
-  dd.appendChild(el('div', 'eph-tools-sep')).textContent = '媒体文件';
-  files.forEach((m) => {
-    const b = el('button', 'eph-tool-item ph-mref-item'); b.type = 'button';
-    b.innerHTML = '<span class="eph-mref-ico">' + mediaIcon(m.type) + '</span><span>' + (m.name || m.path) + '</span>';    b.addEventListener('mouseenter', () => refPreviewShow(b, m));
-    b.addEventListener('mouseleave', refPreviewHide);
-    b.addEventListener('click', (e) => { e.stopPropagation(); insertMediaRef(ed, m); dd.classList.remove('active'); });
-    dd.appendChild(b);
-  });
-}
 // 点击编辑器里已插入的「@媒体」芯片 → 打开预览/播放
 document.addEventListener('click', (e) => {
   const t = e.target && e.target.closest ? e.target.closest('.eph-mref') : null;
   if (t) { e.preventDefault(); e.stopPropagation(); phMediaViewer(t.dataset.url, t.dataset.type, t.dataset.name); }
 });
-// 调用后端优化：method 映射 api / textgen / llama，参数来自节点全局「调用设置」。
+// 点击即用的素材来源：**优先本节点自己「综合媒体」口上的**，其次卡片引用目标（画布生成节点）上的。
+// （只读画布生成节点是不够的：用户通常把素材直接接在 PromptHelper 的综合媒体口上。）
+function clickMedias(node, card) {
+  const out = [];
+  try { nodeInputMedia(node).forEach((x) => { if (x && x.m) out.push(x); }); } catch (_) {}
+  const lists = card ? [cardRefFiles(card)] : stateFor(node).cards.map((c) => cardRefFiles(c));
+  for (const list of lists) for (const x of list) { if (x && x.m) out.push({ m: x.m, type: x.m.type }); }
+  return out;
+}
+// 点击即用的优化也带图：收集图片转成 data URL 列表发给 API / llama / textgen。
+async function cardImageDataUrls(node, card) {
+  const picked = []; const seen = new Set();
+  for (const x of clickMedias(node, card)) {
+    const m = x.m; const t = x.type || m.type;
+    if (t !== 'image' || !m.url || seen.has(m.url)) continue;
+    seen.add(m.url); picked.push(m);
+    if (picked.length >= 8) break;
+  }
+  const out = [];
+  for (const m of picked) {
+    try {
+      const r = await fetch(m.url);
+      if (!r.ok) continue;
+      const blob = await r.blob();
+      const d = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result || '')); fr.onerror = () => res(''); fr.readAsDataURL(blob); });
+      if (d) out.push(fixDataUrlMime(d, m.url));
+    } catch (_) {}
+  }
+  return out;
+}
+// 透传原始 data URL 前把 MIME 补成 image/*（serve 端点可能给 application/octet-stream）。
+function fixDataUrlMime(d, url) {
+  if (!d || d.indexOf('data:image/') === 0) return d;
+  const mm = String(url || '').match(/\.([a-z0-9]{1,6})(?:[?#]|$)/i);
+  let ext = mm ? mm[1].toLowerCase() : 'png';
+  if (ext === 'jpg') ext = 'jpeg';
+  return d.replace(/^data:[^;,]*/, 'data:image/' + ext);
+}
+// 点击即用要带的视频/音频：只发路径给后端，由后端解码加载（浏览器里转 base64 不现实）。
+function cardMediaRefs(node, card) {
+  const out = []; const seen = new Set();
+  for (const x of clickMedias(node, card)) {
+    const m = x.m; const t = x.type || m.type;
+    if (!m.path || (t !== 'video' && t !== 'audio') || seen.has(m.path)) continue;
+    seen.add(m.path); out.push({ type: t, path: m.path, name: m.name || '' });
+    if (out.length >= 4) return out;
+  }
+  return out;
+}
+// 调用后端优化：method 映射 api / textgen / llama，参数来自节点全局「设置」。
 async function runOptimize(id, ed) {
   const nd = _editModal && _editModal._node;
   if (!nd) return;
   const st = stateFor(nd);
   const card = st.cards.find((c) => c.id === st.editingId);
-  // 优化始终以「默认提示词」为源（不沿用用户手改的优化结果）。
-  const src = (card ? (card.contentHTML || card.content || (ed ? ed.textContent : '')) : '');
-  const plain = plainTextOf(src) || (ed ? ed.textContent : '');
+  // 源固定取「默认提示词」页签（与滑块无关，也不退回编辑器里当前那份 —— 默认是空的就没有可优化的东西）。
+  const src = card ? (card.contentHTML || card.content || '') : '';
+  const plain = plainTextOf(src);
   if (!plain.trim()) { window.alert('当前卡片没有可优化的提示词内容。'); return; }
   const cfg = optimizeFor(nd);
   const method = id === 'optimize' ? 'api' : id;
   const keyOptional = (cfg.provider === 'Ollama');
-  if (method === 'api' && !keyOptional && !cfg.apiKey) { window.alert('调用「优化提示词 (API)」需要先在「调用设置」里填写该厂商的 API Key（模型厂商/API 主机也请确认）。'); return; }
-  const payload = { method, prompt: plain, skill: cfg.skill || '', provider: cfg.provider || '', model: cfg.model || '', apiUrl: cfg.apiUrl || '', apiKey: cfg.apiKey || '', proxy: cfg.proxy || '', textgen: cfg.textgen || {}, llama: cfg.llama || {}, clearCache: !!cfg.clearCache };
+  if (method === 'api' && !keyOptional && !cfg.apiKey) { window.alert('调用「优化提示词 (API)」需要先在「设置·API设置」里填写该厂商的 API Key（模型提供方/API 主机也请确认）。'); return; }
+  const payload = { method, prompt: plain, provider: cfg.provider || '', model: cfg.model || '', apiUrl: cfg.apiUrl || '', apiKey: cfg.apiKey || '', proxy: cfg.proxy || '', textgen: cfg.textgen || {}, llama: cfg.llama || {}, apiParams: cfg.apiParams || {}, clearCache: !!cfg.clearCache };
   phProgShow(nd, 1, '优化提示词');
-  phProgTick(nd, 0, (card ? card.title : '') + ' 调用中…');
+  phProgTick(nd, 0, (card  ?  card.title : '') + ' 调用中…');
+  const imgs = await cardImageDataUrls(nd, card);
+  if (imgs.length) payload.images = imgs;
+  const medias = cardMediaRefs(nd, card);
+  if (medias.length) payload.media = medias;
+  if (imgs.length || medias.length) phProgTick(nd, 0, (card  ?  card.title : '') + ' 已附带 ' + (imgs.length ? imgs.length + ' 张图' : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' 个视频/音频' : '') + '，调用中…');
   try {
     const res = await (async () => { const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); return r; })();
     const data = await res.json().catch(() => ({ error: '响应解析失败' }));
-    if (!res.ok || data.error) { phProgErr(nd, (data.error || ('HTTP ' + res.status))); window.alert('优化失败：' + (data.error || ('HTTP ' + res.status))); return; }
+    if (!res.ok || data.error) { phProgErr(nd, (data.error || ('HTTP ' + res.status))); window.alert('优化失败：'  + (data.error || ('HTTP ' + res.status))); return; }
     const outText = data.text || '';
     // 切到「优化提示词」页签并写入结果
     if (card) {
       card.contentOptimizedHTML = plainTextToHtml(outText);
       card.contentOptimized = outText;
+      card.useOptimized = true;   // 滑块切到「优化提示词」（已经在优化页签就是无操作）
       const tabOpt = _editModal && _editModal._tabOptimized;
       const tabDef = _editModal && _editModal._tabDefault;
       if (tabOpt) { tabOpt.classList.add('active'); tabDef && tabDef.classList.remove('active'); }
@@ -1399,9 +2007,10 @@ async function runOptimize(id, ed) {
       if (_editModal) { _editModal._editor.innerHTML = card.contentOptimizedHTML; }
       requestAnimationFrame(moveTabThumb);
       syncToConfig(nd);
+      refreshUI(nd);   // 列表里的预览文字 / 优默标记立刻切到优化版
     }
     phProgDone(nd);
-  } catch (e) { phProgErr(nd, (e && e.message ? e.message : e)); window.alert('优化请求失败：' + (e && e.message ? e.message : e)); }
+  } catch (e) { phProgErr(nd, (e && e.message  ?  e.message : e)); window.alert('优化请求失败：'  + (e && e.message  ?  e.message : e)); }
 }
 function plainTextToHtml(text) {
   const d = document.createElement('div');
@@ -1417,89 +2026,58 @@ function optimizeFor(node) {
     apiUrl: o.apiUrl || '',
     apiKey: o.apiKey || '',
     proxy: o.proxy || '',
-    skill: o.skill || '',
-    skillFile: o.skillFile || '',
     autoTextgen: !!o.autoTextgen,
     autoApi: !!o.autoApi,
     autoLlama: !!o.autoLlama,
     clearCache: !!o.clearCache,
+    customMode: !!o.customMode,
+    customPreset: o.customPreset || '',
     textgen: (o.textgen && typeof o.textgen === 'object') ? o.textgen : {},
     llama: (o.llama && typeof o.llama === 'object') ? o.llama : {},
+    apiParams: (o.apiParams && typeof o.apiParams === 'object') ? o.apiParams : {},
   };
 }
-// skill 设置：从 models(实例+共享)/skills 递归读 md（已在后端聚合），选中即把内容写进 config.optimize.skill。
-async function loadSkillContent(node, file) {
-  const st = stateFor(node);
-  st.optimize = st.optimize || {};
-  if (!file) { st.optimize.skill = ''; st.optimize.skillFile = ''; syncToConfig(node); return; }
+// skill 按键：弹 Windows 资源管理器选 md（默认定位 models/skills），把文件内容插入当前编辑位置。
+// 光标先于弹窗抓取：原生文件对话框会夺走焦点，回来后再还原 Range 插入。
+function phInsertRange(ed) {
+  const sel = window.getSelection();
+  if (sel.rangeCount) {
+    const r = sel.getRangeAt(0);
+    if (ed.contains(r.commonAncestorContainer)) return r.cloneRange();
+  }
+  const blocks = ed.querySelectorAll('.eph-all-block-body');
+  const target = blocks.length ? blocks[blocks.length - 1] : ed;
+  const r = document.createRange();
+  r.selectNodeContents(target); r.collapse(false);
+  return r;
+}
+async function insertSkillFile(ed) {
+  if (!ed) return;
+  const range = phInsertRange(ed);
   try {
-    const r = await fetchApi('/prompt_helper/skills/content?file=' + encodeURIComponent(file));
+    const r = await fetchApi('/prompt_helper/pick_skill', { method: 'POST' });
     const data = await r.json().catch(() => ({ error: '解析失败' }));
-    if (data.error) { window.alert('读取 skill 失败：' + data.error); return; }
-    st.optimize.skill = data.text || '';
-    st.optimize.skillFile = file;
-    syncToConfig(node);
-  } catch (e) { window.alert('读取 skill 失败：' + (e && e.message ? e.message : e)); }
+    if (data.error) { window.alert('插入 skill 失败：'  + data.error); return; }
+    if (!data.ok) return;   // 用户取消选择
+    const text = String(data.text || '');
+    if (!text.trim()) { window.alert('该 skill 文件没有内容。'); return; }
+    const html = plainTextToHtml(text.replace(/\r\n/g, '\n'));
+    ed.focus();
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    document.execCommand('insertHTML', false, html);
+  } catch (e) { window.alert('插入 skill 失败：'  + (e && e.message  ?  e.message : e)); }
 }
-// ===== skill 设置弹窗（文件夹树，仿 ModelsCombo 浏览）=====
-let _skillBrowser = null;
-function skillBrowserEl() {
-  if (_skillBrowser && _skillBrowser.parentNode) return _skillBrowser;
-  _skillBrowser = el('div', 'eph-skb');
-  const box = el('div', 'eph-skb-box');
-  const hd = el('div', 'eph-skb-hd'); hd.appendChild(el('b')).textContent = 'skill设置';
-  const close = el('button', 'eph-modal-close'); close.textContent = '✕'; hd.appendChild(close);
-  const sideroot = el('div', 'eph-skb-sideroot');
-  const tree = el('div', 'eph-skb-tree');
-  const main = el('div', 'eph-skb-main');
-  sideroot.appendChild(tree); sideroot.appendChild(main);
-  box.appendChild(hd); box.appendChild(sideroot);
-  _skillBrowser.appendChild(box); document.body.appendChild(_skillBrowser);
-  _skillBrowser._tree = tree; _skillBrowser._main = main;
-  close.addEventListener('click', () => _skillBrowser.classList.remove('active'));
-  return _skillBrowser;
-}
-async function openSkillBrowser(node) {
-  const m = skillBrowserEl(); m._node = node;
-  m._tree.innerHTML = ''; m._main.innerHTML = '';
-  const renderEmpty = () => {
-    const b = el('button', 'eph-skb-card'); b.textContent = '🚫 不使用 skill（空）';
-    if (!optimizeFor(node).skillFile) b.classList.add('on');
-    b.addEventListener('click', () => { loadSkillContent(node, ''); _skillBrowser.classList.remove('active'); });
-    m._main.appendChild(b);
-  };
-  try {
-    const r = await fetchApi('/prompt_helper/skills');
-    const data = await r.json().catch(() => ({}));
-    const skills = data.skills || [];
-    if (!skills.length) { renderEmpty(); m.classList.add('active'); return; }
-    // 按文件夹分组
-    const folders = {};
-    skills.forEach((s) => { const dir = s.file.split('/').slice(0, -1).join('/') || '根目录'; (folders[dir] = folders[dir] || []).push(s); });
-    const dirs = Object.keys(folders).sort();
-    const renderFiles = (dir) => {
-      m._main.innerHTML = '';
-      renderEmpty();
-      const t = el('div', 'eph-skb-maint'); t.textContent = '📁 ' + dir; m._main.appendChild(t);
-      (folders[dir] || []).forEach((s) => {
-        const c = el('button', 'eph-skb-card'); c.textContent = '📄 ' + s.file.split('/').pop();
-        if (optimizeFor(node).skillFile === s.file) c.classList.add('on');
-        c.addEventListener('click', () => { loadSkillContent(node, s.file); _skillBrowser.classList.remove('active'); });
-        m._main.appendChild(c);
-      });
-    };
-    dirs.forEach((dir, i) => {
-      const b = el('button', 'eph-skb-dir'); b.textContent = '📁 ' + dir; if (i === 0) b.classList.add('on');
-      b.addEventListener('click', () => { m._tree.querySelectorAll('.eph-skb-dir').forEach((x) => x.classList.remove('on')); b.classList.add('on'); renderFiles(dir); });
-      m._tree.appendChild(b);
-    });
-    renderFiles(dirs[0]);
-  } catch (_) { renderEmpty(); m._main.appendChild(el('div', 'eph-skb-empty')).textContent = '读取 skill 列表失败'; }
-  m.classList.add('active');
+function skillButton(ed) {
+  const group = el('div', 'eph-tb-group');
+  const b = el('button', 'eph-btn'); b.textContent = 'skill'; b.title = '选择 skill 文件（md，默认 models/skills），把内容插入当前光标处';
+  b.addEventListener('mousedown', (e) => e.preventDefault());   // 保住编辑区光标
+    b.addEventListener('click', () => insertSkillFile(ed));
+  group.appendChild(b);
+  return group;
 }
 // GGUF 模型下拉：从共享 models 文件夹读取 *.gguf（相对路径），供 llama 进程内推理选取。
 // 给文本输入框挂一个「文件下拉」（图三风格）：聚焦/点击弹出可用文件列表，点选回填；仍可手动输入任意路径。
-function attachFileMenu(input, endpoint) {
+  function attachFileMenu(input, endpoint, rootGetter) {
   if (!input || input._ephFileMenu) return input; input._ephFileMenu = true;
   const wrap = el('div', 'eph-dd'); input.classList.add('eph-dd-input');
   if (input.parentNode) input.parentNode.removeChild(input);
@@ -1509,7 +2087,10 @@ function attachFileMenu(input, endpoint) {
   const menu = el('div', 'eph-dd-menu'); document.body.appendChild(menu);
   const openMenu = async () => {
     try {
-      const r = await fetchApi(endpoint);
+      let ep = endpoint;
+      const rv = rootGetter ? (rootGetter() || '') : '';
+      if (rv) ep = endpoint + (endpoint.indexOf('?') >= 0 ? '&' : '?') + 'root=' + encodeURIComponent(rv);
+      const r = await fetchApi(ep);
       const data = await r.json().catch(() => ({}));
       const models = data.models || [];
       menu.innerHTML = '';
@@ -1539,9 +2120,9 @@ const _STD_COLORS = ['#C00000', '#FF0000', '#FFC000', '#FFFF00', '#92D050', '#00
 function initColorDropdown(dd, target) {
   const grid = el('div', 'eph-color-grid');
   const gridSm = el('div', 'eph-color-grid eph-color-grid-sm');
-  // 高亮保留「无颜色」以快捷清除高亮（hiliteColor 传 transparent 会把高亮折叠为透明）。
-  // 文字颜色不提供无颜色（foreColor 的 transparent 无效）。
-  if (target === 'highlight') {
+  // 高亮保留「无颜色」以快捷清除高亮（hiliteColor  传 transparent 会把高亮折叠为透明）。
+    // 文字颜色不提供无颜色（foreColor  的 transparent 无效）。
+    if (target === 'highlight') {
     const noColor = el('div', 'eph-color-item eph-no-color'); noColor.dataset.color = 'transparent'; noColor.title = '清除高亮';
     grid.appendChild(noColor);
   }
@@ -1559,7 +2140,7 @@ function colorItem(c, target, dd) {
   return d;
 }
 
-// ===== 自定义取色器 =====
+// =====  自定义取色器 =====
 let _pickerModal = null, _pickerTarget = null;
 let _pcR = 255, _pcG = 255, _pcB = 255, _pcH = 200, _pcS = 100, _pcL = 50, _pcHSV_S = 100, _pcHSV_V = 100, _pcMode = 'hex';
 function rgbToHsl(r, g, b) { r /= 255; g /= 255; b /= 255; const max = Math.max(r, g, b), min = Math.min(r, g, b); let h, s, l = (max + min) / 2; if (max === min) { h = s = 0; } else { const d = max - min; s = l > 0.5 ? d / (2 - max - min) : d / (max + min); h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4; h /= 6; } return { h: h * 360, s: s * 100, l: l * 100 }; }
@@ -1594,7 +2175,7 @@ function pickerEl() {
   area.addEventListener('mousedown', (e) => { e.preventDefault(); drag2d(e); const mv = (ev) => drag2d(ev); const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); }; document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); });
   hue.addEventListener('mousedown', (e) => { e.preventDefault(); dragHue(e); const mv = (ev) => dragHue(ev); const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); }; document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up); });
   // 点击取色器外部空白 → 自动关闭（不保存，仅点「确定」才应用颜色/不影响卡片弹窗）。
-  _pickerModal.addEventListener('mousedown', (e) => { if (e.target === _pickerModal && (_phClosedEl === null || _phClosedEl === _pickerModal)) closePicker(); });
+  _pickerModal.addEventListener('mousedown', (e) => { if (e.target === _pickerModal && (_phClosedEl === null || _phClosedEl === _pickerModal)) { _phClosedEl = _pickerModal; closePicker(); } });
   return _pickerModal;
 }
 function setPickerMode(mode) {
@@ -1663,17 +2244,10 @@ function openColorPicker(target) {
 }
 function closePicker() { _pickerModal && _pickerModal.classList.remove('active'); }
 
-// ===== 查找/替换弹窗（可拖动）=====
+// ===== 查找/替换弹窗（可拖动）====
 let _frModal = null, _frDrag = null, _frEditor = null;
 // 在指定 contenteditable 内查找下一个匹配（沿文档顺序，从当前光标往后，越界回到开头）。
-function _frNodes(ed) { const out = []; const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT); while (w.nextNode()) out.push(w.currentNode); return out; }
-function _frSelect(ed, n, idx, query) {
-  const sel = window.getSelection(); const r = document.createRange();
-  r.setStart(n, idx); r.setEnd(n, idx + query.length);
-  sel.removeAllRanges(); sel.addRange(r);
-  try { ed.scrollIntoView({ block: 'center' }); } catch (_) {}
-  return true;
-}
+  function _frNodes(ed) { const out = []; const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT); while (w.nextNode()) out.push(w.currentNode); return out; }
 let _frMatches = [], _frCur = -1, _frEd = null, _frOverlays = [];
 function _frCollect(ed, query) {
   if (!query) return [];
@@ -1801,105 +2375,300 @@ function openFindModal(tab, editorEl) {
   if (focusI) { focusI.focus(); focusI.select(); }
 }
 
-// ===== 规则弹窗 =====
-let _rulesModal = null;
-const _MEDIA_REF_RULES = {
-  'MiniMax H3': '前端 @图片1/@视频1/@音频1，提交时编译为 <Picture 1>/<Video 1>/<Audio 1> 尖括号标签',
-  'Seedance': '使用 @图片1、@视频1、声音参考音频1，单次最多 30 图+10 视频+10 音频',
-  'Wan': '使用 @Video1 / @Video2 标签引用参考视频',
-  'Krea 2': '官方用 image_style_references 数组，每个参考图可设 strength(-2..2)',
-  'HunyuanVideo': '使用 @image1 / @video1 标签引用',
-  '通用': '保持 @图片1 / @视频1 / @音频1 标签',
-};
-const _TS_RULES = {
-  'MiniMax H3': '[Shot 1] 开头不加时间戳，后续 [Shot 2] At 00:03.500, ...，切点严格递增',
-  'Seedance': '0-5s: / 6-10s: / 11-20s:，每段须交代镜头动作+主体',
-  'Wan 2.6': '[镜头 1] [0-5s] / [镜头 2] [5-10s] 时间轴语法',
-  'Seedance 2.5': '支持整秒时间戳 [0s]、[2s] 及区间 0-3s',
-  '通用': '[0-5s] / [5-10s] 区间时间戳',
-};
-function rulesEl() {
-  if (_rulesModal && _rulesModal.parentNode) return _rulesModal;
-  _rulesModal = el('div', 'eph-rules');
-  const box = el('div', 'eph-rules-box');
-  const hd = el('div', 'eph-rules-hd');
-  const t = el('b'); t.textContent = '规则设置';
-  const close = el('button', 'eph-modal-close'); close.textContent = '✕';
-  hd.appendChild(t); hd.appendChild(close);
-  const body = el('div', 'eph-rules-body');
-  const mkSel = (labelText, presets, key) => {
-    const l = el('label', 'eph-rule-sel');
-    l.appendChild(el('span')).textContent = labelText;
-    const dd = makeDropdown(Object.keys(presets).map((v) => ({ value: v, label: v })));
-    const note = el('div', 'eph-rule-note'); note.textContent = presets[dd.value] || '';
-    dd.addEventListener('change', (v) => { note.textContent = presets[v] || ''; });
-    l.appendChild(dd.el); l.appendChild(note);
-    body.appendChild(l);
-    _rulesModal['_sel_' + key] = dd;
-    return dd;
-  };
-  mkSel('媒体引用规则（选模型套用格式）', _MEDIA_REF_RULES, 'mediaRef');
-  mkSel('时间戳规则（选模型套用格式）', _TS_RULES, 'ts');
-  const custom = el('label', 'eph-rule-custom'); custom.appendChild(el('span')).textContent = '自定义规则';
-  const mIn = el('input'); mIn.placeholder = '媒体引用格式，如 <Picture {n}> 或 @图片{n}';
-  const tIn = el('input'); tIn.placeholder = '时间戳格式，如 [Shot {n}] At {t}';
-  custom.appendChild(mIn); custom.appendChild(tIn);
-  body.appendChild(custom);
-  const save = el('button', 'eph-btn eph-btn-save'); save.textContent = '保存规则'; save.style.alignSelf = 'flex-end';
-  save.addEventListener('click', () => { saveRules(); });
-  body.appendChild(save);
-  box.appendChild(hd); box.appendChild(body); _rulesModal.appendChild(box); document.body.appendChild(_rulesModal);
-  _rulesModal._mIn = mIn; _rulesModal._tIn = tIn;
-  close.addEventListener('click', () => _rulesModal.classList.remove('active'));
-  _rulesModal.addEventListener('click', (e) => { if (e.target === _rulesModal && (_phClosedEl === null || _phClosedEl === _rulesModal)) _rulesModal.classList.remove('active'); });
-  return _rulesModal;
+// ===== 规则预设（「设置·规则设置」页的数据源）=====
+// ===== 提示词规范表（默认；自定义存在节点 config 的 rules.custom）=====
+// ref：正文里引用媒体的写法（'' = 不写，媒体走生成节点的独立输入）；{n} = 该类型序号
+// ts ：时间规则单模板（仅在「提示」气泡里生成给用户复制，不进自动编译）。{S}=镜头号；{start}/{end}=秒数；{M}=时刻(MM:SS.mmm)；{text}=正文
+const _PROMPT_RULES = [
+  { id: 'none', label: '不编译', ref: {}, ts: { off: true },
+    note: '原样输出，不做编译。' },
+  { id: 'api', label: '使用 API', ref: { image: '@Image{n}', video: '@Video{n}', audio: '@Audio{n}' }, ts: { off: true },
+    note: '用于 API 节点。' },
+  { id: 'h3', label: 'MiniMax H3', base: 'en', ref: { image: '<Picture {n}>', video: '<Video {n}>', audio: '<Audio {n}>' },
+    ts: { tpl: '[Shot {S}] At {M}, {text}' },
+    note: '画面 = 主体 + 动作 + 场景 + 风格 + 运镜 + 声音 + 对白（官方三字段：integrated_multimodal_description / overall_soundscape / non_diegetic_music）。\n首镜写 [Shot 1] 不带时间；后续 [Shot 2] At 00:03.500, the camera cuts to…（切点严格递增）。\n运镜写成句中的自然英文动作 + 幅度 + 速度（The camera pushes in with small amplitude at slow speed…）。\n参考模式（Ref2VA）另有 <Subject 1>（可复用主体：人物/场景/服装/风格/动作，可由多图/多视频定义，如 <Subject 1> is the woman whose appearance comes from <Picture 1> and whose walking motion comes from <Video 1>.），配六段结构 subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music；对白用 (S1) 与 <d>[English] …</d>。',
+    alt: { ref: { image: '<Picture {n}>', video: '<Video {n}>', audio: '<Audio {n}>' },
+      ts: { tpl: '[镜头 {S}] At {M}, {text}' },
+      note: '（中文为社区写法，官方指南只有英文版）\n画面 = 主体 + 动作 + 场景 + 风格 + 运镜 + 声音 + 对白（官方三字段：integrated_multimodal_description / overall_soundscape / non_diegetic_music）。\n首镜写 [镜头 1] 不带时间；后续 [镜头 2] At 00:03.500, the camera cuts to…（切点严格递增）。\n运镜写成句中的自然英文动作 + 幅度 + 速度（The camera pushes in with small amplitude at slow speed…）。\n参考模式（Ref2VA）另有 <Subject 1>，配六段结构 subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music。' } },
+  { id: 'seedance', label: 'Seedance', base: 'zh', ref: { image: '<图片{n}>', video: '<视频{n}>', audio: '<音频{n}>' },
+    ts: { tpl: '{start}-{end} 秒：{text}' },
+    note: '画面 = 主体 + 运动 + 环境 + 运镜/切镜 + 美学描述 + 声音（后三项非必须）。\n引用写「参考<图片1>中的<主体1>」，绑定主体写「张三@图片1」。\n分镜：2.0 只认「镜头1、镜头2」；2.5 才认整数秒区间，且时间轴要连续。\n声音记号：音乐 ()、音效 <>、台词 {}、字幕 【】。',
+    alt: { ref: { image: 'Image {n}', video: 'Video {n}', audio: 'Audio {n}' },
+      ts: { tpl: '[{start}s-{end}s] {text}' },
+      note: '画面 = Subject + Motion + Environment + Cut + Aesthetic + Sound。\n引用写 Image 1；分镜写 Shot 1、Shot 2（2.0 只认镜头序号，2.5 才认整数秒区间）。\n（官方英文文档未公开，此版按中文版对应，非官方原文）' } },
+  { id: 'kling', label: 'Kling 3', base: 'en', ref: { image: '@image{n}', video: '@video{n}' },
+    ts: { tpl: 'shot {S}, {dur}, {text};' },
+    note: '分镜 = shot 1, 时长秒, 内容; shot 2, …;（分号分隔，≤6 段，各段 ≥1s，时长和 = 总时长，每段 ≤512 字符）。\n引用写 @image1 / @video1 / @Zhang；官方没给画面公式，正文自由写。',
+    alt: { ref: { image: '@image{n}', video: '@video{n}' },
+      ts: { tpl: '镜头{S}, {dur}, {text};' },
+      note: '（中文为社区写法，官方只有英文文档）\n分镜 = 镜头1, 时长秒, 内容; 镜头2, …;（分号分隔，≤6 段，各段 ≥1s，时长和 = 总时长，每段 ≤512 字符）。\n引用写 @image1 / @video1 / @Zhang；官方没给画面公式，正文自由写。' } },
+  { id: 'wan3', label: 'Wan 3', base: 'en', ref: { image: '@image{n}', video: '@video{n}', audio: '@audio{n}' },
+    ts: { tpl: 'Shot {S} [{start}–{end} s] {text}' },
+    note: '画面 = 主体 + 场景 + 运动；（进阶）+ 美学控制（光源/景别/视角/镜头/运镜）+ 风格化。\n多镜头 = 总体描述 + 镜头序号 + 时间戳 + 分镜内容，如 Shot 1 [0–3 s] 内容, Shot 2 [3–6 s] 内容；一镜到底写 Generate single shot.\n参考写 Image 1 / Video 1；控制短语 No dialogue. / No background music.',
+    alt: { ref: { image: '@image{n}', video: '@video{n}', audio: '@audio{n}' },
+      ts: { tpl: '镜头{S}[{start}-{end}秒] {text}' },
+      note: '画面 = 主体 + 场景 + 运动；（进阶）+ 美学控制（光源/景别/视角/镜头/运镜）+ 风格化。\n多镜头 = 总体描述 + 镜头序号 + 时间戳 + 分镜内容，如 镜头1[0-3秒] 内容，镜头2[3-6秒] 内容；一镜到底写「生成单镜头」。\n参考写「图1 / 视频1」；控制短语「无台词」「无背景音乐」。' } },
+  { id: 'wan22', label: 'Wan 2.2', ref: {}, ts: { off: true },
+    note: '画面 = 主体 + 场景 + 运动；（进阶）主体描述 + 场景描述 + 运动描述 + 美学控制 + 风格化。\n图生视频 = 运动 + 运镜；官方建议开启 prompt extension 扩写。' },
+  { id: 'ltx', label: 'LTX 2.5', ref: {}, ts: { off: true },
+    note: '画面 = 景别 + 场景 + 动作 + 角色 + 运镜 + 音频，写成一段连续散文（≤200 词，从动作开始、按时间顺序）。\n不要编号、时间戳，也不要凭空写运镜；多镜头用散文点名剪接（A hard cut transitions to…）。\n负面词（官方默认）：has_subtitles, has_blurbox, transition from black, transition to black, speech_ending_short, blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, deformed facial features, asymmetrical face, missing facial features, extra limbs, disfigured hands, wrong hand count, artifacts around text, inconsistent perspective, camera shake, incorrect depth of field, background too sharp, background clutter, distracting reflections, harsh shadows, inconsistent lighting direction, color banding, cartoonish rendering, 3D CGI look, unrealistic materials, uncanny valley effect, incorrect ethnicity, wrong gender, exaggerated expressions, wrong gaze direction, mismatched lip sync, silent or muted audio, distorted voice, robotic voice, echo, background noise, off-sync audio, incorrect dialogue, added dialogue, repetitive speech, jittery movement, awkward pauses, incorrect timing, unnatural transitions, inconsistent framing, tilted camera, flat lighting, inconsistent tone, cinematic oversaturation, stylized filters, AI artifacts' },
+  { id: 'hunyuan', label: 'Hunyuan 1.5', ref: {}, ts: { off: true },
+    note: '画面 = 主体 + 运动 + 场景 + [景别] + [运镜] + [灯光] + [风格] + [氛围]（方括号可省）。\n图生视频 = 主体动态 + 场景动态 + [运镜]；运镜用整句（The camera moves forward），用户没说静止不要自己加「镜头静止」。' },
+  { id: 'qwen', label: 'Qwen-Image', base: 'zh', ref: { image: '图{n}', video: '', audio: '' }, ts: { off: true },
+    note: '画面 = 主体 + 场景 + 细节 + 风格，用描述式自然语言；编辑图才用指令式。\n多图写「图1」「图2」（1–3 张最佳）。\n负面词（官方示例）：低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。',
+    alt: { ref: { image: 'Image {n}', video: '', audio: '' }, ts: { off: true },
+      note: '画面 = Subject + Scene + Detail + Style，描述式自然语言；编辑图才用指令式。\n多图写 Image 1、Image 2（1–3 张最佳）。\n负面词（官方示例为中文）：低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。' } },
+  { id: 'flux2', label: 'FLUX.2', ref: { image: 'image {n}', video: '', audio: '' }, ts: { off: true },
+    note: '画面 = Subject + Action + Style + Context。\n多图写 image 1、image 2；不要写负面提示词，用正向替换。' },
+  { id: 'hailuo', label: 'Hailuo 02', ref: {}, ts: { off: true },
+    note: '官方没给公式，自然语言描述。\n运镜用方括号命令：[Push in] [Pan left] [Zoom in] [Static shot] 等 15 条（一个 [] 内最多 3 个，按顺序生效）。' },
+  { id: 'vidu', label: 'Vidu', ref: { image: '@subject{n}', video: '', audio: '' }, ts: { off: true },
+    note: '正文用 @subject1 指代参考主体；参考图走独立输入，每个主体最多 3 张。\n官方没给公式，自然语言描述。' },
+  { id: 'pixverse', label: 'PixVerse', ref: { image: '@ref{n}', video: '@ref{n}', audio: '' }, ts: { off: true },
+    note: '正文用 @ref_name 指代参考（@ 后留空格，名字要与参考里定义的一致）；参考图走独立输入。\n官方没给公式，自然语言描述。' },
+  { id: 'runway', label: 'Runway Gen-4', ref: {}, ts: { off: true },
+    note: '参考图带 tag（3–16 字符、字母开头、字母/数字/下划线），正文写 @tag 引用（≤3 张）。\nprompts should be descriptive, not conversational；不要写负面提示词。' },
+];
+const _BUILTIN_RULE_IDS = _PROMPT_RULES.map((r) => r.id);
+function _customRules(node) { const c = (node ? phRulesModel(node).custom : null); return Array.isArray(c) ? c.filter((r) => r && r.id && !_BUILTIN_RULE_IDS.includes(r.id)) : []; }
+// 内置规范也能改：设置页「保存规范」把改动写进节点 config 的 rules.overrides[id]，可「恢复默认」删掉
+function _ruleOverrides(node) { const o = (node ? phRulesModel(node).overrides : null); return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; }
+function _applyOverride(r, ov) {
+  if (!ov || typeof ov !== 'object') return r;
+  const out = { id: r.id,
+    label: (typeof ov.label === 'string' && ov.label.trim()) ? ov.label : r.label,
+    ref: (ov.ref && typeof ov.ref === 'object') ? ov.ref : r.ref,
+    ts: (ov.ts && typeof ov.ts === 'object') ? ov.ts : r.ts,
+    note: typeof ov.note === 'string' ? ov.note : r.note };
+  const alt = (ov.alt && typeof ov.alt === 'object') ? ov.alt : r.alt;
+  if (alt) out.alt = alt;
+  const base = ov.base || r.base;
+  if (base) out.base = base;
+  return out;
 }
-function openRules(node) {
-  const m = rulesEl(); m._node = node;
-  const r = stateFor(node).rules || {};
-  try { m._sel_mediaRef.value = r.mediaRefModel || '通用'; } catch (_) {}
-  try { m._sel_ts.value = r.tsModel || '通用'; } catch (_) {}
-  m._mIn.value = r.mediaRef || ''; m._tIn.value = r.ts || '';
-  const note1 = m._sel_mediaRef.el.parentNode && m._sel_mediaRef.el.parentNode.querySelector('.eph-rule-note');
-  if (note1) note1.textContent = _MEDIA_REF_RULES[m._sel_mediaRef.value] || '';
-  const note2 = m._sel_ts.el.parentNode && m._sel_ts.el.parentNode.querySelector('.eph-rule-note');
-  if (note2) note2.textContent = _TS_RULES[m._sel_ts.value] || '';
-  m.classList.add('active');
+// 语言变体：base 表示 ref/ts/note 本身的语言，alt = { ref, ts, note } 是另一种语言那份（没有 alt 的规范不受语言开关影响）
+// seedance_en 是本轮之前拆出来的旧 id，合并进 seedance（语言 en）后仍要能认出来
+const _RULE_ALIAS = { seedance_en: { id: 'seedance', lang: 'en' } };
+function _normRuleId(id) { const a = _RULE_ALIAS[id]; return a ? a.id : id; }
+function _nodeLang(node) {
+  const m = phRulesModel(node);
+  if (m.lang === 'en' || m.lang === 'zh') return m.lang;
+  const a = _RULE_ALIAS[m.ruleId];
+  return (a && a.lang) || 'zh';
 }
-function saveRules() {
-  const m = _rulesModal; if (!m || !m._node) return;
-  const st = stateFor(m._node);
-  st.rules = { mediaRefModel: m._sel_mediaRef.value, tsModel: m._sel_ts.value, mediaRef: m._mIn.value, ts: m._tIn.value };
-  syncToConfig(m._node);
-  m.classList.remove('active');
+function _pickLang(rule, lang) {
+  if (!rule || !rule.alt) return rule;
+  const base = rule.base === 'en' ? 'en' : 'zh';
+  if (lang === base) return rule;
+  const other = base === 'en' ? 'zh' : 'en';   // 换过来的那份：base 跟着变，alt 反过来存原来那份（保证来回切对称）
+  return { id: rule.id, label: rule.label, base: other, alt: { ref: rule.ref || {}, ts: rule.ts || {}, note: rule.note || '' }, ref: rule.alt.ref || {}, ts: rule.alt.ts || {}, note: rule.alt.note || '' };
 }
+function allRules(node) {
+  const ovs = _ruleOverrides(node), lang = _nodeLang(node);
+  return _PROMPT_RULES.map((r) => _pickLang(_applyOverride(r, ovs[r.id]), lang))
+    .concat(_customRules(node).map((c) => _pickLang(c, lang)));
+}
+function findRule(node, id) { const rid = _normRuleId(id); return allRules(node).find((r) => r.id === rid) || _PROMPT_RULES[0]; }
+function setNodeLang(node, lang) {
+  const st = stateFor(node);
+  st.rules = Object.assign({}, st.rules || {}, { lang: lang === 'en' ? 'en' : 'zh' });
+  syncToConfig(node);
+}
+// 卡片/总体编辑下拉的选项：新建自定义 | 默认规范 | 分隔线 | 自定义规范
+function ruleDropdownItems(node, withNew) {
+  const items = [];
+  if (withNew) items.push({ value: '__new__', label: '＋ 新建自定义规范…' });   // 只有设置页有
+  const ovs = _ruleOverrides(node);
+  _PROMPT_RULES.forEach((r) => items.push({ value: r.id, label: _applyOverride(r, ovs[r.id]).label }));
+  const cs = _customRules(node);
+  if (cs.length) { items.push({ divider: true }); cs.forEach((r) => items.push({ value: r.id, label: r.label })); }
+  return items;
+}
+// 时间格式：sec = 秒数；mmss = MM:SS.mmm（只用于气泡里生成时间戳给用户复制）
+function fmtRuleTime(v, fmt) {
+  const n = parseFloat(String(v == null ? '' : v));
+  if (!isFinite(n)) return '';
+  if (fmt === 'mmss') { const total = Math.round(n * 1000); const m = Math.floor(total / 60000); const s = (total - m * 60000) / 1000; return String(m).padStart(2, '0') + ':' + s.toFixed(3).padStart(6, '0'); }
+  return String(Math.round(n * 1000) / 1000);
+}
+// 按规范渲染气泡那一排输入：{start}/{end} 秒数 · {dur}=end-start · {M} 时刻(数字→MM:SS.mmm) · {S} 镜头号 · {text} 正文
+function renderRuleTs(rule, vals) {
+  const ts = (rule && rule.ts) || {};
+  if (ts.off || !String(ts.tpl || '').trim()) return '';
+  const v = vals || {};
+  const mRaw = String(v.M == null ? '' : v.M).trim();
+  const mOut = /^-?\d+(\.\d+)?$/.test(mRaw) ? fmtRuleTime(mRaw, 'mmss') : mRaw;
+  const sec = parseFloat(String(v.start == null ? '' : v.start));
+  const eec = parseFloat(String(v.end == null ? '' : v.end));
+  const durRaw = String(v.dur == null ? '' : v.dur).trim();
+  const dur = durRaw || (isFinite(sec) && isFinite(eec) ? String(Math.round((eec - sec) * 1000) / 1000) : '');
+  return String(ts.tpl)
+    .replace(/\{dur\}/g, dur)
+    .replace(/\{S\}/g, String(v.S == null ? '' : v.S).trim())
+    .replace(/\{M\}/g, mOut)
+    .replace(/\{start\}/g, String(v.start == null ? '' : v.start).trim())
+    .replace(/\{end\}/g, String(v.end == null ? '' : v.end).trim())
+    .replace(/\{text\}/g, '')
+    .trim();
+}
+// 规范提示气泡：点「?」弹出，**只作参考**（书写规则 + 引用写法 + 时间戳生成），不写进卡片。不遮挡、向下弹。
+let _rulePop = null;
+let _rulePopTs = [{ start: '', end: '', dur: '', S: '', M: '' }];   // 气泡里的多排输入（会话内记住，不落卡片）
+// 中/EN 小开关（只有该规范有双语版本时才用）
+function mkLangToggle(current, onPick) {
+  const box = el('div', 'eph-lang');
+  [['zh', '中'], ['en', 'EN']].forEach(([k, t]) => {
+    const b = el('button', 'eph-lang-btn'); b.type = 'button'; b.textContent = t;
+    if (current === k) b.classList.add('active');
+    b.addEventListener('click', (ev) => { ev.stopPropagation(); if (current === k) return; onPick(k); });
+    box.appendChild(b);
+  });
+  return box;
+}
+function closeRulePop() { if (_rulePop) { try { _rulePop.remove(); } catch (_) {} _rulePop = null; } }
+function openRulePop(anchor, node, card) {
+  closeRulePop();
+  const rule = findRule(node, (card && card.ruleId) || phRulesModel(node).ruleId || 'none');
+  const pop = el('div', 'eph-rule-pop');
+  const hd = el('div', 'eph-rule-pop-hd');
+  hd.appendChild(el('div', 'eph-rule-pop-t')).textContent = rule.label || '';
+  if (rule.alt) {   // 有中英双版才显示切换
+    const langNow = _nodeLang(node);
+    hd.appendChild(mkLangToggle(langNow, (k) => { setNodeLang(node, k); openRulePop(anchor, node, card); }));
+  }
+  pop.appendChild(hd);
+  if (rule.note) pop.appendChild(el('div', 'eph-rule-pop-note')).textContent = rule.note;
+  const ex = el('div', 'eph-rule-pop-ex');
+  const ref = rule.ref || {};
+  const has = (k) => ref[k] !== undefined && ref[k] !== null && String(ref[k]).trim() !== '';
+  if (!['image', 'video', 'audio'].some(has)) {
+    ex.appendChild(el('span', 'eph-rule-pop-note')).textContent = '无需引用媒体';
+  } else {
+    [['image', '@图片1'], ['video', '@视频1'], ['audio', '@音频1']].forEach(([k, src]) => {
+      if (!has(k)) return;
+      const pair = el('span', 'eph-rule-pop-pair');
+      pair.appendChild(el('span', 'eph-rule-pop-from')).textContent = src;
+      pair.appendChild(el('span', 'eph-rule-pop-arrow')).textContent = '→';
+      pair.appendChild(el('span', 'eph-rule-pop-to')).textContent = ruleRefPreview(rule, k);
+      ex.appendChild(pair);
+    });
+  }
+  pop.appendChild(ex);
+  // 输入框按模板里用到的占位符生成（{start}/{end}/{dur}/{S}/{M}，{text} 取正文不用填）→ 生成文字给你复制
+  const ts = rule.ts || {};
+  const tpl = String(ts.tpl || '');
+  if (!ts.off && tpl.trim()) {
+    const fields = [
+      ['start', 'start', '46px'], ['end', 'end', '46px'], ['dur', 'dur', '40px'], ['S', 'S', '40px'], ['M', 'M', '66px'],
+    ].filter(([key]) => tpl.includes('{' + key + '}'));
+    const FIELD_TIP = {
+      start: 'start：该镜头开始时间（秒）',
+      end: 'end：该镜头结束时间（秒）',
+      dur: 'dur：该镜头时长（秒）；留空自动用 end − start',
+      S: 'S：镜头号（如 1、2）',
+      M: 'M：时刻；填秒数自动转 00:03.500，填别的原样输出',
+    };
+    const box = el('div', 'eph-rule-pop-ts');
+    const insWrap = el('div', 'eph-rule-shots-in');   // 输入控件：不可选中
+    const outWrap = el('div', 'eph-rule-shots-out');  // 生成结果集中一块：可一次框选复制
+    const upd = () => {
+      outWrap.innerHTML = '';
+      _rulePopTs.forEach((v) => {
+        if (!fields.some(([key]) => String(v[key] || '').trim())) return;   // 这排一个字都没填 → 不预览
+        const t = renderRuleTs(rule, v);
+        if (t) outWrap.appendChild(el('div', 'eph-rule-shot-pv')).textContent = t;
+      });
+    };
+    const render = () => {
+      insWrap.innerHTML = '';
+      _rulePopTs.forEach((v, i) => {
+        const line = el('div', 'eph-rule-shot-row');
+        fields.forEach(([key, ph, w]) => {
+          if (key === 'end' && fields.some((f) => f[0] === 'start')) line.appendChild(el('span')).textContent = '—';
+          const inp = el('input'); inp.type = 'text'; inp.inputMode = 'decimal';
+          inp.value = v[key] || ''; inp.placeholder = ph; inp.style.width = w;
+          setTip(inp, FIELD_TIP[key] || '');
+          inp.addEventListener('input', () => { v[key] = inp.value; upd(); });
+          line.appendChild(inp);
+        });
+        const add = el('button', 'eph-rule-shot-btn'); add.type = 'button'; add.textContent = '＋'; add.title = '再加一排';
+        add.addEventListener('click', () => { _rulePopTs.push({ start: '', end: '', dur: '', S: '', M: '' }); render(); });
+        line.appendChild(add);
+        if (i > 0) {
+          const del = el('button', 'eph-rule-shot-btn'); del.type = 'button'; del.textContent = '−'; del.title = '删掉这排';
+          del.addEventListener('click', () => { _rulePopTs.splice(i, 1); render(); });
+          line.appendChild(del);
+        }
+        insWrap.appendChild(line);
+      });
+      upd();
+    };
+    box.appendChild(insWrap); box.appendChild(outWrap);
+    pop.appendChild(box);
+    render();
+  }
+  document.body.appendChild(pop);
+  try {
+    const r = anchor.getBoundingClientRect(); const w = pop.offsetWidth || 330, h = pop.offsetHeight || 200;
+    let top = r.bottom + 6;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+    pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + 'px';
+    pop.style.top = top + 'px';
+  } catch (_) {}
+  _rulePop = pop;
+  return pop;
+}
+// 点气泡外面 / Esc 关闭（点「?」按钮自身不关，交给按钮自己切换）
+document.addEventListener('mousedown', (e) => {
+  if (!_rulePop) return;
+  const t = e.target;
+  if (_rulePop.contains(t)) return;
+  if (t && t.classList && t.classList.contains('eph-rule-hint')) return;
+  closeRulePop();
+}, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeRulePop(); });
 
-// ===== 调用设置弹窗（模型与接口 / TextGenerate / llama 三排）=====
+// 卡片当前规范的「引用媒体编译后样子」：@图片1 → <Picture 1>
+function ruleRefPreview(rule, kind) {
+  const tpl = ((rule && rule.ref) || {})[kind];
+  if (tpl === undefined || tpl === null || String(tpl).trim() === '') return '（不改，原样保留）';
+  return String(tpl).replace(/\{n\}/g, '1');
+}
+// ===== 设置弹窗（模型与接口 / TextGenerate / llama 三排）====
 let _settingsModal = null, _settingsNode = null;
 const _SET_PROVIDERS = [
-  { value: 'OpenAI', label: 'OpenAI', host: 'https://api.openai.com/v1', oauth: true, loginUrl: 'https://platform.openai.com',
-    models: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-cyber', 'gpt-5.5-pro', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.3-codex-spark', 'gpt-4.1'] },
+  { value: 'OpenAI', label: 'OpenAI', host: 'https://api.openai.com/v1',
+    models: ['gpt-6-astra', 'gpt-6-astra-pro', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-cyber', 'gpt-5.5-pro', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.3-codex-spark', 'gpt-4.1'] },
   { value: 'DeepSeek', label: 'DeepSeek', host: 'https://api.deepseek.com/v1',
-    models: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro-0813', 'deepseek-v4-flash-0731'] },
+    models: ['deepseek-v4.1-flash', 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro-0813', 'deepseek-v4-flash-0731'] },
   { value: 'Google Gemini', label: 'Gemini', host: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    models: ['gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.1-flash-image', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-flash-image'] },
-  { value: 'Anthropic Claude', label: 'Claude', host: 'https://api.anthropic.com/v1', oauth: true, loginUrl: 'https://console.anthropic.com', anthropic: true,
-    models: ['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-mythos-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
-  { value: 'Alibaba Qwen', label: 'Qwen Portal', host: 'https://dashscope.aliyuncs.com/compatible-mode/v1', oauth: true, loginUrl: 'https://bailian.console.aliyun.com',
-    models: ['qwen3.8-max-preview', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-flash', 'qwen3.6-plus', 'qwen3.5-flash', 'qwen3.5-plus', 'qwen3-max', 'qwen3-coder-next', 'qwen-flash', 'qvq-max'] },
+    models: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.1-flash-image', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-flash-image'] },
+  { value: 'Anthropic Claude', label: 'Claude', host: 'https://api.anthropic.com/v1',
+    models: ['claude-fable-5.1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-mythos-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
+  { value: 'Alibaba Qwen', label: 'Qwen Portal', host: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen3.8-max-0902', 'qwen3.8-flash', 'qwen3.8-max-preview', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-flash', 'qwen3.6-plus', 'qwen3.5-flash', 'qwen3.5-plus', 'qwen3-max', 'qwen3-coder-next', 'qwen-flash', 'qvq-max'] },
   { value: 'Moonshot Kimi', label: 'Moonshot Kimi', host: 'https://api.moonshot.ai/v1',
     models: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6', 'moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'moonshot-v1-8k-vision-preview'] },
+  { value: 'xAI Grok', label: 'xAI Grok', host: 'https://api.x.ai/v1',
+    models: ['grok-4.6', 'grok-4.5', 'grok-4.3', 'grok-4.20-reasoning', 'grok-4.20-non-reasoning', 'grok-latest'] },
+  { value: 'Mistral', label: 'Mistral', host: 'https://api.mistral.ai/v1',
+    models: ['mistral-large-3', 'mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'magistral-medium-latest', 'magistral-small-latest', 'codestral-latest', 'devstral-medium-latest'] },
+  { value: 'Groq', label: 'Groq', host: 'https://api.groq.com/openai/v1',
+    models: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b', 'moonshotai/kimi-k2-instruct', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'deepseek-r1-distill-llama-70b'] },
   { value: 'SiliconFlow', label: 'SiliconFlow', host: 'https://api.siliconflow.cn/v1',
     models: ['deepseek-ai/DeepSeek-V2.5', 'deepseek-ai/DeepSeek-R1', 'deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2-7B-Instruct', 'THUDM/glm-4-9b-chat', 'stabilityai/stable-diffusion-xl-base-1.0'] },
   { value: 'OpenRouter', label: 'OpenRouter', host: 'https://openrouter.ai/api/v1',
-    models: ['openai/gpt-5.6-luna', 'openai/gpt-oss-120b', 'google/gemini-3.7-flash', 'anthropic/claude-opus-5', 'anthropic/claude-fable-5', 'anthropic/claude-sonnet-5', 'anthropic/claude-haiku-4.5', 'openai/gpt-6-astra'] },
+    models: ['openai/gpt-6-astra', 'openai/gpt-6-astra-pro', 'anthropic/claude-fable-5.1', 'anthropic/claude-opus-5', 'anthropic/claude-sonnet-5', 'google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'x-ai/grok-4.6', 'deepseek/deepseek-v4.1-flash', 'qwen/qwen3.8-max-0902', 'moonshotai/kimi-k3', 'openai/gpt-oss-120b'] },
   { value: 'Ollama', label: 'Ollama（本机）', host: 'http://localhost:11434/v1', customHost: true, keyOptional: true, models: ['llama2', 'llama3', 'llama3.1', 'llama3.2', 'llama4', 'gemma', 'gemma2', 'gemma3', 'gemma4', 'qwen', 'qwen2', 'qwen2.5', 'qwen3', 'mistral', 'phi', 'deepseek-r1', 'codellama'] },
 ];
 const _PROVIDER_BASE = (() => { const m = {}; _SET_PROVIDERS.forEach((p) => { m[p.value] = p.host; }); return m; })();
-const _TG_DEFAULTS = { enabled: false, clip_path: '', clip_type: 'stable_diffusion', max_length: 512, sampling_mode: 'on', temperature: 0.7, top_k: 64, top_p: 0.95, min_p: 0.05, repetition_penalty: 1.05, seed: 0, presence_penalty: 0.0, thinking: false, use_default_template: true };
+const _TG_DEFAULTS = { clip_path: '', clip_type: 'stable_diffusion', clip_root: '', max_length: 512, sampling_mode: 'on', temperature: 0.7, top_k: 64, top_p: 0.95, min_p: 0.05, repetition_penalty: 1.05, seed: 0, presence_penalty: 0.0, thinking: false, use_default_template: true };
 const _CLIP_TYPES = ['stable_diffusion', 'stable_cascade', 'sd3', 'stable_audio', 'mochi', 'ltxv', 'pixart', 'cosmos', 'lumina2', 'wan', 'hidream', 'chroma', 'ace', 'omnigen2', 'qwen_image', 'hunyuan_image', 'flux2', 'ovis', 'longcat_image', 'cogvideox', 'lens', 'pixeldit', 'ideogram4', 'boogu', 'krea2', 'joyimage', 'mage', 'minimax'];
-const _LL_DEFAULTS = { mode: 'local', model: '', mmproj: '', server: 'http://127.0.0.1:8080', n_ctx: 2048, n_gpu_layers: 0, n_batch: 512, max_tokens: 256, temperature: 0.7, top_p: 0.95, top_k: 40, repeat_penalty: 1.1, seed: 0, stop: '' };
-// ===== 调用设置下拉（图三风格：白底圆角列表 + 滚动条）=====
+// API 调用参数默认值：'' = 不发送该字段（用厂商默认）；温度 0.7 与原写死值一致。
+const _API_PARAMS_DEFAULTS = { temperature: 0.7, top_p: '', max_tokens: '', seed: '', stop: '', reasoning: 'off', webSearch: false };
+// llama 默认值：采样参数取 llama.cpp 官方默认，加载参数取 llama-cpp-python 默认（不填就用库自身的值）
+const _LL_DEFAULTS = { mode: 'local', model: '', mmproj: '', model_root: '', mmproj_root: '', server: 'http://127.0.0.1:8080', chat_format: '', n_ctx: 2048, n_gpu_layers: 0, n_batch: 512, n_ubatch: 512, n_threads: 0, n_threads_batch: 0, flash_attn: 'auto', use_mmap: false, use_mlock: false, offload_kqv: true, type_k: '', type_v: '', image_min_tokens: -1, image_max_tokens: -1, batch_max_tokens: 1024, vision_use_gpu: true, vision_add_vision_id: false, max_tokens: 256, temperature: 0.7, top_p: 0.95, top_k: 40, min_p: 0.05, typical_p: 1.0, repeat_penalty: 1.1, penalty_last_n: 64, presence_penalty: 0.0, frequency_penalty: 0.0, seed: 0, stop: '' };
+// ===== 设置下拉（图三风格：白底圆角列表 + 滚动条）=====
 function makeDropdown(items) {
   const root = el('div', 'eph-dd');
   const trigger = el('button', 'eph-dd-trigger'); trigger.type = 'button';
@@ -1910,7 +2679,7 @@ function makeDropdown(items) {
   const menu = el('div', 'eph-dd-menu');
   document.body.appendChild(menu);
   let value = '', onChange = null; const opts = (items || []).slice();
-  const lfor = (v) => { const it = opts.find((x) => (typeof x === 'string' ? x : x.value) === v); return it ? (typeof it === 'string' ? it : it.label) : v; };
+  const lfor = (v) => { const it = opts.find((x) => !(x && x.divider) && (typeof x === 'string' ? x : x.value) === v); return it ? (typeof it === 'string' ? it : it.label) : v; };
   const close = () => menu.classList.remove('active');
   const closeAll = () => document.querySelectorAll('.eph-dd-menu.active').forEach((m) => m.classList.remove('active'));
   const open = () => {
@@ -1928,6 +2697,7 @@ function makeDropdown(items) {
     menu.innerHTML = '';
     if (!opts.length) { const e = el('div', 'eph-dd-empty'); e.textContent = '（无）'; menu.appendChild(e); }
     opts.forEach((it) => {
+      if (it && it.divider) { menu.appendChild(el('div', 'eph-dd-sep')); return; }
       const v = typeof it === 'string' ? it : it.value;
       const l = typeof it === 'string' ? it : it.label;
       const b = el('button', 'eph-dd-item'); b.type = 'button'; b.textContent = l;
@@ -1972,76 +2742,253 @@ function settingsEl() {
   _settingsModal = el('div', 'eph-settings');
   const box = el('div', 'eph-settings-box');
   const hd = el('div', 'eph-settings-hd');
-  const t = el('b'); t.textContent = '调用设置';
+  const t = el('b'); t.textContent = '设置';
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
   hd.appendChild(t); hd.appendChild(close);
   const body = el('div', 'eph-settings-body');
 
   // 侧边栏：左侧导航 + 右侧面板（API设置 / TextGenerate设置 / llama设置）
-  const sideroot = el('div', 'eph-settings-sideroot');
+    const sideroot = el('div', 'eph-settings-sideroot');
   const nav = el('div', 'eph-settings-nav');
   const pane = el('div', 'eph-settings-pane');
   sideroot.appendChild(nav); sideroot.appendChild(pane);
   body.appendChild(sideroot);
 
-  // ---- 通用设置：运行期自动优化（滑块开关，显示 开启/禁用；三者互斥，最多一个生效）----
+  //  路径设置：模型扫描目录（前置于 textgen/llama 面板，供 clipboard 下拉用）。
+    const clipRootIn = el('input'); clipRootIn.placeholder = 'clip 模型扫描目录';
+  const llmModelRootIn = el('input'); llmModelRootIn.placeholder = 'LLM 文本编码模型扫描目录';
+  const mmprojRootIn = el('input'); mmprojRootIn.placeholder = 'mmproj 视觉编码模型扫描目录';
+  const mkPathRow = (label, inp) => {
+    const row = el('label'); const sp = el('span'); sp.textContent = label; row.appendChild(sp);
+    const r = el('div', 'eph-path-row'); r.appendChild(inp);
+    const b = el('button', 'eph-btn'); b.textContent = '浏览'; r.appendChild(b);
+    b.addEventListener('click', async () => {
+      try { const res = await fetchApi('/prompt_helper/pick_folder', { method: 'POST' }); const d = await res.json().catch(() => ({})); if (d.ok && d.path) { inp.value = d.path; try { inp.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {} } else if (!d.ok && d.error) window.alert('选择失败：'  + d.error); }
+      catch (e) { window.alert('选择失败：'  + (e && e.message  ?  e.message : e)); }
+    });
+    row.appendChild(r);
+    return row;
+  };
+
+  // ---- 通用设置：运行期自动优化（滑块开关，显示  开启/禁用；三者互斥，最多一个生效）----
   const grid0 = el('div', 'eph-settings-grid active');
   const _AUTO_KEYS = ['autoTextgen', 'autoApi', 'autoLlama'];
   const mkSwitch = (label, key) => {
     const l = segSwitch(label);
     const cb = l._cb;
     cb.addEventListener('change', () => {
-      // 只在「三种自动优化方式」之间互斥；clearCache 可独立开关。
-      if (cb.checked && _AUTO_KEYS.includes(key)) { _AUTO_KEYS.forEach((k) => { if (k !== key && grid0._auto[k]) { grid0._auto[k].checked = false; grid0._auto[k]._upd && grid0._auto[k]._upd(); } }); }
+      //  只在「三种自动优化方式」之间互斥；clearCache  可独立开关。
+            if (cb.checked && _AUTO_KEYS.includes(key)) { _AUTO_KEYS.forEach((k) => { if (k !== key && grid0._auto[k]) { grid0._auto[k].checked = false; grid0._auto[k]._upd && grid0._auto[k]._upd(); } }); }
     });
     grid0._auto = grid0._auto || {}; grid0._auto[key] = cb;
     grid0.appendChild(l);
     return cb;
   };
-  mkSwitch('运行期自动优化 (TextGenerate / 本地 CLIP)', 'autoTextgen');
-  mkSwitch('运行期自动优化 (API，带图像)', 'autoApi');
-  mkSwitch('运行期自动优化 (llama，带图像)', 'autoLlama');
-  mkSwitch('调用后清除模型缓存(省显存)', 'clearCache');
+  mkSwitch('运行期自动优化 (TextGenerate)', 'autoTextgen');
+  mkSwitch('运行期自动优化 (API)', 'autoApi');
+  mkSwitch('运行期自动优化 (llama)', 'autoLlama');
+  mkSwitch('调用后清除模型缓存', 'clearCache');
   pane.appendChild(grid0);
+
+  // ---- 规则设置：卡片合并分隔符号 + 提示词规范表（下拉选择 / 新建自定义 / 保存 / 删除 + 下方信息）----
+  const grid1r = el('div', 'eph-settings-grid');
+  const sepIn = el('input'); sepIn.type = 'text'; sepIn.value = '\\n'; grid1r._sep = sepIn;
+  fld2(grid1r, '卡片合并分隔符号', sepIn,
+    '「合并提示词」把各卡片正文拼成一段时，卡片之间插入这个分隔符。\n默认 \\n = 换行；写 \\n\\n = 空行；也可以填「, 」「---」这类自定义文本。\n输入框里写 \\n（换行）/ \\t（制表）会当成真正的控制符；留空 = 换行。');
+  secTitle(grid1r, '提示词规范（引用媒体 / 时间规则 / 规则提示）');
+  const rbox = el('div', 'eph-rule-box');
+  // 一行：规范下拉 + 删除规范 + 自定义名称 + 保存规范
+  const rTop = el('div', 'eph-cm-row');
+  const rDD = makeDropdown([]); rDD.el.style.flex = '1 1 auto';
+  const rDel = el('button', 'eph-btn danger'); rDel.textContent = '删除规范';
+  const rName = el('input'); rName.placeholder = '自定义规范名称';
+  const rSave = el('button', 'eph-btn'); rSave.textContent = '保存规范';
+  rTop.appendChild(rDD.el); rTop.appendChild(rDel); rTop.appendChild(rName); rTop.appendChild(rSave);
+  const rg = el('div', 'eph-rule-grid');
+  const mkIn = (ph) => { const i = el('input'); i.placeholder = ph; return i; };
+  const rf = { image: mkIn('如 <Picture {n}>'), video: mkIn('如 <Video {n}>'), audio: mkIn('如 <Audio {n}>') };
+  const rTpl = mkIn('start 开始时间 · end 结束时间 · dur 时长 · S 镜头号 · M 时刻 · text 正文');
+  setTip(rTpl, '时间规则模板：只对模板里写到的占位符生效，没写的就不用。\n{start} 开始时间（秒）\n{end} 结束时间（秒）\n{dur} 时长（秒；留空自动用 end − start）\n{S} 镜头号\n{M} 时刻（填秒数自动转 00:03.500）\n{text} 卡片正文（自动带入，不用填）\n整条留空 = 这条规范不用时间戳。');
+  const rNote = el('textarea');
+  const rField = (labelText, node) => { const l = el('label'); l.appendChild(el('span')).textContent = labelText; l.appendChild(node); rg.appendChild(l); return l; };
+  rField('引用图片', rf.image);
+  rField('引用视频', rf.video);
+  rField('引用音频', rf.audio);
+  rField('时间规则', rTpl);
+  rField('规则提示', rNote);
+  const rLangWrap = el('div', 'eph-lang-wrap');   // 中/EN（只有双语规范才显示）
+  rbox.appendChild(rTop); rbox.appendChild(rLangWrap); rbox.appendChild(rg);
+  grid1r.appendChild(rbox);
+  grid1r._state = { custom: [], overrides: {}, ruleId: 'none' };
+  const rItems = () => {
+    const arr = [{ value: '__new__', label: '＋ 新建自定义规范…' }];
+    _PROMPT_RULES.forEach((r) => { const ov = grid1r._state.overrides[r.id]; arr.push({ value: r.id, label: (ov && ov.label) || r.label }); });
+    if (grid1r._state.custom.length) { arr.push({ divider: true }); grid1r._state.custom.forEach((r) => arr.push({ value: r.id, label: r.label })); }
+    return arr;
+  };
+  const rRuleRaw = (id) => {   // 不分语言，含 alt
+    const base = _PROMPT_RULES.concat(grid1r._state.custom).find((r) => r.id === id) || null;
+    return (base && _BUILTIN_RULE_IDS.includes(base.id)) ? _applyOverride(base, grid1r._state.overrides[base.id]) : base;
+  };
+  const rRuleOf = (id) => _pickLang(rRuleRaw(id), grid1r._state.editLang);
+  const rSetEditing = (raw, isNew) => {
+    const rule = _pickLang(raw, grid1r._state.editLang) || { ref: {}, ts: {}, note: '' };
+    const ref = rule.ref || {}, ts = rule.ts || {};
+    rf.image.value = ref.image || ''; rf.video.value = ref.video || ''; rf.audio.value = ref.audio || '';
+    rTpl.value = ts.tpl || '';
+    rNote.value = rule.note || '';
+    rName.value = isNew ? '' : (rule.label || '');
+    const builtin = !!(raw && _BUILTIN_RULE_IDS.includes(raw.id));
+    const changed = builtin && !!grid1r._state.overrides[raw.id];
+    [rf.image, rf.video, rf.audio, rTpl, rNote, rName].forEach((i) => { i.readOnly = false; });
+    rSave.disabled = false; rDel.disabled = builtin ? !changed : false;
+    rDel.textContent = builtin ? '恢复默认' : '删除规范';
+    rLangWrap.innerHTML = '';
+    if (raw && raw.alt) {   // 这条规范有中英两版 → 显示切换
+      rLangWrap.appendChild(mkLangToggle(grid1r._state.editLang, (k) => { grid1r._state.editLang = k; grid1r._state.lang = k; rSetEditing(raw, false); }));
+    } else {
+      grid1r._state.editLang = 'zh';
+    }
+  };
+  grid1r._fill = (ruleId, custom, overrides, lang) => {
+    grid1r._state.custom = Array.isArray(custom) ? deepClone(custom) : [];
+    grid1r._state.overrides = (overrides && typeof overrides === 'object' && !Array.isArray(overrides)) ? deepClone(overrides) : {};
+    grid1r._state.ruleId = _normRuleId(ruleId) || 'none';
+    grid1r._state.editLang = (lang === 'en') ? 'en' : 'zh';
+    grid1r._state.lang = grid1r._state.editLang;
+    rDD.setItems(rItems()); rDD.value = grid1r._state.ruleId;
+    rSetEditing(rRuleRaw(grid1r._state.ruleId), false);
+  };
+  grid1r._reset = () => grid1r._fill('none', [], {}, 'zh');
+  grid1r._getCustom = () => grid1r._state.custom;
+  grid1r._getOverrides = () => grid1r._state.overrides;
+  grid1r._getLang = () => grid1r._state.lang;
+  grid1r._getRuleId = () => grid1r._state.ruleId;
+  grid1r._setRule = (id) => { id = _normRuleId(id); grid1r._state.ruleId = id; rDD.value = id; rSetEditing(rRuleRaw(id), false); };
+  rDD.addEventListener('change', (v) => {
+    if (v === '__new__') { rDD.value = grid1r._state.ruleId; rSetEditing(null, true); return; }
+    grid1r._state.ruleId = v; rSetEditing(rRuleRaw(v), false);
+  });
+  rSave.addEventListener('click', () => {
+    const ts = { tpl: rTpl.value.trim() };
+    if (!ts.tpl) ts.off = true;
+    const ref = {};
+    ['image', 'video', 'audio'].forEach((k) => { const v = rf[k].value.trim(); if (v) ref[k] = v; });   // 留空 = 不写规则，原样保留标记
+    const cur = rRuleRaw(grid1r._state.ruleId);
+    if (cur && _BUILTIN_RULE_IDS.includes(cur.id)) {   // 内置规范：存成覆盖，不新增自定义
+      const base = _PROMPT_RULES.find((x) => x.id === cur.id) || {};
+      const baseLang = cur.base === 'en' ? 'en' : 'zh';
+      const ov = Object.assign({}, grid1r._state.overrides[cur.id] || {});
+      if (grid1r._state.editLang === baseLang) {   // 改的是默认语言那一份
+        ov.ref = ref; ov.ts = ts; ov.note = rNote.value;
+      } else {                                     // 改的是另一种语言那一份
+        ov.alt = Object.assign({}, (ov.alt && typeof ov.alt === 'object') ? ov.alt : (cur.alt || {}), { ref, ts, note: rNote.value });
+      }
+      if (cur.alt) ov.base = baseLang;
+      const label = rName.value.trim();
+      if (label && label !== base.label) ov.label = label; else delete ov.label;
+      grid1r._state.overrides[cur.id] = ov;
+      grid1r._state.ruleId = cur.id;
+      rDD.setItems(rItems()); rDD.value = cur.id; rSetEditing(rRuleRaw(cur.id), false);
+      return;
+    }
+    const name = rName.value.trim();
+    if (!name) { window.alert('请先填写自定义规范名称。'); return; }
+    const id = (cur && !_BUILTIN_RULE_IDS.includes(cur.id)) ? cur.id : ('cust_' + Date.now().toString(36));
+    const rec = { id, label: name, ref, ts, note: rNote.value };
+    const i = grid1r._state.custom.findIndex((x) => x.id === id);
+    if (i >= 0) grid1r._state.custom[i] = rec; else grid1r._state.custom.push(rec);
+    grid1r._state.ruleId = id;
+    rDD.setItems(rItems()); rDD.value = id; rSetEditing(rec, false);
+  });
+  rDel.addEventListener('click', () => {
+    const cur = rRuleOf(grid1r._state.ruleId);
+    if (cur && _BUILTIN_RULE_IDS.includes(cur.id)) {   // 内置规范：恢复默认（删掉覆盖）
+      if (!grid1r._state.overrides[cur.id]) return;
+      delete grid1r._state.overrides[cur.id];
+      rDD.setItems(rItems()); rDD.value = cur.id; rSetEditing(rRuleOf(cur.id), false);
+      return;
+    }
+    if (!cur) return;
+    grid1r._state.custom = grid1r._state.custom.filter((x) => x.id !== cur.id);
+    grid1r._state.ruleId = 'none';
+    rDD.setItems(rItems()); rDD.value = 'none'; rSetEditing(rRuleOf('none'), false);
+  });
+  pane.appendChild(grid1r);
 
   // ---- API设置 ----
   const grid1 = el('div', 'eph-settings-grid');
-  const provDD = makeDropdown([{ value: '自定义', label: '自定义' }].concat(_SET_PROVIDERS.map((p) => ({ value: p.value, label: p.label }))));
+  const provDD = makeDropdown(_SET_PROVIDERS.map((p) => ({ value: p.value, label: p.label })));
   const modelDD = makeDropdown();
   const apiUrlIn = el('input'); apiUrlIn.placeholder = 'API 主机（默认自动填充）'; apiUrlIn.value = '';
   const apiKeyIn = el('input'); apiKeyIn.type = 'password'; apiKeyIn.placeholder = 'API Key';
-  const loginBtn = el('button', 'eph-login-btn'); loginBtn.textContent = '登录';
-  const customNameIn = el('input'); customNameIn.placeholder = '厂商名（如 My-Proxy）';
-  const customModelIn = el('input'); customModelIn.placeholder = '模型 ID（如 my-model-v1）';
-  const fld = (labelText, ...nodes) => { const l = el('label'); const sp = el('span'); sp.textContent = labelText; l.appendChild(sp); nodes.forEach((n) => l.appendChild(n)); grid1.appendChild(l); return l; };
-  const provF = fld('模型厂商', provDD.el);
-  const modelF = fld('模型选择', modelDD.el);
-  const customNameF = fld('自定义厂商名', customNameIn);
-  const customModelF = fld('自定义模型 ID', customModelIn);
-  const saveCustomBtn = el('button', 'eph-btn'); saveCustomBtn.textContent = '保存到 userdata';
-  saveCustomBtn.addEventListener('click', async () => {
-    const name = customNameIn.value.trim(); if (!name) { window.alert('请先填写厂商名'); return; }
-    try { const r = await fetchApi('/prompt_helper/custom_providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, model: customModelIn.value.trim(), apiUrl: apiUrlIn.value.trim(), apiKey: apiKeyIn.value.trim(), proxy: proxyIn.value.trim() }) }); const d = await r.json().catch(() => ({})); if (d.error) window.alert('保存失败：' + d.error); else window.alert('已保存到 userdata'); } catch (e) { window.alert('保存失败：' + (e && e.message ? e.message : e)); }
-  });
-  const saveCustomF = fld('保存到 userdata', saveCustomBtn);
-  const urlF = fld('API 主机', apiUrlIn);
-  const keyF = fld('API Key', apiKeyIn);
   const proxyIn = el('input'); proxyIn.value = ''; proxyIn.placeholder = '如 http://127.0.0.1:7890（留空=直连）';
-  const proxyF = fld('代理地址（可选）', proxyIn);
-  const loginF = fld('登录授权', loginBtn);
+  const mkFld = (host, labelText, node) => { const l = el('label'); const sp = el('span'); sp.textContent = labelText; l.appendChild(sp); l.appendChild(node); host.appendChild(l); return l; };
+  const cNameIn = el('input'); cNameIn.placeholder = '名称（如  My-Proxy）';
+  const cProviderIn = el('input'); cProviderIn.placeholder = '如 OpenAI / DeepSeek / Claude';
+  const cModelIn = el('input'); cModelIn.placeholder = '模型 ID（如  my-model-v1）';
+  const cUrlIn = el('input'); cUrlIn.placeholder = 'API 主机（默认自动填充）';
+  const cKeyIn = el('input'); cKeyIn.type = 'password'; cKeyIn.placeholder = 'API Key';
+  const cProxyIn = el('input'); cProxyIn.placeholder = '如 http://127.0.0.1:7890（留空=直连）';
+
+  // 模式切换：默认 / 自定义（滑到哪个用哪个，另一侧不用）
+  const modeWrap = el('div', 'eph-mode');
+  const mDef = el('button', 'eph-mode-opt'); mDef.type = 'button'; mDef.textContent = '默认';
+  const mCus = el('button', 'eph-mode-opt'); mCus.type = 'button'; mCus.textContent = '自定义';
+  modeWrap.appendChild(mDef); modeWrap.appendChild(mCus);
+  grid1.appendChild(modeWrap);
+
+  //  中间按钮行（右侧）：新增自定义api / 保存为自定义 / 保存api设置 / 删除自定义api
+  const btnRow = el('div', 'eph-settings-btnrow');
+  const btnNewCustom = el('button', 'eph-btn'); btnNewCustom.textContent = '新增自定义api';
+  const btnSaveAsCustom = el('button', 'eph-btn eph-btn-save'); btnSaveAsCustom.textContent = '保存为自定义'; btnSaveAsCustom.style.cssText = 'background:#1a1a2e;border-color:#1a1a2e;color:#fff;';
+  const btnSaveEdit = el('button', 'eph-btn eph-btn-save'); btnSaveEdit.textContent = '保存api设置'; btnSaveEdit.style.cssText = 'background:#1a1a2e;border-color:#1a1a2e;color:#fff;';
+  const btnDeleteCustom = el('button', 'eph-btn eph-btn-cancel'); btnDeleteCustom.textContent = '删除自定义api';
+  btnRow.appendChild(btnNewCustom); btnRow.appendChild(btnSaveAsCustom); btnRow.appendChild(btnSaveEdit); btnRow.appendChild(btnDeleteCustom);
+  grid1.appendChild(btnRow);
+
+  // 默认厂商模式
+  const defaultWrap = el('div', 'eph-settings-sub'); grid1.appendChild(defaultWrap);
+  mkFld(defaultWrap, '模型提供方', provDD.el);
+  mkFld(defaultWrap, '模型选择', modelDD.el);
+  mkFld(defaultWrap, 'API 主机', apiUrlIn);
+  mkFld(defaultWrap, 'API Key', apiKeyIn);
+  mkFld(defaultWrap, '代理地址（可选）', proxyIn);
+
+  //  自定义厂商模式：下拉选择已保存预设 + 下方显示参数
+  const customWrap = el('div', 'eph-settings-sub'); grid1.appendChild(customWrap);
+  const customDD = makeDropdown();
+  mkFld(customWrap, '自定义API', customDD.el);
+  mkFld(customWrap, '自定义名称', cNameIn);
+  mkFld(customWrap, '模型提供方', cProviderIn);
+  mkFld(customWrap, '模型 ID', cModelIn);
+  mkFld(customWrap, 'API 主机', cUrlIn);
+  mkFld(customWrap, 'API Key', cKeyIn);
+  mkFld(customWrap, '代理地址（可选）', cProxyIn);
+
+  // ---- API 调用参数（API 优化用；留空 = 不发送该字段，用厂商默认）----
+  secTitle(grid1, '调用参数');
+  const apWrap = el('div', 'eph-settings-sub');
+  const apTemp = el('input'); apTemp.type = 'number';
+  const apTopP = el('input'); apTopP.type = 'number';
+  const apMax = el('input'); apMax.type = 'number';
+  const apSeed = el('input'); apSeed.type = 'number';
+  const apStop = el('input'); apStop.type = 'text';
+  const apReason = makeDropdown([{ value: 'off', label: '关闭' }, { value: 'low', label: '低' }, { value: 'medium', label: '中' }, { value: 'high', label: '高' }]);
+  const apWeb = segSwitch('联网搜索');
+  mkFld(apWrap, '温度 temperature', apTemp);
+  mkFld(apWrap, 'Top P', apTopP);
+  mkFld(apWrap, '最大 token max_tokens', apMax);
+  mkFld(apWrap, '种子 seed', apSeed);
+  mkFld(apWrap, '停止串 stop（逗号分隔）', apStop);
+  mkFld(apWrap, '思考强度 reasoning', apReason.el);
+  const apCustom = el('textarea'); apCustom.placeholder = '{"reasoning_effort":"high"}';
+  mkFld(apWrap, '自定义参数（JSON 键值对）', apCustom);
+  apWrap.appendChild(apWeb);
+  grid1.appendChild(apWrap);
+  grid1._ap = { temperature: apTemp, top_p: apTopP, max_tokens: apMax, seed: apSeed, stop: apStop, reasoning: apReason, webSearch: apWeb._cb, custom: apCustom };
+
   const providerMeta = () => _SET_PROVIDERS.find((x) => x.value === provDD.value) || {};
-  const applyProviderUI = () => {
-    const p = providerMeta(); const isCustom = provDD.value === '自定义';
-    const oauth = !!p.oauth, keyOptional = !!p.keyOptional;
-    urlF.style.display = '';                           // 始终显示主机（可改）
-    modelF.style.display = isCustom ? 'none' : '';
-    customNameF.style.display = isCustom ? '' : 'none';
-    customModelF.style.display = isCustom ? '' : 'none';
-    saveCustomF.style.display = isCustom ? '' : 'none';
-    loginF.style.display = oauth ? '' : 'none';
-    apiKeyIn.placeholder = keyOptional ? 'API Key（Ollama 可留空）' : 'API Key';
-    loginBtn.title = '打开 ' + (p.label || '') + ' 授权页登录';
-  };
   const setModels = () => {
     const p = _SET_PROVIDERS.find((x) => x.value === provDD.value);
     const models = (p && Array.isArray(p.models)) ? p.models : [];
@@ -2051,66 +2998,179 @@ function settingsEl() {
     modelDD.setItems(ms);
     if (cur && ms.includes(cur)) modelDD.value = cur;
     else if (ms.length) modelDD.value = ms[0];
-    applyProviderUI();
+    apiKeyIn.placeholder = providerMeta().keyOptional  ?  'API Key（Ollama  可留空）' : 'API Key';
   };
-  provDD.addEventListener('change', () => { const isCustom = provDD.value === '自定义'; if (!isCustom && _PROVIDER_BASE[provDD.value]) apiUrlIn.value = _PROVIDER_BASE[provDD.value]; setModels(); });
-  loginBtn.addEventListener('click', () => { const p = providerMeta(); const url = (p && (p.loginUrl || _PROVIDER_BASE[p.value])) || ''; if (url) window.open(url, '_blank'); });
+  provDD.addEventListener('change', () => { if (_PROVIDER_BASE[provDD.value]) apiUrlIn.value = _PROVIDER_BASE[provDD.value]; modelDD.value = ''; setModels(); });
+
+  // 自定义 API 预设（与 userdata 同文件；custom=true 为自定义厂商，custom=false 为默认厂商保存的预设）
+  let _curMode = 'default';
+  const _customProviders = [];
+  let _customSelected = null;
+  const renderCustomDD = () => {
+    const items = _customProviders.map((p) => ({ value: p.name, label: p.name }));
+    customDD.setItems(items);
+    if (_customSelected && _customProviders.some((p) => p.name === _customSelected.name)) customDD.value = _customSelected.name;
+    else customDD.value = '';
+  };
+  const applyCustomFields = (p) => { cNameIn.value = p.name || ''; cNameIn.readOnly = false; cProviderIn.value = p.provider || p.name || ''; cModelIn.value = p.model || ''; cUrlIn.value = p.apiUrl || ''; cKeyIn.value = p.apiKey || ''; cProxyIn.value = p.proxy || ''; };
+  const clearCustomFields = () => { cNameIn.value = ''; cNameIn.readOnly = false; cProviderIn.value = ''; cModelIn.value = ''; cUrlIn.value = ''; cKeyIn.value = ''; cProxyIn.value = ''; };
+  const loadCustom = async () => {
+    try { const r = await fetchApi('/prompt_helper/custom_providers'); const d = await r.json().catch(() => ({})); const arr = Array.isArray(d.providers)  ?  d.providers : []; _customProviders.length = 0; arr.forEach((x) => { _customProviders.push({ name: x.name || '', provider: x.provider || x.name || '自定义', model: x.model || '', apiUrl: x.apiUrl || '', apiKey: x.apiKey || '', proxy: x.proxy || '', custom: x.custom !== false }); }); } catch (_) { _customProviders.length = 0; }
+    renderCustomDD();
+  };
+  const deleteCustom = async (name) => {
+    try { await fetchApi('/prompt_helper/custom_providers?name=' + encodeURIComponent(name), { method: 'DELETE' }); } catch (_) {}
+    if (_customSelected && _customSelected.name === name) { _customSelected = null; clearCustomFields(); }
+    await loadCustom();
+  };
+  const saveCustom = async () => {
+    // 保存api设置：更新当前选中的预设（改名则先删旧再建新），或新增（点击保存才生效）
+        const editingExisting = !!_customSelected;
+    const name = cNameIn.value.trim(); if (!name) { window.alert('请先填写自定义名称'); return; }
+    const provider = cProviderIn.value.trim() || (editingExisting ? _customSelected.provider : name);
+    const rec = { name, provider, model: cModelIn.value.trim(), apiUrl: cUrlIn.value.trim(), apiKey: cKeyIn.value.trim(), proxy: cProxyIn.value.trim(), custom: editingExisting ? !!_customSelected.custom : true };
+    if (editingExisting && name !== _customSelected.name) {
+      try { await fetchApi('/prompt_helper/custom_providers?name=' + encodeURIComponent(_customSelected.name), { method: 'DELETE' }); } catch (_) {}
+    }
+    try { const r = await fetchApi('/prompt_helper/custom_providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) }); const d = await r.json().catch(() => ({})); if (d.error) { window.alert('保存失败：'  + d.error); return; } _customSelected = rec; await loadCustom(); } catch (e) { window.alert('保存失败：'  + (e && e.message  ?  e.message : e)); }
+  };
+  const saveCurrent = async () => {
+    // 保存为自定义：把当前默认厂商所选的 provider/model/apiKey 存为新命名预设（默认  deepseek1/2…）
+    await loadCustom();
+    const provider = provDD.value; const base = (provider || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const nums = _customProviders.map((x) => /^([a-z0-9]+)(\d+)$/.exec((x.name || '').toLowerCase())).filter((m) => m && m[1] === base).map((m) => parseInt(m[2], 10));
+    const next = (nums.length ? Math.max(...nums) : 0) + 1;
+    const name = (await uiPrompt('保存为自定义 API 名称：', base + next)) || ''; if (!name.trim()) return;
+    const rec = { name: name.trim(), provider, model: modelDD.value, apiUrl: apiUrlIn.value.trim(), apiKey: apiKeyIn.value.trim(), proxy: proxyIn.value.trim(), custom: false };
+    try { const r = await fetchApi('/prompt_helper/custom_providers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(rec) }); const d = await r.json().catch(() => ({})); if (d.error) { window.alert('保存失败：'  + d.error); return; } await loadCustom(); } catch (e) { window.alert('保存失败：'  + (e && e.message  ?  e.message : e)); }
+  };
+  const setMode = (m) => {
+    _curMode = m;
+    mDef.classList.toggle('active', m === 'default');
+    mCus.classList.toggle('active', m === 'custom');
+    defaultWrap.style.display = m === 'default' ? '' : 'none';
+    customWrap.style.display = m === 'custom' ? '' : 'none';
+    btnSaveAsCustom.style.display = m === 'default' ? '' : 'none';
+    btnNewCustom.style.display = m === 'custom' ? '' : 'none';
+    btnSaveEdit.style.display = m === 'custom' ? '' : 'none';
+    btnDeleteCustom.style.display = m === 'custom' ? '' : 'none';
+    if (m === 'custom') loadCustom();
+  };
+  const persistMode = (m) => { if (!_settingsNode) return; const cfg = readConfig(_settingsNode, {}); const opt = (cfg.optimize && typeof cfg.optimize === 'object') ? cfg.optimize : {}; opt.customMode = (m === 'custom'); writeConfig(_settingsNode, { optimize: opt, cards: cfg.cards, rules: cfg.rules }); };
+  mDef.addEventListener('click', () => { if (_curMode !== 'default') { setMode('default'); persistMode('default'); } });
+  mCus.addEventListener('click', () => { if (_curMode !== 'custom') { setMode('custom'); persistMode('custom'); } });
+  btnNewCustom.addEventListener('click', () => { _customSelected = null; clearCustomFields(); renderCustomDD(); });
+  btnSaveAsCustom.addEventListener('click', saveCurrent);
+  btnSaveEdit.addEventListener('click', saveCustom);
+  btnDeleteCustom.addEventListener('click', async () => {
+    if (!_customSelected) { window.alert('请先在下拉选择要删除的预设'); return; }
+    if (!(await uiConfirm('删除自定义 API「'  + _customSelected.name + '」？'))) return;
+    await deleteCustom(_customSelected.name);
+  });
+  customDD.addEventListener('change', (v) => { const p = _customProviders.find((x) => x.name === v); if (p) { _customSelected = p; applyCustomFields(p); } });
+  setMode('default');
+
   pane.appendChild(grid1);
 
-  // ---- TextGenerate设置 ----
+  // ---- TextGenerate设置（参数与 ComfyUI 官方 TextGenerate 节点一一对应）---
   const grid2 = el('div', 'eph-settings-grid');
-  const numField = (labelText, key, def) => { const inp = el('input'); inp.type = 'number'; inp.value = String(def); grid2._tg = grid2._tg || {}; grid2._tg[key] = inp; fld2(grid2, labelText, inp); return inp; };
-  const tgDD = (labelText, key, opts) => { const dd = makeDropdown((opts || []).map(([v, l]) => ({ value: v, label: l }))); grid2._tg = grid2._tg || {}; grid2._tg[key] = dd; fld2(grid2, labelText, dd.el); return dd; };
-  const tgChk = (labelText, key, def) => { const l = segSwitch(labelText); l._cb.checked = !!def; l._cb._upd(); grid2._tg = grid2._tg || {}; grid2._tg[key] = l._cb; grid2.appendChild(l); return l._cb; };
-  // CLIP 模型选择（放最上面，点击即用 textgen，像 llama 一样自加载）
-  const clipPath = el('input'); clipPath.type = 'text'; clipPath.value = ''; clipPath.placeholder = '如 text_encoders/...safetensors';
+  const numField = (labelText, key, def, tipText) => { const inp = el('input'); inp.type = 'number'; inp.value = String(def); grid2._tg = grid2._tg || {}; grid2._tg[key] = inp; fld2(grid2, labelText, inp, tipText); return inp; };
+  const tgDD = (labelText, key, opts, tipText) => { const dd = makeDropdown((opts || []).map(([v, l]) => ({ value: v, label: l }))); grid2._tg = grid2._tg || {}; grid2._tg[key] = dd; fld2(grid2, labelText, dd.el, tipText); return dd; };
+  const tgChk = (labelText, key, def, tipText) => { const l = segSwitch(labelText); l._cb.checked = !!def; l._cb._upd(); grid2._tg = grid2._tg || {}; grid2._tg[key] = l._cb; setTip(l, tipText); grid2.appendChild(l); return l._cb; };
+  // CLIP 模型选择（放最上面，点击即用 textgen，像 llama  一样自加载）
+    const clipPath = el('input'); clipPath.type = 'text'; clipPath.value = ''; clipPath.placeholder = '如 text_encoders/...safetensors';
   const clipTypeDD = makeDropdown(_CLIP_TYPES.map((t) => ({ value: t, label: t })));
-  grid2._tg = grid2._tg || {}; grid2._tg.clip_path = clipPath; grid2._tg.clip_type = clipTypeDD;
-  fld2(grid2, 'CLIP 模型路径', attachFileMenu(clipPath, '/prompt_helper/clip_models'));
-  fld2(grid2, 'CLIP 类型', clipTypeDD.el);
-  numField('最大长度', 'max_length', _TG_DEFAULTS.max_length);
-  tgDD('采样模式', 'sampling_mode', [['on', 'on'], ['off', 'off']]);
-  numField('温度', 'temperature', _TG_DEFAULTS.temperature);
-  numField('Top K', 'top_k', _TG_DEFAULTS.top_k);
-  numField('Top P', 'top_p', _TG_DEFAULTS.top_p);
-  numField('最小概率', 'min_p', _TG_DEFAULTS.min_p);
-  numField('重复惩罚', 'repetition_penalty', _TG_DEFAULTS.repetition_penalty);
-  numField('种子', 'seed', _TG_DEFAULTS.seed);
-  numField('presence_penalty', 'presence_penalty', _TG_DEFAULTS.presence_penalty);
-  tgChk('思考模式', 'thinking', _TG_DEFAULTS.thinking);
-  tgChk('use_default_template', 'use_default_template', _TG_DEFAULTS.use_default_template);
+  grid2._tg = grid2._tg || {}; grid2._tg.clip_path = clipPath; grid2._tg.clip_type = clipTypeDD; grid2._tg.clip_root = clipRootIn;
+  secTitle(grid2, '模型');
+  fld2(grid2, 'clip 模型', attachFileMenu(clipPath, '/prompt_helper/clip_models', () => clipRootIn.value.trim()),
+    'TextGenerate 用的文本编码器（有 generate 能力的 text-gen CLIP：Gemma / Qwen3-VL / flux2 等）。\n点输入框可选「路径设置」目录里扫到的文件；普通 stable_diffusion CLIP 不支持文本生成。');
+  fld2(grid2, 'CLIP 类型', clipTypeDD.el, '与 clip 模型匹配的 ComfyUI CLIPType（如 qwen_image / flux2）。\n选错会加载失败或输出乱码。');
+  secTitle(grid2, '采样');
+  numField('最大长度', 'max_length', _TG_DEFAULTS.max_length, '最多生成多少 token（含 prompt 之外的新 token）。\n512 ≈ 300~400 汉字；调大更慢更吃显存。');
+  tgDD('采样模式', 'sampling_mode', [['on', 'on'], ['off', 'off']], 'on = 按下面的温度 / Top K / Top P 等随机采样；off = 贪心解码（每次结果一致，稳但死板）。');
+  numField('温度', 'temperature', _TG_DEFAULTS.temperature, '随机性。低（0.2~0.5）稳定保守，高（0.9~1.2）发散有创意；官方默认 0.7。');
+  numField('Top K', 'top_k', _TG_DEFAULTS.top_k, '只从概率最高的 K 个候选里采样，0 = 关闭该过滤；官方默认 64。');
+  numField('Top P', 'top_p', _TG_DEFAULTS.top_p, '核采样：累计概率到 P 为止的候选才参与，越小越保守；官方默认 0.95。');
+  numField('最小概率', 'min_p', _TG_DEFAULTS.min_p, '候选概率必须 ≥ 最高概率 × min_p 才保留（剪掉明显不可能的 token）；官方默认 0.05。');
+  numField('重复惩罚', 'repetition_penalty', _TG_DEFAULTS.repetition_penalty, '>1 抑制重复用词（1.05 轻微、1.2 明显），1.0 = 不惩罚；太高句子会变生硬。');
+  numField('种子', 'seed', _TG_DEFAULTS.seed, '0 或留空 = 每次随机；填固定值 = 每次生成同样的结果（便于复现）。');
+  numField('存在惩罚 presence_penalty', 'presence_penalty', _TG_DEFAULTS.presence_penalty, '存在惩罚：某个词只要出现过就压低它的概率，鼓励说新内容；0 = 关闭。');
+  secTitle(grid2, '选项');
+  tgChk('思考模式', 'thinking', _TG_DEFAULTS.thinking, '让支持思考的模型（如 Qwen3-VL）先输出思考过程再给结果。\n模型不支持时会多输出无关内容。');
+  tgChk('使用内置模板 use_default_template', 'use_default_template', _TG_DEFAULTS.use_default_template, '用模型内置的 system / 对话模板包裹提示词；关掉则按纯文本直接喂给模型。');
   pane.appendChild(grid2);
 
   // ---- llama设置 ----
   const grid3 = el('div', 'eph-settings-grid');
-  const llField = (labelText, key, def) => { const inp = el('input'); inp.type = 'number'; inp.value = String(def); if (key === 'model' || key === 'mmproj' || key === 'server' || key === 'stop') { inp.type = 'text'; } grid3._ll = grid3._ll || {}; grid3._ll[key] = inp; fld2(grid3, labelText, inp); return inp; };
+  const llField = (labelText, key, def, tipText) => { const inp = el('input'); inp.type = 'number'; inp.value = String(def); if (key === 'model' || key === 'mmproj' || key === 'server' || key === 'stop' || key === 'chat_format') { inp.type = 'text'; } grid3._ll = grid3._ll || {}; grid3._ll[key] = inp; fld2(grid3, labelText, inp, tipText); return inp; };
+  const llDD = (labelText, key, opts, tipText) => { const dd = makeDropdown((opts || []).map(([v, l]) => ({ value: v, label: l }))); grid3._ll = grid3._ll || {}; grid3._ll[key] = dd; fld2(grid3, labelText, dd.el, tipText); return dd; };
+  const llChk = (labelText, key, def, tipText) => { const l = segSwitch(labelText); l._cb.checked = !!def; l._cb._upd(); grid3._ll = grid3._ll || {}; grid3._ll[key] = l._cb; setTip(l, tipText); grid3.appendChild(l); return l._cb; };
+  secTitle(grid3, '模型');
   const llModeDD = makeDropdown([{ value: 'local', label: '进程内 llama-cpp-python' }, { value: 'server', label: 'llama.cpp 服务器(HTTP)' }]);
-  grid3._ll = grid3._ll || {}; grid3._ll.mode = llModeDD; fld2(grid3, '调用方式', llModeDD.el);
+  grid3._ll = grid3._ll || {}; grid3._ll.mode = llModeDD; fld2(grid3, '调用方式', llModeDD.el,
+    '进程内 = 本进程直接用 llama-cpp-python 加载 GGUF（免起服务，占本机内存/显存）；\n服务器(HTTP) = 调已启动的 llama.cpp server（下面的加载参数不生效，采样参数仍会发给服务器）。');
+  grid3._ll.model_root = llmModelRootIn; grid3._ll.mmproj_root = mmprojRootIn;
   const llModel = el('input'); llModel.type = 'text'; llModel.value = String(_LL_DEFAULTS.model); llModel.placeholder = '可填相对或绝对路径';
   grid3._ll.model = llModel;
-  fld2(grid3, 'GGUF 模型路径', attachFileMenu(llModel, '/prompt_helper/llama_models'));
+  fld2(grid3, 'LLM 文本编码模型', attachFileMenu(llModel, '/prompt_helper/llama_models', () => llmModelRootIn.value.trim()),
+    '主模型 GGUF（文本推理）。填文件名即可，按「路径设置」的目录递归查找；也可填绝对路径。');
   const llMmproj = el('input'); llMmproj.type = 'text'; llMmproj.value = String(_LL_DEFAULTS.mmproj); llMmproj.placeholder = '如 mmproj-Qwen3-VL-8B-Instruct-Q8_0.gguf';
   grid3._ll.mmproj = llMmproj;
-  fld2(grid3, 'mmproj(看图)', attachFileMenu(llMmproj, '/prompt_helper/llama_models'));
-  const llServer = llField('服务器地址', 'server', _LL_DEFAULTS.server); llServer.placeholder = '如 http://127.0.0.1:8080';
-  llField('上下文长度 n_ctx', 'n_ctx', _LL_DEFAULTS.n_ctx);
-  llField('GPU 层数 n_gpu_layers', 'n_gpu_layers', _LL_DEFAULTS.n_gpu_layers);
-  llField('batch n_batch', 'n_batch', _LL_DEFAULTS.n_batch);
-  llField('最大 token', 'max_tokens', _LL_DEFAULTS.max_tokens);
-  llField('温度', 'temperature', _LL_DEFAULTS.temperature);
-  llField('Top P', 'top_p', _LL_DEFAULTS.top_p);
-  llField('Top K', 'top_k', _LL_DEFAULTS.top_k);
-  llField('重复惩罚', 'repeat_penalty', _LL_DEFAULTS.repeat_penalty);
-  llField('种子', 'seed', _LL_DEFAULTS.seed);
-  const llStop = llField('stop', 'stop', _LL_DEFAULTS.stop); llStop.placeholder = '多个用逗号分隔';
+  fld2(grid3, 'mmproj 视觉编码模型', attachFileMenu(llMmproj, '/prompt_helper/llama_models', () => mmprojRootIn.value.trim()),
+    '多模态投影模型（mmproj GGUF）。要与主模型同源同系列，填了才能看图；\n纯文本模型留空，此时接图像会报「does not support image inputs」。');
+  const llServer = llField('服务器地址', 'server', _LL_DEFAULTS.server, '仅「llama.cpp 服务器(HTTP)」模式使用，如 http://127.0.0.1:8080。\n服务器需要自己先启动（llama-server -m 模型.gguf --mmproj ...）。'); llServer.placeholder = '如 http://127.0.0.1:8080';
+  llField('聊天模板 chat_format', 'chat_format', _LL_DEFAULTS.chat_format, '进程内加载时使用的对话模板名（如 qwen2-vl / llama-3 / chatml）。\n留空 = 用 GGUF 里自带的 tokenizer.chat_template，一般留空即可。');
+  secTitle(grid3, '加载（仅进程内模式生效）');
+  llField('上下文长度 n_ctx', 'n_ctx', _LL_DEFAULTS.n_ctx, '上下文窗口：prompt + 生成的总 token 上限。\n越大越吃内存/显存；看图会额外占用视觉 token（Qwen3-VL 一张图约几百到上千）。');
+  llField('GPU 层数 n_gpu_layers', 'n_gpu_layers', _LL_DEFAULTS.n_gpu_layers, '卸载到 GPU 的层数：0 = 纯 CPU（默认，最省显存但慢）；\n填 99 或 ≥ 模型层数 ≈ 全部卸载（4B Q4 约需 3~4GB 显存）。');
+  llField('batch n_batch', 'n_batch', _LL_DEFAULTS.n_batch, '逻辑批大小：一次提交处理的 token 数，影响 prompt 处理速度。\n调小更省显存。');
+  llField('微批 n_ubatch', 'n_ubatch', _LL_DEFAULTS.n_ubatch, '物理微批大小，必须 ≤ n_batch。\n显存吃紧或长 prompt 报显存不足时调小（如 128 / 256）。');
+  llField('CPU 线程 n_threads', 'n_threads', _LL_DEFAULTS.n_threads, 'CPU 生成/解码线程数。\n0 或 -1 = 自动（约物理核数一半），留默认即可。');
+  llField('CPU 批线程 n_threads_batch', 'n_threads_batch', _LL_DEFAULTS.n_threads_batch, 'CPU 处理 prompt（预填/看图）用的线程数，影响首字延迟。\n0 或 -1 = 自动（约物理核数），CPU 推理时可设成与物理核数相同。');
+  llDD('Flash Attention', 'flash_attn', [['auto', 'auto（跟随运行时）'], ['on', 'on（开启）'], ['off', 'off（关闭）']],
+    '注意力加速：on 更省显存也更快（后端支持时）；off 关闭；auto 交给运行时判断。\n切换后需要重新加载模型才生效；用 q4_0/q8_0 的 V 缓存量化时必须开。');
+  llDD('K 缓存类型 type_k', 'type_k', [['', '默认（f16，不量化）'], ['q8_0', 'q8_0（约省一半 K 显存）'], ['q4_0', 'q4_0（约省 3/4，精度略降）']],
+    'KV 缓存里 K 的数据类型：长上下文/大 n_ctx 时量化能明显省显存。\n默认 f16 不量化；改完需重新加载模型。');
+  llDD('V 缓存类型 type_v', 'type_v', [['', '默认（f16，不量化）'], ['q8_0', 'q8_0（约省一半 V 显存）'], ['q4_0', 'q4_0（约省 3/4，精度略降）']],
+    'KV 缓存里 V 的数据类型。非 f16 时 llama.cpp 要求开启 Flash Attention（本页 Flash Attention 设为 on），否则加载会报错。');
+  llChk('内存映射 use_mmap', 'use_mmap', _LL_DEFAULTS.use_mmap, '开 = 按需从磁盘映射模型文件（启动快、峰值内存低）；\n关 = 一次性读入内存（默认）。切换后重新加载模型才生效。');
+  llChk('锁定内存 use_mlock', 'use_mlock', _LL_DEFAULTS.use_mlock, '把模型锁在物理内存里，防止被换出到页面文件（避免卡顿）。\n物理内存不够时开启会更慢甚至失败。');
+  llChk('KQV 卸载 offload_kqv', 'offload_kqv', _LL_DEFAULTS.offload_kqv, '把 K/Q/V 注意力计算也放到 GPU（默认开，显存换速度）。\n关掉可省显存但明显更慢。');
+  secTitle(grid3, '视觉（mmproj，需填视觉编码模型）');
+  llField('图片最大 token image_max_tokens', 'image_max_tokens', _LL_DEFAULTS.image_max_tokens, '视觉（mmproj）看图时，一张图最多切成多少个 token —— 即“图片 token 上限”。\n默认 -1 = 不限制（用 mmproj 自带配置）；调小（如 512/256）省显存、看图更快，但细节更粗。\n注意：Qwen-VL 系列低于 1024 时 llama.cpp 会提示「require at minimum 1024 image tokens」，细粒度定位类任务会变差。\n需填了 mmproj 才生效。');
+  llField('图片最小 token image_min_tokens', 'image_min_tokens', _LL_DEFAULTS.image_min_tokens, '视觉（mmproj）看图时一张图至少保留多少个 token。\n默认 -1 = 不限制；必须 ≤ 图片最大 token，否则加载时报错。');
+  llField('视觉批上限 batch_max_tokens', 'batch_max_tokens', _LL_DEFAULTS.batch_max_tokens, '视觉编码器一次最多处理的 token 数（mmproj 批上限，默认 1024）。\n大图报显存不足时调小（如 512 / 256）。');
+  llChk('视觉编码用 GPU vision_use_gpu', 'vision_use_gpu', _LL_DEFAULTS.vision_use_gpu, 'mmproj 视觉编码器是否跑在 GPU 上（默认开）。\n关掉改成 CPU 编码：省显存但看图明显更慢；即使 n_gpu_layers=0 也可以开着它。');
+  llChk('标注图片序号 add_vision_id', 'vision_add_vision_id', _LL_DEFAULTS.vision_add_vision_id, '给每张图在提示里加「Picture 1:」这类序号前缀（Qwen-VL 系列模板支持的变量）。\n多图区分时有用；只喂一张图时影响很小。');
+  secTitle(grid3, '采样（两种模式都生效）');
+  llField('最大 token', 'max_tokens', _LL_DEFAULTS.max_tokens, '最多生成多少 token（输出长度上限）。');
+  llField('温度', 'temperature', _LL_DEFAULTS.temperature, '随机性：低（0.2~0.5）稳定，高（0.9+）发散；llama.cpp 官方默认 0.8。');
+  llField('Top P', 'top_p', _LL_DEFAULTS.top_p, '核采样，官方默认 0.95，越小越保守。');
+  llField('Top K', 'top_k', _LL_DEFAULTS.top_k, '只从概率最高的 K 个候选里采样，0 = 关闭，官方默认 40。');
+  llField('最小概率 min_p', 'min_p', _LL_DEFAULTS.min_p, '候选概率 ≥ 最高概率 × min_p 才保留，官方默认 0.05。');
+  llField('典型采样 typical_p', 'typical_p', _LL_DEFAULTS.typical_p, 'locally typical sampling：1.0 = 关闭（默认），0.9 左右可让用词更“典型”。');
+  llField('重复惩罚 repeat_penalty', 'repeat_penalty', _LL_DEFAULTS.repeat_penalty, '>1 抑制重复，官方默认 1.1；1.0 = 关闭。');
+  llField('惩罚回看 penalty_last_n', 'penalty_last_n', _LL_DEFAULTS.penalty_last_n, '重复/存在/频率惩罚回看多少个 token：64 常用；\n0 = 关闭惩罚，-1 = 整个上下文。');
+  llField('存在惩罚 presence_penalty', 'presence_penalty', _LL_DEFAULTS.presence_penalty, '词一旦出现过就持续压低它的概率（鼓励新话题）；0 = 关闭。');
+  llField('频率惩罚 frequency_penalty', 'frequency_penalty', _LL_DEFAULTS.frequency_penalty, '按出现次数成比例压低概率（比存在惩罚更平缓）；0 = 关闭。');
+  llField('种子', 'seed', _LL_DEFAULTS.seed, '0 或 -1 = 每次随机；其他值 = 固定结果（便于复现）。');
+  const llStop = llField('stop', 'stop', _LL_DEFAULTS.stop, '停止词：生成到这些字符串就停。多个用英文逗号分隔，留空 = 不设置。'); llStop.placeholder = '多个用逗号分隔';
   pane.appendChild(grid3);
 
-  const navItems = [['通用设置', grid0], ['API设置', grid1], ['TextGenerate设置', grid2], ['llama设置', grid3]];
+  // ----  路径设置 ----
+  const grid4 = el('div', 'eph-settings-grid');
+  grid4._paths = { clipRoot: clipRootIn, llmModelRoot: llmModelRootIn, mmprojRoot: mmprojRootIn };
+  grid4.appendChild(mkPathRow('clip 模型路径', clipRootIn));
+  grid4.appendChild(mkPathRow('LLM 文本编码模型路径', llmModelRootIn));
+  grid4.appendChild(mkPathRow('mmproj 视觉编码模型路径', mmprojRootIn));
+  pane.appendChild(grid4);
+
+  const navItems = [['general', '调用设置', grid0], ['rules', '规则设置', grid1r], ['api', 'API设置', grid1], ['textgen', 'TextGenerate设置', grid2], ['llama', 'llama设置', grid3], ['paths', '路径设置', grid4]];
   const showGrid = (g) => { pane.querySelectorAll('.eph-settings-grid').forEach((x) => { x.style.display = 'none'; }); g.style.display = 'grid'; };
-  navItems.forEach(([label, g], i) => {
+  const navBtns = navItems.map(([key, label, g], i) => {
     const b = el('button', 'eph-settings-nav-btn'); b.textContent = label; if (i === 0) b.classList.add('active');
-    b.addEventListener('click', () => { nav.querySelectorAll('.eph-settings-nav-btn').forEach((x) => x.classList.remove('active')); b.classList.add('active'); showGrid(g); });
-    nav.appendChild(b);
+    b.addEventListener('click', () => { navBtns.forEach((x) => x.classList.remove('active')); b.classList.add('active'); showGrid(g); });
+    nav.appendChild(b); return b;
   });
   showGrid(grid0);
 
@@ -2126,38 +3186,80 @@ function settingsEl() {
   cancelBtn.addEventListener('click', () => _settingsModal.classList.remove('active'));
   saveBtn.addEventListener('click', saveSettings);
   resetBtn.addEventListener('click', () => { resetSettings(); });
-  _settingsModal._box = box; _settingsModal._provSel = provDD; _settingsModal._modelIn = modelDD; _settingsModal._apiUrlIn = apiUrlIn; _settingsModal._apiKeyIn = apiKeyIn; _settingsModal._proxyIn = proxyIn; _settingsModal._customNameIn = customNameIn; _settingsModal._customModelIn = customModelIn; _settingsModal._setModels = setModels;
-  _settingsModal._grid2 = grid2; _settingsModal._grid3 = grid3; _settingsModal._grid0 = grid0;
+  _settingsModal._box = box; _settingsModal._provSel = provDD; _settingsModal._modelIn = modelDD; _settingsModal._apiUrlIn = apiUrlIn; _settingsModal._apiKeyIn = apiKeyIn; _settingsModal._proxyIn = proxyIn; _settingsModal._cNameIn = cNameIn; _settingsModal._cProviderIn = cProviderIn; _settingsModal._cModelIn = cModelIn; _settingsModal._cUrlIn = cUrlIn; _settingsModal._cKeyIn = cKeyIn; _settingsModal._cProxyIn = cProxyIn; _settingsModal._setModels = setModels; _settingsModal._defaultWrap = defaultWrap; _settingsModal._customWrap = customWrap; _settingsModal._customDD = customDD; _settingsModal._setMode = setMode; _settingsModal._getMode = () => _curMode; _settingsModal._loadCustom = loadCustom; _settingsModal._renderCustomDD = renderCustomDD; _settingsModal._applyCustomFields = applyCustomFields; _settingsModal._clearCustomFields = clearCustomFields; _settingsModal._setCustomSelected = (p) => { _customSelected = p; }; _settingsModal._getCustomSelected = () => _customSelected; _settingsModal._getCustomProviders = () => _customProviders; _settingsModal._saveAsCustomBtn = btnSaveAsCustom; _settingsModal._saveEditBtn = btnSaveEdit; _settingsModal._deleteCustomBtn = btnDeleteCustom; _settingsModal._newCustomBtn = btnNewCustom;
+  _settingsModal._grid2 = grid2; _settingsModal._grid3 = grid3; _settingsModal._grid0 = grid0; _settingsModal._grid4 = grid4; _settingsModal._grid1r = grid1r; _settingsModal._grid1 = grid1;
   return _settingsModal;
 }
-function fld2(grid, labelText, input) { const l = el('label'); const sp = el('span'); sp.textContent = labelText; l.appendChild(sp); l.appendChild(input); grid.appendChild(l); return l; }
-function openSettings(node) {
+function fld2(grid, labelText, input, tipText) { const l = el('label'); const sp = el('span'); sp.textContent = labelText; l.appendChild(sp); l.appendChild(input); grid.appendChild(l); return setTip(l, tipText); }
+function secTitle(grid, text) { const d = el('div', 'eph-set-sec'); d.textContent = text; grid.appendChild(d); }
+async function openSettings(node) {
   if (!node) return;
   _settingsNode = node;
   const o = optimizeFor(node);
   const m = settingsEl();
-  // 通用设置（第 1 排）
-  ['autoTextgen', 'autoApi', 'autoLlama', 'clearCache'].forEach((k) => { const cb = m._grid0 && m._grid0._auto && m._grid0._auto[k]; if (cb) cb.checked = !!o[k]; });
-  m._apiKeyIn.value = o.apiKey || '';
-  m._proxyIn.value = o.proxy || '';
-  // 若是自定义厂商（不在预设列表）→ 切「自定义」并填入名称/模型；否则按已知厂商
-  const known = _SET_PROVIDERS.some((p) => p.value === (o.provider || 'OpenAI')) || (o.provider === '自定义');
-  if (!known) {
-    m._provSel.value = '自定义';
-    m._customNameIn.value = (o.provider || '').trim();
-    m._customModelIn.value = (o.model || '').trim();
-  } else {
-    m._provSel.value = o.provider || 'OpenAI';
-    m._modelIn.value = o.model || '';
-    m._customNameIn.value = ''; m._customModelIn.value = '';
+  // 通用设置（第  1 排）
+  ['autoTextgen', 'autoApi', 'autoLlama', 'clearCache'].forEach((k) => { const cb = m._grid0 && m._grid0._auto && m._grid0._auto[k]; if (cb) { cb.checked = !!o[k]; cb._upd && cb._upd(); } });
+  // 规则设置：卡片合并分隔符 + 提示词规范表
+  const rules = phRulesModel(node);
+  const gr = m._grid1r;
+  gr._sep.value = (rules.mergeSep === undefined || rules.mergeSep === null || rules.mergeSep === '') ? '\\n' : String(rules.mergeSep);
+  gr._fill(rules.ruleId, rules.custom, rules.overrides, rules.lang);
+  m._apiUrlIn.value = o.apiUrl || ''; m._apiKeyIn.value = o.apiKey || ''; m._proxyIn.value = o.proxy || '';
+  if (m._grid1 && m._grid1._ap) {
+    const g = m._grid1._ap;
+    const ap = Object.assign({}, _API_PARAMS_DEFAULTS, (o.apiParams && typeof o.apiParams === 'object') ? o.apiParams : {});
+    const fillAp = (inp, v) => { inp.value = (v === '' || v === null || v === undefined) ? '' : String(v); };
+    fillAp(g.temperature, ap.temperature); fillAp(g.top_p, ap.top_p); fillAp(g.max_tokens, ap.max_tokens); fillAp(g.seed, ap.seed);
+    g.stop.value = ap.stop || '';
+    g.reasoning.value = ap.reasoning || 'off';
+    g.custom.value = (ap.custom && typeof ap.custom === 'object' && Object.keys(ap.custom).length) ? JSON.stringify(ap.custom, null, 2) : '';
+    g.webSearch.checked = !!ap.webSearch; g.webSearch._upd && g.webSearch._upd();
   }
-  m._setModels();
+  // 模式：默认/自定义（滑到哪个用哪个，滑块状态存节点 config 不随重开/重启变）
+  const customMode = !!o.customMode;
+  m._setMode(customMode ? 'custom' : 'default');
+  if (customMode) {
+    await m._loadCustom();
+    const presets = m._getCustomProviders();
+    const want = o.customPreset || o.provider;
+    let sel = null;
+    if (presets.length) sel = presets.find((p) => p.name === want) || presets.find((p) => p.provider === o.provider) || presets[0];
+    m._setCustomSelected(sel);
+    if (sel) { m._applyCustomFields(sel); m._customDD.value = sel.name; } else { m._clearCustomFields(); m._customDD.value = ''; }
+  } else {
+    m._provSel.value = _SET_PROVIDERS.some((p) => p.value === (o.provider || '')) ? o.provider : 'OpenAI';
+    m._modelIn.value = o.model || '';
+    m._setModels();
+  }
   // 第 2 排 TextGenerate
   const tg = Object.assign({}, _TG_DEFAULTS, o.textgen || {});
-  Object.keys(_TG_DEFAULTS).forEach((k) => { const inp = m._grid2._tg && m._grid2._tg[k]; if (!inp) return; if (inp.type === 'checkbox') inp.checked = !!tg[k]; else inp.value = String(tg[k]); });
+  Object.keys(_TG_DEFAULTS).forEach((k) => { const inp = m._grid2._tg && m._grid2._tg[k]; if (!inp) return; if (inp.type === 'checkbox') { inp.checked = !!tg[k]; inp._upd && inp._upd(); } else inp.value = String(tg[k]); });
   // 第 3 排 llama
   const ll = Object.assign({}, _LL_DEFAULTS, o.llama || {});
-  Object.keys(_LL_DEFAULTS).forEach((k) => { const inp = m._grid3._ll && m._grid3._ll[k]; if (!inp) return; if (inp.type === 'checkbox') inp.checked = !!ll[k]; else inp.value = String(ll[k]); });
+  Object.keys(_LL_DEFAULTS).forEach((k) => { const inp = m._grid3._ll && m._grid3._ll[k]; if (!inp) return; if (inp.type === 'checkbox') { inp.checked = !!ll[k]; inp._upd && inp._upd(); } else inp.value = String(ll[k]); });
+  //  路径设置：未设自定义路径时，优先用全局保存的扫描路径（删除节点/重启不丢），否则显示默认扫描根
+    try {
+    const [rg, rr] = await Promise.all([fetchApi('/prompt_helper/scan_paths'), fetchApi('/prompt_helper/scan_roots')]);
+    const gd = await rg.json().catch(() => ({}));
+    const rd = await rr.json().catch(() => ({}));
+    const paths = m._grid4 && m._grid4._paths;
+    const fill = (inp, defArr, gkey) => {
+      if (!inp || inp.value.trim()) return;
+      const g = (gd[gkey] || '').trim();
+      if (g) inp.value = g;
+      else if (Array.isArray(defArr) && defArr.length) inp.value = defArr[0];
+    };
+    if (paths) { fill(paths.clipRoot, rd.clip, 'clip_root'); fill(paths.llmModelRoot, rd.model, 'model_root'); fill(paths.mmprojRoot, rd.mmproj, 'mmproj_root'); }
+  } catch (_) {}
+  // 模型选择：未设时，用全局保存的 clip/LLM/mmproj 模型（删除节点/重启不丢）
+    try {
+    const rp = await fetchApi('/prompt_helper/model_paths');
+    const pd = await rp.json().catch(() => ({}));
+    const fillM = (inp, key) => { const v = (pd[key] || '').trim(); if (inp && !inp.value.trim() && v) inp.value = v; };
+    fillM(m._grid2._tg && m._grid2._tg.clip_path, 'clip_path');
+    fillM(m._grid3._ll && m._grid3._ll.model, 'model');
+    fillM(m._grid3._ll && m._grid3._ll.mmproj, 'mmproj');
+  } catch (_) {}
   m.classList.add('active');
 }
 function saveSettings() {
@@ -2165,57 +3267,283 @@ function saveSettings() {
   const m = _settingsModal; if (!m) return;
   const st = stateFor(_settingsNode);
   const prev = st.optimize || {};
+  const customMode = (m._getMode && m._getMode()) === 'custom';
+  const sel = (customMode && m._getCustomSelected) ? m._getCustomSelected() : null;
   const tg = {};
   Object.keys(_TG_DEFAULTS).forEach((k) => { const inp = m._grid2._tg && m._grid2._tg[k]; if (!inp) return; tg[k] = inp.type === 'checkbox' ? inp.checked : (inp.type === 'number' ? parseFloat(inp.value) : inp.value); });
   const ll = {};
   Object.keys(_LL_DEFAULTS).forEach((k) => { const inp = m._grid3._ll && m._grid3._ll[k]; if (!inp) return; ll[k] = inp.type === 'checkbox' ? inp.checked : (inp.type === 'number' ? (inp.value === '' ? _LL_DEFAULTS[k] : parseFloat(inp.value)) : inp.value); });
+  const provider = customMode  ?  (m._cProviderIn.value.trim() || (sel  ?  (sel.provider || sel.name) : '自定义')) : m._provSel.value;
+  const model = customMode ? m._cModelIn.value.trim() : m._modelIn.value.trim();
+  const apiUrl = customMode ? m._cUrlIn.value.trim() : m._apiUrlIn.value.trim();
+  const apiKey = customMode ? m._cKeyIn.value.trim() : m._apiKeyIn.value.trim();
+  const proxy = customMode ? m._cProxyIn.value.trim() : m._proxyIn.value.trim();
+  const g1ap = m._grid1 && m._grid1._ap;
+  const apNum = (inp) => { const v = inp ? String(inp.value).trim() : ''; if (v === '') return ''; const n = parseFloat(v); return isFinite(n) ? n : ''; };
+  let apCustom = {};
+  if (g1ap) {
+    const raw = String(g1ap.custom.value || '').trim();
+    if (raw) {
+      try {
+        apCustom = JSON.parse(raw);
+        if (!apCustom || typeof apCustom !== 'object' || Array.isArray(apCustom)) throw new Error('必须是 JSON 对象');
+      } catch (err) { window.alert('「自定义参数」不是合法的 JSON 对象：' + (err && err.message ? err.message : err)); return; }
+    }
+  }
+  const apiParams = g1ap ? {
+    temperature: apNum(g1ap.temperature),
+    top_p: apNum(g1ap.top_p),
+    max_tokens: apNum(g1ap.max_tokens),
+    seed: apNum(g1ap.seed),
+    stop: g1ap.stop.value.trim(),
+    reasoning: g1ap.reasoning.value || 'off',
+    webSearch: !!(g1ap.webSearch && g1ap.webSearch.checked),
+    custom: apCustom,
+  } : (prev.apiParams || {});
   st.optimize = Object.assign({}, prev, {
     autoTextgen: !!(m._grid0._auto && m._grid0._auto.autoTextgen && m._grid0._auto.autoTextgen.checked),
     autoApi: !!(m._grid0._auto && m._grid0._auto.autoApi && m._grid0._auto.autoApi.checked),
     autoLlama: !!(m._grid0._auto && m._grid0._auto.autoLlama && m._grid0._auto.autoLlama.checked),
     clearCache: !!(m._grid0._auto && m._grid0._auto.clearCache && m._grid0._auto.clearCache.checked),
-    provider: (m._provSel.value === '自定义') ? (m._customNameIn.value.trim() || '自定义') : m._provSel.value,
-    model: (m._provSel.value === '自定义') ? (m._customModelIn.value.trim()) : m._modelIn.value.trim(),
-    apiUrl: m._apiUrlIn.value.trim(),
-    apiKey: m._apiKeyIn.value.trim(),
-    proxy: m._proxyIn.value.trim(),
+    customMode,
+    customPreset: customMode ? (sel ? sel.name : '') : '',
+    provider,
+    model,
+    apiUrl,
+    apiKey,
+    proxy,
     textgen: tg,
     llama: ll,
+    apiParams,
   });
+  st.rules = {
+    mergeSep: m._grid1r._sep.value,
+    ruleId: m._grid1r._getRuleId(),
+    custom: m._grid1r._getCustom(),
+    overrides: m._grid1r._getOverrides(),
+    lang: m._grid1r._getLang(),
+  };
   syncToConfig(_settingsNode);
+  syncRuleUI(_settingsNode, st.rules.ruleId);   // 卡片弹窗 / 总体编辑的规范下拉跟着一致
+  //  扫描路径  + 选中的模型 持久化到全局 userdata（删除节点/重启不丢失）
+  try {
+    const clip_root = (m._grid2._tg && m._grid2._tg.clip_root && m._grid2._tg.clip_root.value) || '';
+    const model_root = (m._grid3._ll && m._grid3._ll.model_root && m._grid3._ll.model_root.value) || '';
+    const mmproj_root = (m._grid3._ll && m._grid3._ll.mmproj_root && m._grid3._ll.mmproj_root.value) || '';
+    fetchApi('/prompt_helper/scan_paths', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clip_root, model_root, mmproj_root }) }).catch(() => {});
+    const clip_path = (m._grid2._tg && m._grid2._tg.clip_path && m._grid2._tg.clip_path.value) || '';
+    const model = (m._grid3._ll && m._grid3._ll.model && m._grid3._ll.model.value) || '';
+    const mmproj = (m._grid3._ll && m._grid3._ll.mmproj && m._grid3._ll.mmproj.value) || '';
+    fetchApi('/prompt_helper/model_paths', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clip_path, model, mmproj }) }).catch(() => {});
+  } catch (_) {}
   m.classList.remove('active');
 }
 async function resetSettings() {
   const m = _settingsModal; if (!m) return;
-  if (!(await uiConfirm('恢复默认调用设置？'))) return;
+  if (!(await uiConfirm('恢复默认设置？'))) return;
   m._modelIn.value = ''; m._apiUrlIn.value = ''; m._apiKeyIn.value = ''; m._proxyIn.value = '';
-  ['autoTextgen', 'autoApi', 'autoLlama', 'clearCache'].forEach((k) => { const cb = m._grid0 && m._grid0._auto && m._grid0._auto[k]; if (cb) cb.checked = false; });
-  Object.keys(_TG_DEFAULTS).forEach((k) => { const inp = m._grid2._tg && m._grid2._tg[k]; if (!inp) return; if (inp.type === 'checkbox') inp.checked = !!_TG_DEFAULTS[k]; else inp.value = String(_TG_DEFAULTS[k]); });
+  m._cNameIn.value = ''; m._cProviderIn.value = ''; m._cModelIn.value = ''; m._cUrlIn.value = ''; m._cKeyIn.value = ''; m._cProxyIn.value = '';
+  ['autoTextgen', 'autoApi', 'autoLlama', 'clearCache'].forEach((k) => { const cb = m._grid0 && m._grid0._auto && m._grid0._auto[k]; if (cb) { cb.checked = false; cb._upd && cb._upd(); } });
+  m._setMode('default');
+  Object.keys(_TG_DEFAULTS).forEach((k) => { const inp = m._grid2._tg && m._grid2._tg[k]; if (!inp) return; if (inp.type === 'checkbox') { inp.checked = !!_TG_DEFAULTS[k]; inp._upd && inp._upd(); } else inp.value = String(_TG_DEFAULTS[k]); });
   Object.keys(_LL_DEFAULTS).forEach((k) => { const inp = m._grid3._ll && m._grid3._ll[k]; if (!inp) return; inp.value = String(_LL_DEFAULTS[k]); });
+  if (m._grid1 && m._grid1._ap) { const g = m._grid1._ap; const d = _API_PARAMS_DEFAULTS; g.temperature.value = String(d.temperature); g.top_p.value = d.top_p; g.max_tokens.value = d.max_tokens; g.seed.value = d.seed; g.stop.value = d.stop; g.reasoning.value = d.reasoning; g.custom.value = ''; g.webSearch.checked = d.webSearch; g.webSearch._upd && g.webSearch._upd(); }
   m._provSel.value = 'OpenAI'; m._setModels();
+  m._setCustomSelected(null); if (m._clearCustomFields) m._clearCustomFields(); if (m._customDD) m._customDD.value = ''; if (m._renderCustomDD) m._renderCustomDD();
+  if (m._grid1r) { m._grid1r._sep.value = '\\n'; m._grid1r._reset(); }
 }
 
-// ===== 总体编辑（Word 大纲：每条卡片= 左侧小标题行[序号/标题/时间轴/删除] + 下方内容；顶部 skill 提示 + 默认/优化滑块 + 工具栏；点外面自动保存关闭）=====
+// ===== 卡片管理：把提示词卡片存成 userdata/prompts 下的一份 JSON，按名称加载 / 删除 =====
+const CARDS_API = '/prompt_helper/prompt_cards';
+let _cardMgr = null;
+let _cmSaved = [];        // 已保存卡片清单 [{name,count}]（下拉框数据源）
+let _cmSel = new Set();   // 下面点成绿色的卡片 id（Ctrl / Shift 多选，同 Windows 文件操作）
+let _cmAnchor = -1;       // Shift 连选的锚点（上次点击的下标）
+let _cmName = '';         // 下拉框选中的已保存卡片名（'' = 没选中）
+let _cmSig = '';          // 选中/保存那一刻的卡片签名：之后再编辑内容 → 选中的已经不是那张卡片
+
+function cmHint(text, kind) {
+  const h = _cardMgr && _cardMgr._hint;
+  if (!h) return;
+  h.textContent = text || '';
+  h.className = 'eph-cm-hint' + (kind ? ' ' + kind : '');
+}
+// 卡片签名（标题/正文/时间轴/引用目标全在内）：用来判断「选中的那份卡片」有没有被编辑过
+function cmSig(node) {
+  try { return JSON.stringify(stateFor(node).cards); } catch (_) { return ''; }
+}
+// 要保存的卡片：下面点了绿的就存这些，一个都没点 = 整份保存
+function cmCardsToSave(node) {
+  const st = stateFor(node);
+  return _cmSel.size ? st.cards.filter((c) => _cmSel.has(c.id)) : st.cards.slice();
+}
+async function cmRefreshList() {
+  try { const r = await fetchApi(CARDS_API); const d = await r.json().catch(() => ({})); _cmSaved = Array.isArray(d.cards) ? d.cards : []; }
+  catch (_) { _cmSaved = []; }
+  const dd = _cardMgr && _cardMgr._dd;
+  if (!dd) return;
+  dd.setItems(_cmSaved.map((x) => ({ value: x.name, label: x.name + '（' + x.count + ' 张）' })));
+  if (_cmName && !_cmSaved.some((x) => x.name === _cmName)) _cmName = '';   // 被删掉/改名了：下拉框跟着清空
+  dd.value = _cmName;
+}
+function cmRenderPick() {
+  const m = _cardMgr; if (!m || !m._node) return;
+  const st = stateFor(m._node);
+  const pick = m._pick; pick.innerHTML = '';
+  const ids = new Set(st.cards.map((c) => c.id));
+  _cmSel.forEach((id) => { if (!ids.has(id)) _cmSel.delete(id); });   // 卡片增删/换过一份之后，丢掉不存在的选中项
+  if (!st.cards.length) { const e = el('div', 'eph-cm-empty'); e.textContent = '当前没有提示词卡片。'; pick.appendChild(e); return; }
+  st.cards.forEach((c, i) => {
+    const chip = el('button', 'eph-cm-chip' + (_cmSel.has(c.id) ? ' on' : '')); chip.type = 'button';
+    const ix = el('span', 'eph-cm-idx'); ix.textContent = String(i + 1);
+    chip.appendChild(ix); chip.appendChild(document.createTextNode(c.title || '提示词'));
+    chip.title = (c.title || '') + '：' + String(c.content || '').slice(0, 90);
+    chip.addEventListener('mousedown', (e) => e.preventDefault());
+    chip.addEventListener('click', (e) => cmPickCard(c.id, i, e));
+    pick.appendChild(chip);
+  });
+}
+function cmPickCard(id, idx, e) {
+  const st = stateFor(_cardMgr._node);
+  if (e.shiftKey && _cmAnchor >= 0) {
+    const [a, b] = _cmAnchor < idx ? [_cmAnchor, idx] : [idx, _cmAnchor];
+    if (!(e.ctrlKey || e.metaKey)) _cmSel.clear();
+    for (let i = a; i <= b; i++) { if (st.cards[i]) _cmSel.add(st.cards[i].id); }
+  } else if (e.ctrlKey || e.metaKey) {
+    if (_cmSel.has(id)) _cmSel.delete(id); else _cmSel.add(id);
+    _cmAnchor = idx;
+  } else if (_cmSel.has(id)) {
+    _cmSel.clear(); _cmAnchor = idx;   // 再点一次变灰（取消选中）
+  } else {
+    _cmSel.clear(); _cmSel.add(id); _cmAnchor = idx;
+  }
+  cmRenderPick();
+}
+async function cmSave() {
+  const m = _cardMgr; if (!m || !m._node) return false;
+  const st = stateFor(m._node);
+  const name = m._nameIn.value.trim();
+  if (!name) { cmHint('请先填写保存名称。', 'err'); return false; }
+  if (!st.cards.length) { cmHint('当前没有可保存的提示词卡片。', 'err'); return false; }
+  const cards = cmCardsToSave(m._node);
+  if (_cmSaved.some((x) => x.name === name) && !(await uiConfirm('已存在名为「' + name + '」的卡片，覆盖它吗？'))) { cmHint('已取消保存。'); return false; }
+  try {
+    const r = await fetchApi(CARDS_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, cards: cards }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { cmHint('保存失败：' + (d.error || ('HTTP ' + r.status)), 'err'); return false; }
+    _cmName = ''; _cmSig = '';   // 保存后下拉框保持未选中：再点开列表选这份预设才能真正加载
+    await cmRefreshList();
+    cmHint('已保存「' + name + '」（' + cards.length + ' 张卡片）→ userdata/prompts/' + name + '.json', 'ok');
+    return true;
+  } catch (e) { cmHint('保存失败：' + (e && e.message ? e.message : e), 'err'); return false; }
+}
+async function cmLoad(name) {
+  const m = _cardMgr; if (!m || !m._node || !name) return;
+  try {
+    const r = await fetchApi(CARDS_API + '?name=' + encodeURIComponent(name));
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { cmHint('加载失败：' + (d.error || ('HTTP ' + r.status)), 'err'); return; }
+    const st = stateFor(m._node);
+    // 逐张补默认字段并重新给 id（同一份卡片可以在不同节点上加载，id 不跨节点复用）
+    st.cards = (Array.isArray(d.cards) ? d.cards : []).map((c) => Object.assign({
+      title: '提示词', content: '', contentHTML: '', contentOptimized: '', contentOptimizedHTML: '',
+      timelineStart: '', timelineEnd: '', modelType: 'text', model: '', provider: '', apiUrl: '', indent: 0, useOptimized: false,
+    }, c, { id: genId() }));
+    st.editingId = null;
+    _cmSel.clear(); _cmAnchor = -1;
+    syncToConfig(m._node); updatePorts(m._node); refreshUI(m._node);
+    _cmName = name; _cmSig = cmSig(m._node);
+    if (m._dd) m._dd.value = name;
+    cmRenderPick();
+  } catch (e) { cmHint('加载失败：' + (e && e.message ? e.message : e), 'err'); }
+}
+async function cmDelete() {
+  const m = _cardMgr; if (!m || !m._node) return;
+  if (!_cmName) { cmHint('请先在上面的下拉框里选择要删除的卡片。', 'err'); return; }
+  if (cmSig(m._node) !== _cmSig) {
+    cmHint('卡片在选中之后被编辑过，当前内容已经不是选中的「' + _cmName + '」了；要删除请重新在下拉框里选择。', 'err');
+    return;
+  }
+  if (!(await uiConfirm('删除已保存的卡片「' + _cmName + '」？（userdata/prompts 里的文件）'))) return;
+  try {
+    const r = await fetchApi(CARDS_API + '?name=' + encodeURIComponent(_cmName), { method: 'DELETE' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) { cmHint('删除失败：' + (d.error || ('HTTP ' + r.status)), 'err'); return; }
+    const gone = _cmName; _cmName = '';
+    await cmRefreshList();
+    cmHint('已删除「' + gone + '」。', 'ok');
+  } catch (e) { cmHint('删除失败：' + (e && e.message ? e.message : e), 'err'); }
+}
+function cardMgrEl() {
+  if (_cardMgr && _cardMgr.parentNode) return _cardMgr;
+  _cardMgr = el('div', 'eph-cm');
+  const box = el('div', 'eph-cm-box');
+  const hd = el('div', 'eph-cm-hd');
+  const t = el('b'); t.textContent = '卡片管理';
+  const close = el('button', 'eph-modal-close'); close.textContent = '✕';
+  hd.appendChild(t); hd.appendChild(close);
+  const body = el('div', 'eph-cm-body');
+
+  const row = el('div', 'eph-cm-row');
+  const nameIn = el('input'); nameIn.placeholder = '保存名称（如 分镜-夜景）'; nameIn.title = '保存到 userdata/prompts/<名称>.json';
+  const saveBtn = el('button', 'eph-btn'); saveBtn.textContent = '保存卡片';
+  const dd = makeDropdown([]);
+  const delBtn = el('button', 'eph-btn danger'); delBtn.textContent = '删除卡片';
+  row.appendChild(nameIn); row.appendChild(saveBtn); row.appendChild(dd.el); row.appendChild(delBtn);
+  body.appendChild(row);
+  const pick = el('div', 'eph-cm-pick');
+  body.appendChild(pick);
+  const hint = el('div', 'eph-cm-hint');
+  body.appendChild(hint);
+
+  box.appendChild(hd); box.appendChild(body);
+  _cardMgr.appendChild(box); document.body.appendChild(_cardMgr);
+  _cardMgr._dd = dd; _cardMgr._nameIn = nameIn; _cardMgr._pick = pick; _cardMgr._hint = hint;
+  close.addEventListener('click', () => _cardMgr.classList.remove('active'));
+  // 点外侧关闭，但「从弹窗内部拖到外面松开」不关闭（同卡片编辑弹窗）：比对按下时的落点
+  let _cmDownInBox = false;
+  _cardMgr.addEventListener('mousedown', (e) => { _cmDownInBox = box.contains(e.target); });
+  _cardMgr.addEventListener('mouseup', (e) => {
+    if (e.target === _cardMgr && !_cmDownInBox && (_phClosedEl === null || _phClosedEl === _cardMgr)) _cardMgr.classList.remove('active');
+    _cmDownInBox = false;
+  });
+  saveBtn.addEventListener('click', () => { cmSave(); });
+  delBtn.addEventListener('click', () => { cmDelete(); });
+  dd.addEventListener('change', (v) => { cmLoad(v); });
+  // 下拉框绑定刷新列表：每次点开都重拉一遍（别处删了/加了文件也能看到）
+  const ddTrig = dd.el.querySelector('.eph-dd-trigger');
+  if (ddTrig) ddTrig.addEventListener('mousedown', () => { cmRefreshList(); });
+  return _cardMgr;
+}
+async function openCardMgr(node) {
+  if (!node) return;
+  const m = cardMgrEl();
+  m._node = node;
+  _cmSel.clear(); _cmAnchor = -1;
+  _cmName = ''; _cmSig = '';                             // 每次打开都从「没选中」开始：加载过的内容和要保存的不要混在一起
+  if (m._nameIn) m._nameIn.value = '';
+  cmHint('');
+  cmRenderPick();
+  await cmRefreshList();
+  m.classList.add('active');
+}
+
+// ===== 总体编辑（Word 大纲：每条卡片=  左侧小标题行[序号/标题/时间轴/删除] + 下方内容；默认/优化滑块 + 工具栏（含 skill 插入）；点外面自动保存关闭）=====
 let _allModal = null, _allTab = 'default';
 function runToolOn(ed, id) {
   if (!ed) return;
-  const mapFH = { '，': ',', '。': '.', '！': '!', '？': '?', '：': ':', '；': ';', '“': '"', '”': '"', '‘': "'", '’': "'", '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>', '、': ',', '—': '-', '～': '~' };
+  const mapFH = { '，': ',', '。': '.', '！': '!', '？': ',', '：': ':', '；': ';', '“': '"', '”': '"', '‘': "'", '’': "'", '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>', '、': ',', '—': '-', '～': '~' };
   const mapHF = { ',': '，', '.': '。', '!': '！', '?': '？', ':': '：', ';': '；', '"': '“', "'": '‘', '(': '（', ')': '）', '[': '【', ']': '】', '<': '《', '>': '》', '~': '～', '-': '—' };
-  const convert = (s) => id === 'fullToHalf' ? s.replace(/[，。！？：；“”‘’（）【】《》、—～]/g, (ch) => mapFH[ch] || ch).replace(/\u3000/g, ' ') : s.replace(/[,\.!\?:;"'\(\)\[\]<>~-]/g, (ch) => mapHF[ch] || ch);
+  const convert = (s) => id === 'fullToHalf'  ?  s.replace(/[，。！？：；“”‘’（）【】《》、—～]/g, (ch) => mapFH[ch] || ch).replace(/\u3000/g, ' ') : s.replace(/[,\.!\?:;"'\(\)\[\]<>~-]/g, (ch) => mapHF[ch] || ch);
   const bodies = ed.querySelectorAll('.eph-all-block-body');
   (bodies.length ? Array.from(bodies) : [ed]).forEach((b) => { b.textContent = convert(b.textContent); });
-}
-function insertTextOn(ed, text) {
-  if (!ed) return;
-  ed.focus();
-  document.execCommand('insertText', false, text);
 }
 function execCommandOn(ed, cmd) {
   if (!ed) return;
   ed.focus();
   document.execCommand(cmd, false, null);
 }
-// 用 span 包装某块内容并写样式（避免 execCommand 在多块编辑器中失效；span 落在 innerHTML 里可随保存持久化）。
+//  用 span 包装某块内容并写样式（避免 execCommand 在多块编辑器中失效；span 落在 innerHTML 里可随保存持久化）。
 function _wrapStyle(body, cssProp, val, key) {
   if (!body) return;
   let sp = null;
@@ -2242,8 +3570,19 @@ function allEl() {
   const box = el('div', 'eph-all-box');
   const hd = el('div', 'eph-all-hd');
   const t = el('b'); t.textContent = '总体编辑';
+  // 全屏 / 退出全屏放在右上角（和关闭按钮同一排）
+  const fullBtn = el('button', 'eph-btn eph-all-full'); fullBtn.textContent = '全屏'; fullBtn.title = '总体编辑全屏 / 退出全屏';
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
-  hd.appendChild(t); hd.appendChild(close);
+  const hdRight = el('div', 'eph-all-hd-right');
+  hdRight.appendChild(fullBtn); hdRight.appendChild(close);
+  hd.appendChild(t); hd.appendChild(hdRight);
+  fullBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const m = _allModal; if (!m) return;
+    m.classList.toggle('full');
+    fullBtn.textContent = m.classList.contains('full') ? '退出全屏' : '全屏';
+    requestAnimationFrame(() => { try { moveAllTabThumb(); } catch (_) {} });   // 全屏切换后滑块宽度会滞留，重新量一次
+  });
   // 默认/优化滑块
   const tabThumb = el('span', 'eph-tabs-thumb');
   const tabs = el('div', 'eph-tabs');
@@ -2277,7 +3616,7 @@ function allEl() {
   const indentIn = el('input', 'eph-indent-input'); indentIn.value = '0'; indentIn.title = '首行缩进';
   indentL.appendChild(indentIn); toolbar.appendChild(indentL);
   // 颜色（与卡片一致：色块下拉）
-  const colorGroup = el('div', 'eph-tb-group');
+    const colorGroup = el('div', 'eph-tb-group');
   const hlBtn = el('button', 'eph-color-btn'); hlBtn.innerHTML = '<span class="eph-icon-hl"></span><span class="eph-arrow-down"></span>';
   const hlDD = el('div', 'eph-color-dropdown');
   const fcBtn = el('button', 'eph-color-btn'); fcBtn.innerHTML = '<span class="eph-icon-a">A</span><span class="eph-arrow-down"></span>';
@@ -2288,30 +3627,88 @@ function allEl() {
   initColorDropdown(fcDD, 'font');
   hlBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); hlDD.classList.toggle('active'); fcDD.classList.remove('active'); if (hlDD.classList.contains('active')) phCenterPopup(hlDD); });
   fcBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); fcDD.classList.toggle('active'); hlDD.classList.remove('active'); if (fcDD.classList.contains('active')) phCenterPopup(fcDD); });
-  // 工具 / 插入引用（与卡片一致）
+  // 工具（引用媒体改成每张卡片自己一个按钮，见 renderAllEditor）
   const toolsGroup = el('div', 'eph-tb-group');
   const toolsBtn = el('button', 'eph-btn'); toolsBtn.textContent = '工具';
   const toolsDD = el('div', 'eph-tools-dropdown');
   toolsGroup.appendChild(toolsBtn); toolsGroup.appendChild(toolsDD); toolbar.appendChild(toolsGroup);
-  const refGroup = el('div', 'eph-tb-group');
-  const refBtn = el('button', 'eph-btn'); refBtn.textContent = '插入引用';
-  const refDD = el('div', 'eph-tools-dropdown');
-  refGroup.appendChild(refBtn); refGroup.appendChild(refDD); toolbar.appendChild(refGroup);
   const collapseBtn = el('button', 'eph-btn'); collapseBtn.textContent = '收起小标题'; collapseBtn.title = '折叠/展开每张卡片的小标题行';
-  collapseBtn.addEventListener('click', (e) => { e.stopPropagation(); const m = _allModal; if (m) { m.classList.toggle('collapsed'); collapseBtn.textContent = m.classList.contains('collapsed') ? '展开小标题' : '收起小标题'; } });
+  collapseBtn.addEventListener('click', (e) => { e.stopPropagation(); const m = _allModal; if (m) { m.classList.toggle('collapsed'); collapseBtn.textContent = m.classList.contains('collapsed')  ?  '展开小标题'  : '收起小标题'; markBlankLines(m); } });
   toolbar.appendChild(collapseBtn);
   const addCardBtn = el('button', 'eph-btn success'); addCardBtn.textContent = '＋ 新增卡片'; toolbar.appendChild(addCardBtn);
   const editor = el('div', 'eph-all-editor'); editor.contentEditable = 'true';
-  attachMention(editor, () => _allModal._node);
+  attachMention(editor, () => ({ node: _allModal._node, card: caretCard(_allModal._node) }));
+  toolbar.insertBefore(skillButton(editor), collapseBtn);
+  // 卡片正文之间隔着不可编辑的小标题行：在块首退格 / 块尾删除时，浏览器会拿这些不可编辑元素和正文包
+  // 开刀（删掉 .eph-all-block-body 甚至小标题行），结构一坏「引用媒体」取不到正文、输入也失效。
+  // 这里拦住跨块删除（把光标挪到相邻卡片正文），并在结构已经坏了时就地重建一次。
+  editor.addEventListener('keydown', (e) => {
+    const nd = _allModal && _allModal._node; if (!nd) return;
+    healAllEditor(nd);   // 结构已经被删坏就地重建（内部节流）；重建后下面的守卫按新 DOM 再判一次
+    if (e.key !== 'Backspace' && e.key !== 'Delete') return;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !sel.isCollapsed) return;
+    const r = sel.getRangeAt(0);
+    const startEl = r.startContainer.nodeType === 1 ? r.startContainer : r.startContainer.parentNode;
+    const body = (startEl && startEl.closest) ? startEl.closest('.eph-all-block-body') : null;
+    if (!body) return;
+    const probe = document.createRange();
+    // 「光标正好在正文的最前/最后」才算跨块删除（再删就要碰到小标题行/正文包了）；
+    // 块内删空行（前面还有个空 div）不算，照常让浏览器删。
+    const atBodyStart = () => {
+      try { probe.setStart(body, 0); probe.setEnd(r.startContainer, r.startOffset); } catch (_) { return false; }
+      return probe.collapsed || probe.cloneContents().childNodes.length === 0;
+    };
+    const atBodyEnd = () => {
+      try { probe.setStart(r.startContainer, r.startOffset); probe.setEnd(body, body.childNodes.length); } catch (_) { return false; }
+      return probe.collapsed || probe.cloneContents().childNodes.length === 0;
+    };
+    const moveTo = (target, atEnd) => { const rr = document.createRange(); rr.selectNodeContents(target); rr.collapse(!atEnd); sel.removeAllRanges(); sel.addRange(rr); };
+    const blk = body.parentNode ? body.parentNode.closest('.eph-all-block') : null;
+    if (e.key === 'Backspace' && atBodyStart()) {
+      e.preventDefault();
+      const prev = blk && blk.previousElementSibling;
+      const pb = (prev && prev.querySelector) ? prev.querySelector('.eph-all-block-body') : null;
+      if (pb) moveTo(pb, true);
+    } else if (e.key === 'Delete' && atBodyEnd()) {
+      e.preventDefault();
+      const next = blk && blk.nextElementSibling;
+      const nb = (next && next.querySelector) ? next.querySelector('.eph-all-block-body') : null;
+      if (nb) moveTo(nb, false);
+    }
+  });
+  // 兜底：不管是哪种编辑操作把块结构弄坏了，输入时立刻按卡片重建（内容已按 cardId 写回，不会丢）
+  editor.addEventListener('input', () => { const nd = _allModal && _allModal._node; if (nd) healAllEditor(nd); });
+  // 和卡片弹窗一样记下光标：点某张卡片的「引用媒体」时，+/− 就插在光标处（不在本卡片正文里才退回正文末尾）
+  editor.addEventListener('keyup', saveSelection);
+  editor.addEventListener('mouseup', saveSelection);
   const ft = el('div', 'eph-all-ft');
+  // 规范「参考卡」放在保存/取消同一行（左下角）
+  const ruleBar = el('div', 'eph-all-rulebar');
+  const ruleDD = makeDropdown(ruleDropdownItems(_allModal && _allModal._node, false));
+  ruleDD.el.classList.add('eph-rule-dd');
+  const ruleHint = el('button', 'eph-rule-hint'); ruleHint.type = 'button'; ruleHint.textContent = '提示'; ruleHint.title = '看该规范的书写规则 / 引用写法';
+  ruleDD.addEventListener('change', (v) => {
+    const nd = _allModal && _allModal._node; if (!nd) return;
+    setNodeRule(nd, v);
+    if (_rulePop && _rulePop._anchor === ruleHint) { const p = openRulePop(ruleHint, nd, { ruleId: v }); p._anchor = ruleHint; }
+  });
+  ruleHint.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (_rulePop && _rulePop._anchor === ruleHint) { closeRulePop(); return; }
+    const nd = _allModal && _allModal._node; if (!nd) return;
+    const p = openRulePop(ruleHint, nd, { ruleId: ruleDD.value }); p._anchor = ruleHint;
+  });
+  ruleBar.appendChild(ruleDD.el); ruleBar.appendChild(ruleHint);
+  _allModal._ruleDD = ruleDD;
   const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = '取消';
   const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = '保存';
-  ft.appendChild(cancelBtn); ft.appendChild(saveBtn);
+  ft.appendChild(ruleBar); ft.appendChild(cancelBtn); ft.appendChild(saveBtn);
   box.appendChild(hd); box.appendChild(tabs); box.appendChild(toolbar); box.appendChild(editor); box.appendChild(ft);
   _allModal.appendChild(box); document.body.appendChild(_allModal);
   _allModal._box = box; _allModal._ed = editor; _allModal._indentIn = indentIn;
   _allModal._tabDefault = tabDefault; _allModal._tabOptimized = tabOptimized; _allModal._tabThumb = tabThumb;
-  _allModal._hlDD = hlDD; _allModal._fcDD = fcDD; _allModal._toolsDD = toolsDD; _allModal._refDD = refDD;
+  _allModal._hlDD = hlDD; _allModal._fcDD = fcDD; _allModal._toolsDD = toolsDD;
   close.addEventListener('click', () => { _phActiveEditor = null; _allModal.classList.remove('active'); });
   cancelBtn.addEventListener('click', () => { _phActiveEditor = null; _allModal.classList.remove('active'); });
   saveBtn.addEventListener('click', () => saveAllEditor());
@@ -2321,15 +3718,12 @@ function allEl() {
   indentIn.addEventListener('change', () => { editor.querySelectorAll('.eph-all-block-body').forEach((x) => { const n = parseFloat(indentIn.value) || 0; x.style.textIndent = n ? n + 'em' : ''; }); });
   addCardBtn.addEventListener('click', () => { const nd = _allModal._node; if (nd) { addCard(nd); openAllEditor(nd); } });
   // 工具 / 插入引用下拉
-  [['查找替换', 'find'], ['全角符号转半角', 'fullToHalf'], ['半角符号转全角', 'halfToFull'], ['优化提示词 (API)', 'api'], ['优化提示词 (llama)', 'llama']].forEach(([t, id]) => { const b = el('button', 'eph-tool-item'); b.textContent = t; b.addEventListener('click', () => { if (id === 'api' || id === 'llama') { runBatchOptimize(_allModal && _allModal._node, id); } else if (id === 'find') { openFindModal('find', _allModal && _allModal._ed); } else { runToolOn(editor, id); } toolsDD.classList.remove('active'); }); toolsDD.appendChild(b); });
-  addMediaFileItems(refDD, editor, (_m) => insertMediaRef(editor, _m), _allModal._node);
-  const closeAllDD = (e) => { if (!toolsDD.contains(e.target) && e.target !== toolsBtn) toolsDD.classList.remove('active'); if (!refDD.contains(e.target) && e.target !== refBtn) refDD.classList.remove('active'); };
-  toolsBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); toolsDD.classList.toggle('active'); refDD.classList.remove('active'); if (toolsDD.classList.contains('active')) phFixedDD(toolsBtn, toolsDD); });
-  refBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); refDD.classList.toggle('active'); toolsDD.classList.remove('active'); if (refDD.classList.contains('active')) { phFixedDD(refBtn, refDD); addMediaFileItems(refDD, editor, (_m) => insertMediaRef(editor, _m), _allModal._node); } });
+  [['查找替换', 'find'], ['全角符号转半角', 'fullToHalf'], ['半角符号转全角', 'halfToFull'], ['优化提示词 (API)', 'api'], ['优化提示词 (TextGenerate)', 'textgen'], ['优化提示词 (llama)', 'llama']].forEach(([t, id]) => { const b = el('button', 'eph-tool-item'); b.textContent = t; b.addEventListener('click', () => { if (id === 'api' || id === 'textgen' || id === 'llama') { runBatchOptimize(_allModal && _allModal._node, id); } else if (id === 'find') { openFindModal('find', _allModal && _allModal._ed); } else { runToolOn(editor, id); } toolsDD.classList.remove('active'); }); toolsDD.appendChild(b); });
+  toolsBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); toolsDD.classList.toggle('active'); if (toolsDD.classList.contains('active')) phFixedDD(toolsBtn, toolsDD); });
   // 点弹窗外空白自动保存关闭；卡片内部拖动到外面松开不关（只在外面点击才关）
   let _allStartInBox = false;
   _allModal.addEventListener('mousedown', (e) => { _allStartInBox = box.contains(e.target); });
-  _allModal.addEventListener('mouseup', (e) => { if (e.target === _allModal && !_allStartInBox) saveAllEditor(); _allStartInBox = false; });
+  _allModal.addEventListener('mouseup', (e) => { if (e.target === _allModal && _phDownTarget === _allModal && !_allStartInBox && (_phClosedEl === null || _phClosedEl === _allModal)) saveAllEditor(); _allStartInBox = false; });
   return _allModal;
 }
 function switchAllTab(tab) {
@@ -2344,79 +3738,196 @@ function switchAllTab(tab) {
   if (t && th) { th.style.left = t.offsetLeft + 'px'; th.style.width = t.offsetWidth + 'px'; }
   if (nd) {
     const st = stateFor(nd);
-    st.cards.forEach((c) => { c.useOptimized = good; });
+    // 切页签会整篇重建编辑器（光标丢），所以先记住光标在哪张卡片，重建后把光标放回那张卡片的末尾
+    const idx = allCaretCardIdx();
+    st.overallUseOptimized = good;   // 节点级：合并提示词用「整体优化」还是按卡片拼（卡片级 useOptimized 只在卡片弹窗里改）
     syncToConfig(nd);
     renderAllEditor(nd);
+    if (st.cards.length) allCaretToBlockEnd(idx >= 0 ? idx : 0);
   }
+}
+// 一个块里的正文 HTML：正常是 .eph-all-block-body；结构被浏览器编辑操作吃掉时，用整块内容去掉小标题行兜底。
+function blockContentHTML(b) {
+  if (!b) return '';
+  const body = b.querySelector('.eph-all-block-body');
+  if (body) return body.innerHTML;
+  const clone = b.cloneNode(true);
+  const hd = clone.querySelector('.eph-all-block-hd');
+  if (hd) hd.remove();
+  return clone.innerHTML;
+}
+// 总体编辑的块结构（小标题行 + 正文）都活在 contenteditable 里：在块首退格 / 块尾删除时，
+// 浏览器会把正文包 .eph-all-block-body、甚至小标题行/整块删掉，之后「引用媒体」取不到正文、
+// 输入也没反应，只有重开总体编辑才恢复。这里检查结构是否还对得上卡片，坏了就按卡片就地重建。
+function allStructureOk(ed, cards) {
+  if (!ed) return true;
+  const blocks = Array.from(ed.querySelectorAll('.eph-all-block'));
+  if (_allTab === 'optimized') return blocks.length === 1 && !!blocks[0].querySelector('.eph-all-block-body');   // 优化页签只有「整体优化」一块
+  if (blocks.length !== cards.length) return false;
+  return blocks.every((b) => !!b.querySelector('.eph-all-block-body'))
+    && cards.every((c, i) => String(blocks[i].dataset.cardId || '') === String(c.id));
+}
+let _healAllAt = 0;
+// 光标当前在第几张卡片（总体编辑按块顺序）；光标不在任何卡片正文里时返回 -1。
+function allCaretCardIdx() {
+  const m = _allModal;
+  if (!m || !m._ed) return -1;
+  try {
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount) return -1;
+    const n = sel.getRangeAt(0).startContainer;
+    const el0 = n && (n.nodeType === 1 ? n : n.parentNode);
+    const blk = (el0 && el0.closest) ? el0.closest('.eph-all-block') : null;
+    if (!blk) return -1;
+    return Array.from(m._ed.querySelectorAll('.eph-all-block')).indexOf(blk);
+  } catch (_) { return -1; }
+}
+// 把光标放到第 idx 张卡片的正文末尾（重建/换页签后调用），并把它滚进视野。
+function allCaretToBlockEnd(idx) {
+  const m = _allModal;
+  if (!m || !m._ed || idx < 0) return;
+  try {
+    const blk = m._ed.querySelectorAll('.eph-all-block')[idx];
+    const body = blk && blk.querySelector('.eph-all-block-body');
+    if (!body) return;
+    const r = document.createRange(); r.selectNodeContents(body); r.collapse(false);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+    saveSelection();
+    if (body.scrollIntoView) body.scrollIntoView({ block: 'nearest' });
+  } catch (_) {}
+}
+function healAllEditor(node) {
+  const m = _allModal;
+  if (!m || !m._ed || !node) return false;
+  const st = stateFor(node);
+  if (allStructureOk(m._ed, st.cards)) return false;
+  const now = Date.now();
+  if (now - _healAllAt < 1200) return false;   // 节流：结构始终不合法时别每次按键都重建
+  _healAllAt = now;
+  const idx = allCaretCardIdx();             // 记住光标原来在哪张卡片，重建后放回该卡片正文末尾
+  syncAllContent(node);      // 按卡片 id 写回（缺正文的块走整块兜底），不丢已输入内容
+  renderAllEditor(node);
+  allCaretToBlockEnd(idx >= 0 ? idx : 0);
+  return true;
 }
 function syncAllContent(nd) {
   const st = stateFor(nd);
+  if (_allTab === 'optimized') {
+    const b = _allModal._ed.querySelector('.eph-all-block');
+    if (!b) return;
+    const htmlO = blockContentHTML(b);
+    st.overallOptimizedHTML = htmlO;
+    st.overallOptimized = plainTextOf(htmlO);
+    syncToConfig(nd); updatePorts(nd); refreshUI(nd);
+    return;
+  }
   const blocks = _allModal._ed.querySelectorAll('.eph-all-block');
   Array.from(blocks).forEach((b, i) => {
-    const card = st.cards[i]; if (!card) return;
-    const body = b.querySelector('.eph-all-block-body');
-    const html = body ? body.innerHTML : b.innerHTML;
-    const plain = plainTextOf(html);
-    if (_allTab === 'optimized') { card.contentOptimizedHTML = html; card.contentOptimized = plain; }
-    else { card.contentHTML = html; card.content = plain; }
+    // 按块上的 cardId 认卡片（块被浏览器删过也不会错位），老 DOM 没有 cardId 时退回按顺序。
+    const card = st.cards.find((c) => String(c.id) === String(b.dataset.cardId || '')) || st.cards[i];
+    if (!card) return;
+    const html = blockContentHTML(b);
+    card.contentHTML = html;
+    card.content = plainTextOf(html);
   });
   syncToConfig(nd); updatePorts(nd); refreshUI(nd);
 }
 function phRulesModel(node) { try { return (readConfig(node, {}).rules) || {}; } catch (_) { return {}; } }
-function formatTimeText(model, start, end) {
-  const s = String(start || '').trim(), e = String(end || '').trim();
-  if (!s && !e) return '';
-  const num = parseFloat(s) || 0;
-  const mm = String(Math.floor(num / 60)).padStart(2, '0'), ss = String(Math.floor(num % 60)).padStart(2, '0');
-  if (model === 'MiniMax H3') return `[Shot] At ${mm}:${ss}.000`;
-  if (model === 'Seedance') return `${s}-${(e || s)}s:`;
-  if (model === 'Wan 2.6') return `${s}-${(e || s)}s`;
-  if (model === 'Seedance 2.5') return e ? `${s}-${e}s` : `[${s}s]`;
-  return e ? `[${s}-${e}s]` : `[${s}s]`;
+// 节点级「卡片合并分隔符号」：输入框里写的 \n / \t / \r 还原成真控制符（与后端 parse_prompt_rules 同一套规则，空则换行）
+function cardSeparator(node) {
+  const raw = String((stateFor(node).rules && stateFor(node).rules.mergeSep) || '');
+  return raw.replace(/\\r/g, '\r').replace(/\\n/g, '\n').replace(/\\t/g, '\t') || '\n';
+}
+// 收起小标题时隐藏空行（只剩 <br> 的行、空 div/p）；展开时全部恢复。
+function markBlankLines(m) {
+  if (!m || !m._ed) return;
+  const on = m.classList.contains('collapsed');
+  m._ed.querySelectorAll('.eph-all-block-body').forEach((b) => {
+    Array.from(b.children).forEach((ch) => {
+      const blank = !ch.textContent.trim() && !ch.querySelector('img,video,audio,.eph-mref,.ez-ap');
+      ch.classList.toggle('eph-all-blank', on && blank);
+    });
+  });
 }
 function renderAllEditor(node) {
   const st = stateFor(node);
   const m = allEl(); const ed = m._ed;
-  const rules = phRulesModel(node);
   ed.innerHTML = '';
   if (!st.cards.length) {
     ed.appendChild(el('div', 'eph-all-empty')).textContent = '暂无提示词卡片，点上面「＋ 新增卡片」添加。';
     return;
   }
+  if (_allTab === 'optimized') {
+    // 「优化」页签 = 所有卡片合并后整体优化一次的结果（一整块，不按卡片分；分卡优化只在卡片弹窗里手动做）
+    const block = el('div', 'eph-all-block');
+    const rw = el('div', 'eph-all-block-hd'); rw.contentEditable = 'false';
+    const num = el('span', 'eph-all-num'); num.textContent = '合';
+    const ttl = el('span', 'eph-all-title'); ttl.textContent = '整体优化结果';
+    ttl.title = '运行期自动优化 / 总体编辑「工具→优化提示词」的结果：只合并「合」为绿的卡片的默认正文（灰卡不参与），可直接编辑';
+    rw.appendChild(num); rw.appendChild(ttl);
+    const body = el('div', 'eph-all-block-body');
+    body.innerHTML = st.overallOptimizedHTML || st.overallOptimized || '';
+    block.appendChild(rw); block.appendChild(body);
+    ed.appendChild(block);
+    finishAllEditor(node);
+    return;
+  }
   st.cards.forEach((card, idx) => {
-    const block = el('div', 'eph-all-block'); block.dataset.idx = String(idx);
+    const block = el('div', 'eph-all-block'); block.dataset.idx = String(idx); block.dataset.cardId = String(card.id);
     // 左侧小标题行：序号 / 标题(可编辑) / 时间轴 / 删除(-)
     const rw = el('div', 'eph-all-block-hd'); rw.contentEditable = 'false';
     const num = el('span', 'eph-all-num'); num.textContent = String(idx + 1);
     const titleEl = el('span', 'eph-all-title'); titleEl.contentEditable = 'true'; titleEl.setAttribute('data-ph', '标题');
     titleEl.textContent = card.title || '';
     titleEl.addEventListener('input', () => { card.title = titleEl.textContent.replace(/\u200b/g, ''); syncToConfig(node); });
-    const tsStart = el('input', 'eph-all-ts'); tsStart.value = card.timelineStart || ''; tsStart.title = '时间轴开始';
-    const tsDash = el('span'); tsDash.textContent = '－';
-    const tsEnd = el('input', 'eph-all-ts'); tsEnd.value = card.timelineEnd || ''; tsEnd.title = '时间轴结束';
-    const tsPreview = el('span', 'eph-all-tspreview'); tsPreview.textContent = '';
-    const updTs = () => { tsPreview.textContent = formatTimeText(rules.tsModel, tsStart.value, tsEnd.value); };
-    [tsStart, tsEnd].forEach((inp) => { inp.addEventListener('input', () => { card.timelineStart = tsStart.value.trim(); card.timelineEnd = tsEnd.value.trim(); syncToConfig(node); tsStart.style.display = (card.timelineStart || card.timelineEnd) ? '' : 'none'; tsEnd.style.display = (card.timelineStart || card.timelineEnd) ? '' : 'none'; updTs(); }); });
-    const timeEl = el('span', 'eph-all-time');
-    timeEl.appendChild(tsStart); timeEl.appendChild(tsDash); timeEl.appendChild(tsEnd); timeEl.appendChild(el('span')).textContent = 's'; timeEl.appendChild(tsPreview);
-    updTs();
     const delEl = el('button', 'eph-all-del'); delEl.textContent = '－'; delEl.title = '删除此卡片';
     delEl.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); deleteCard(node, card.id); renderAllEditor(node); });
-    rw.appendChild(num); rw.appendChild(titleEl); rw.appendChild(timeEl); rw.appendChild(delEl);
+    // 每张卡片自己的「引用媒体」：插进本卡片内容里，引用状态与卡片弹窗共用（同一个 card.refTarget）
+    const refEl = el('button', 'eph-all-ref'); refEl.textContent = '引用媒体'; refEl.title = '浏览该卡片引用的生成节点素材，+/− 直接插入或移除引用';
+    refEl.addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      // 块结构被删坏时先重建，否则这里取不到正文 →「引用媒体」点了没反应（重开后块对象已换，按序重找一次）
+      healAllEditor(node);
+      let blk = block;
+      if (!blk.isConnected) {
+        const idx = stateFor(node).cards.indexOf(card);
+        blk = _allModal._ed.querySelectorAll('.eph-all-block')[idx] || blk;
+      }
+      const body = blk.querySelector('.eph-all-block-body');
+      if (!body) return;
+      _phActiveEditor = body;
+      // 光标默认落在本卡片内容末尾：这样点 +/− 就插到这张卡片里
+      if (!_editorRange || !body.contains(_editorRange.commonAncestorContainer)) {
+        const r = document.createRange(); r.selectNodeContents(body); r.collapse(false);
+        _editorRange = r;
+      }
+      openRefBrowser(node, body, card);
+    });
+    // 「合」放在小标题行、引用媒体按钮前面
+    const mergeBtnH = el('button', 'eph-merge-btn'); mergeBtnH.type = 'button'; mergeBtnH.textContent = '合'; mergeBtnH.title = '合并进「合并提示词」：绿=合并，灰=不合并';
+    mergeBtnH.classList.toggle('on', !card.mergeOff);
+    mergeBtnH.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); card.mergeOff = !card.mergeOff; syncToConfig(node); mergeBtnH.classList.toggle('on', !card.mergeOff); refreshUI(node); });
+    rw.appendChild(num); rw.appendChild(titleEl); rw.appendChild(mergeBtnH); rw.appendChild(refEl); rw.appendChild(delEl);
     block.appendChild(rw);
     // 下方内容（按当前页签）
-    const body = el('div', 'eph-all-block-body');
-    body.innerHTML = (_allTab === 'optimized') ? (card.contentOptimizedHTML || card.contentOptimized || '') : (card.contentHTML || card.content || '');
+        const body = el('div', 'eph-all-block-body');
+    body.innerHTML = card.contentHTML || card.content || '';
     block.appendChild(body);
     ed.appendChild(block);
   });
-  // 重新应用总体缩进：render 重建全部块，需按当前缩进值还原（新增卡片后不丢失）。
+  finishAllEditor(node);
+}
+// 渲染收尾：规范下拉同步 + 总体缩进还原（render 重建全部块，需按当前缩进值还原）
+function finishAllEditor(node) {
+  const m = allEl();
+  if (m._ruleDD) { m._ruleDD.setItems(ruleDropdownItems(node, false)); m._ruleDD.value = _normRuleId(phRulesModel(node).ruleId) || 'none'; }
   const ni = parseFloat(m._indentIn.value) || 0;
-  ed.querySelectorAll('.eph-all-block-body').forEach((x) => { x.style.textIndent = ni ? ni + 'em' : ''; });
+  m._ed.querySelectorAll('.eph-all-block-body').forEach((x) => { x.style.textIndent = ni ? ni + 'em' : ''; });
+  markBlankLines(m);
 }
 function openAllEditor(node) {
   const m = allEl(); m._node = node;
-  _allTab = 'default';
+  _allTab = stateFor(node).overallUseOptimized ? 'optimized' : 'default';   // 回到当前生效的那一页
   _phActiveEditor = m._ed;   // 让颜色等工具作用到总体编辑
   renderAllEditor(node);
   requestAnimationFrame(moveAllTabThumb);
@@ -2433,30 +3944,45 @@ function saveAllEditor() {
   _phActiveEditor = null;
   _allModal.classList.remove('active');
 }
-// 总体编辑「工具→优化提示词」：合并所有卡片内容为一份，单次调用（textgen 需运行期用 CLIP，故不在此列）。
+// 总体编辑「工具→优化提示词」：把所有卡片（按「合」过滤）合并成一份、整体优化一次；
+// 结果只写进「总体编辑·优化」，不逐卡片回写（分卡优化只在卡片弹窗里由用户手动触发）。
 async function runBatchOptimize(node, method) {
   if (!node) return;
   const st = stateFor(node);
+  // 先把编辑器里还没保存的改动写回卡片（否则合并的是旧内容）
+  if (_allModal && _allModal.classList.contains('active') && _allModal._node === node) syncAllContent(node);
   const cfg = optimizeFor(node);
-  if (method === 'api' && cfg.provider !== 'Ollama' && !cfg.apiKey) { window.alert('调用「优化提示词 (API)」需要先在「调用设置」里填写该厂商的 API Key。'); return; }
+  if (method === 'api' && cfg.provider !== 'Ollama' && !cfg.apiKey) { window.alert('调用「优化提示词 (API)」需要先在「设置·API设置」里填写该厂商的 API Key。'); return; }
+  // 源 = 每张卡**默认**页签的正文（不看卡片滑块、不取优化版），跳「合」灰卡、空的不占位，用「卡片合并分隔符号」拼成一份
   const parts = [];
-  st.cards.forEach((c) => { const s = (c.content || plainTextOf(c.contentHTML || '')).trim(); if (s) parts.push(s); });
-  if (!parts.length) { window.alert('没有可优化的卡片内容。'); return; }
-  const merged = parts.join('\n\n');
+  st.cards.forEach((c) => {
+    if (c.mergeOff) return;
+    const s = String(c.content || plainTextOf(c.contentHTML || '') || '').trim();
+    if (s) parts.push(s);
+  });
+  if (!parts.length) { window.alert('当前卡片没有可优化的提示词内容。'); return; }
+  const merged = parts.join(cardSeparator(node));
   phProgShow(node, 1, '总体优化');
   phProgTick(node, 0, '合并 ' + parts.length + ' 张卡片，单次调用…');
-  const payload = { method, prompt: merged, skill: cfg.skill || '', provider: cfg.provider || '', model: cfg.model || '', apiUrl: cfg.apiUrl || '', apiKey: cfg.apiKey || '', proxy: cfg.proxy || '', image: '', textgen: cfg.textgen || {}, llama: cfg.llama || {}, clearCache: !!cfg.clearCache };
+  const payload = { method, prompt: merged, provider: cfg.provider || '', model: cfg.model || '', apiUrl: cfg.apiUrl || '', apiKey: cfg.apiKey || '', proxy: cfg.proxy || '', image: '', textgen: cfg.textgen || {}, llama: cfg.llama || {}, apiParams: cfg.apiParams || {}, clearCache: !!cfg.clearCache };
+  const imgs = await cardImageDataUrls(node, null);
+  if (imgs.length) payload.images = imgs;
+  const medias = cardMediaRefs(node, null);
+  if (medias.length) payload.media = medias;
+  if (imgs.length || medias.length) phProgTick(node, 0, '合并 ' + parts.length + ' 张卡片，已附带 ' + (imgs.length ? imgs.length + ' 张图' : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' 个视频/音频' : '') + '…');
   try {
     const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok || d.error) { phProgErr(node, d.error || ('HTTP ' + r.status)); window.alert('优化失败：' + (d.error || ('HTTP ' + r.status))); return; }
+    if (!r.ok || d.error) { phProgErr(node, d.error || ('HTTP ' + r.status)); window.alert('优化失败：'  + (d.error || ('HTTP ' + r.status))); return; }
     const out = d.text || '';
-    const outHtml = plainTextToHtml(out);
-    st.cards.forEach((c) => { c.contentOptimized = out; c.contentOptimizedHTML = outHtml; });
+    // 结果 = 「总体编辑」里那份整体优化（不写进每张卡片）
+    st.overallOptimized = out;
+    st.overallOptimizedHTML = plainTextToHtml(out);
+    st.overallUseOptimized = true;
     phProgDone(node);
     syncToConfig(node); updatePorts(node); refreshUI(node);
     _allTab = 'optimized'; if (_allModal && _allModal.classList.contains('active')) switchAllTab('optimized');
-  } catch (e) { phProgErr(node, (e && e.message ? e.message : e)); window.alert('优化请求失败：' + (e && e.message ? e.message : e)); }
+  } catch (e) { phProgErr(node, (e && e.message  ?  e.message : e)); window.alert('优化请求失败：'  + (e && e.message  ?  e.message : e)); }
 }
 
 // ===== 面板 =====
@@ -2468,24 +3994,19 @@ function buildRoot(node) {
   node._ezRoot = shell;
   const hd = el('div', 'eph-hd');
   const allBtn = el('button', 'eph-btn primary'); allBtn.textContent = '总体编辑';
-  const settingsBtn = el('button', 'eph-btn'); settingsBtn.textContent = '调用设置';
-  const rulesBtn = el('button', 'eph-btn'); rulesBtn.textContent = '规则设置';
-  const skillBtn = el('button', 'eph-btn'); skillBtn.textContent = 'skill设置';
-  const progBtn = el('button', 'eph-btn'); progBtn.textContent = '进度'; progBtn.title = '查看优化进度';
+  const settingsBtn = el('button', 'eph-btn'); settingsBtn.textContent = '设置';
+  const cmBtn = el('button', 'eph-btn'); cmBtn.textContent = '卡片管理'; cmBtn.title = '保存 / 加载提示词卡片（userdata/prompts）';
   const addBtn = el('button', 'eph-btn'); addBtn.textContent = '＋ 新增提示词卡片';
-  hd.appendChild(allBtn); hd.appendChild(settingsBtn); hd.appendChild(rulesBtn); hd.appendChild(skillBtn); hd.appendChild(progBtn); hd.appendChild(addBtn);
+  hd.appendChild(allBtn); hd.appendChild(settingsBtn); hd.appendChild(cmBtn); hd.appendChild(addBtn);
   const list = el('div', 'eph-list');
   root.appendChild(hd); root.appendChild(list);
   root._list = list;
-  root._skillBtn = skillBtn;
   addBtn.addEventListener('click', () => addCard(node));
   settingsBtn.addEventListener('click', () => openSettings(node));
   allBtn.addEventListener('click', () => openAllEditor(node));
-  rulesBtn.addEventListener('click', () => openRules(node));
-  skillBtn.addEventListener('click', () => openSkillBrowser(node));
-  progBtn.addEventListener('click', (e) => { e.stopPropagation(); phProgToggle(node); });
-  // 键盘 Ctrl+F / Ctrl+H（卡片或总体编辑打开时都可用）
-  document.addEventListener('keydown', (e) => {
+  cmBtn.addEventListener('click', () => openCardMgr(node));
+  //  键盘  Ctrl+F / Ctrl+H（卡片或总体编辑打开时都可用）
+    document.addEventListener('keydown', (e) => {
     const editOpen = _editModal && _editModal.classList.contains('active');
     const allOpen = _allModal && _allModal.classList.contains('active');
     if (!(editOpen || allOpen)) return;
@@ -2508,8 +4029,51 @@ function refreshUI(node) {
   const root = node && node._ezRoot;
   if (!root) return;
   renderCards(node);
-  const sb = root._skillBtn;
-  if (sb) sb.classList.toggle('skill-on', !!(optimizeFor(node).skillFile));
+}
+// 运行期回写（后端 run() 的 ui）：
+//   optimized           本轮新算出来的整体优化内容 → 写进「整体优化结果」
+//   useOverallOptimized 这次输出用的是整体优化 → 总编辑滑块切到「优化」
+//   cardUpdates         运行期动过的卡（合=灰的单卡优化结果 / 滑块切换）
+// ComfyUI 的 ui 契约：后端每个键的值是**列表**（execution.py 按值列表合并），所以这里取 [0]；
+// 同时兼容直接给标量 / 直接给数组的写法。
+function uiScalar(v) { return Array.isArray(v) ? v[0] : v; }
+function uiList(v) {
+  if (!Array.isArray(v)) return [];
+  return (v.length === 1 && Array.isArray(v[0])) ? v[0] : v;
+}
+function applyExecutedOptimized(node, ui) {
+  if (!node || !ui) return;
+  const st = stateFor(node);
+  let changed = false;
+  const text = String(uiScalar(ui.optimized) || '');
+  if (text) {
+    st.overallOptimized = text;
+    st.overallOptimizedHTML = plainTextToHtml(text);
+    changed = true;
+  }
+  if (uiScalar(ui.useOverallOptimized) && !st.overallUseOptimized) { st.overallUseOptimized = true; changed = true; }
+  (uiList(ui.cardUpdates)).forEach((c) => {
+    if (!c || c.id == null) return;
+    const local = st.cards.find((x) => x && String(x.id) === String(c.id));
+    if (!local) return;
+    if (c.contentOptimized) {
+      local.contentOptimized = c.contentOptimized;
+      local.contentOptimizedHTML = plainTextToHtml(c.contentOptimized);
+      changed = true;
+    }
+    if (c.useOptimized && !local.useOptimized) { local.useOptimized = true; changed = true; }
+  });
+  if (!changed) return;
+  syncToConfig(node);
+  refreshUI(node);
+  // 「总体编辑」开着且没在焦点里打字时，按新槽位重绘
+  try {
+    const m = _allModal;
+    if (m && m.classList.contains('active') && m._node === node && m._ed && !m._ed.contains(document.activeElement)) {
+      _allTab = st.overallUseOptimized ? 'optimized' : _allTab;
+      renderAllEditor(node);
+    }
+  } catch (_) {}
 }
 
 // 节点外黑框 socket 标签（仿 ModelsCombo installOutsideLabels：DOM 覆盖层逐帧对齐 socket 圆点）。
@@ -2555,20 +4119,18 @@ function installSocketLabels(node) {
   };
   const update = () => {
     const rootEl = node._ezRoot;
-    if (!rootEl || !rootEl.isConnected) { node._ephOutRaf = requestAnimationFrame(update); return; }
+    if (!rootEl || !rootEl.isConnected) { return; }
     if (app && app.graph && node.graph !== app.graph) {
       (node._ephOutEls || []).forEach((x) => { try { x.el.style.display = 'none'; } catch (_) {} });
-      node._ephOutRaf = requestAnimationFrame(update);
       return;
     }
     let rect = null;
-    try { rect = rootEl.getBoundingClientRect(); } catch (_) { node._ephOutRaf = requestAnimationFrame(update); return; }
-    if (!rect || rect.width <= 0) { node._ephOutRaf = requestAnimationFrame(update); return; }
+    try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
+    if (!rect || rect.width <= 0) { return; }
     const nodeW0 = (node.size && node.size[0]) || 1;
     const sx0 = rect.width / nodeW0;
     if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.3) {
       all.forEach((item) => { item.el.style.display = 'none'; });
-      node._ephOutRaf = requestAnimationFrame(update);
       return;
     }
     scan();
@@ -2596,9 +4158,19 @@ function installSocketLabels(node) {
       item.el.style.top = (cy - th / 2) + 'px';
       try { item.dot.style.background = dotColor(item.type); } catch (_) {}
     });
-    node._ephOutRaf = requestAnimationFrame(update);
   };
-  update();
+  // 不再每帧自递归：与画布同帧同步更新（onDrawForeground），resize/滚动/注册表变化时经 rAF 补
+  const schedule = () => pumpFrames();
+  {
+    const prevDraw = node.onDrawForeground;
+    node.onDrawForeground = function (ctx) {
+      if (prevDraw) prevDraw.call(this, ctx);
+      update();
+        pumpFrames();
+    };
+    scheduleOnRedraw(update);
+    schedule();
+  }
 }
 
 // ===== 挂载 =====
@@ -2611,16 +4183,19 @@ function hideConfigWidget(node) {
     w.options.getMinHeight = () => 0; w.options.getMaxHeight = () => 0;
   } catch (_) {}
 }
+// DOM widget 类型名每个实例唯一（同类型节点并存时避免 widget/socket 混淆，与 MediaLoader/MediaOut 写法一致）
+let _phWidgetSeq = 0;
+function nextPhWidgetType() { _phWidgetSeq += 1; return 'eph-config__' + _phWidgetSeq.toString(36); }
 function setupNode(node) {
   if (!node || node._ezPhSetup) return;
   try {
-    if (typeof node.addDOMWidget !== 'function') return;
+    if (typeof node.addDOMWidget !== 'function') { console.warn('[PromptHelper] 该前端不支持 addDOMWidget，面板无法挂载（节点 #' + node.id + '）'); return; }
     node._ezPhSetup = true;
     loadFromConfig(node);
     const root = buildRoot(node);
     node._ezRoot = root;
     makeDomWidgetHitThrough(root);
-    const widget = node.addDOMWidget('提示词卡片', 'eph-panel', root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 4, getMinHeight: () => 120, getValue: () => '{}', setValue: () => {} });
+    const widget = node.addDOMWidget('提示词卡片', nextPhWidgetType(), root, { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 4, getMinHeight: () => 120, getValue: () => '{}', setValue: () => {} });
     makeDomWidgetHitThrough(widget.element || root);
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
@@ -2634,7 +4209,7 @@ function setupNode(node) {
 }
 function hookPrototype(nt) {
   if (!nt || nt.__ezPhHooked) return; nt.__ezPhHooked = true;
-  const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
+  const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; console.log('[PromptHelper] 钩子 nodeCreated #' + this.id); setupNode(this); return r; };
   const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); refreshUI(this); return r; };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;
@@ -2642,12 +4217,18 @@ function hookPrototype(nt) {
     return r;
   };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezPhSyncTimer) clearTimeout(this._ezPhSyncTimer); } catch (_) {} try { if (this._ephOutRaf) cancelAnimationFrame(this._ephOutRaf); } catch (_) {} try { (this._ephOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); } catch (_) {} try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPhSetup = false; return r; };
-  const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
+  const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); setupNode(this); return r; };
+  // 运行期整体优化结果回写（后端 run() 返回 ui.optimized → 写进「总体编辑·优化」）
+  const prevExec = nt.prototype.onExecuted; nt.prototype.onExecuted = function (message) {
+    const r = prevExec ? prevExec.apply(this, arguments) : undefined;
+    try { applyExecutedOptimized(this, message); } catch (_) {}
+    return r;
+  };
 }
 app.registerExtension({
   name: 'Comfy.EzFlex.PromptHelper',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },
   nodeCreated(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
   loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
-  setup() { ((app.graph && app.graph._nodes) || []).forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); }); },
+  setup() { const g = app && app.graph; const ns = (g && (g._nodes || g.nodes)) || []; ns.forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); }); startIndexWatcher(this); onIndexChange(() => { refreshMediaChips(); refreshRefBrowser(); }); },
 });

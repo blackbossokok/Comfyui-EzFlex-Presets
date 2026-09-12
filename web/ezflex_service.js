@@ -29,6 +29,68 @@ export const NODE_TYPES = {
   MEDIA_OUT: "EzFlex-MediaOut",
 };
 
+// ===== 性能开关（全插件一处控制；出问题改常数即可回到旧行为，不用改结构）=====
+export const EZ_PERF = {
+  labelFallbackMs: 0,     // 外侧标签兜底定时器（0 = 关；发现标签滞后可设 400）
+  mainPollMs: 0,          // MainControl 兜底轮询（0 = 关；发现卡片不刷新可设 2000）
+  indexPollMs: 0,         // 媒体索引兜底轮询（0 = 关；发现编号不刷新可设 3000）
+  groupPollMs: 0,         // 节点开关组 / 总控制 兜底轮询（0 = 关；发现分组不刷新可设 1500）
+  render3d: 'ondemand',   // 'ondemand' = 按需渲染；'loop' = 旧的常驻 60fps
+};
+
+// 外侧标签的统一唤醒：替代「每节点常驻 requestAnimationFrame」。
+// 触发源 = 节点自己的 onDrawForeground（画布重绘）+ 窗口 resize / 页面滚动；全静止时零开销。
+const _perfScheds = new Set();
+let _pumpUntil = 0, _pumpRaf = 0;
+const _runScheds = () => { _perfScheds.forEach((f) => { try { f(); } catch (_) {} }); };
+// 交互期间的连续帧：像旧的常驻 60fps 一样每帧更新，但「停手 ms 毫秒后自动停」→ 静止时零开销。
+// 触发源：画布 setDirty（拖动/缩放/平移都会调）+ 画布上的指针/滚轮事件 + resize/滚动 + 注册表变化。
+export function pumpFrames(ms) {
+  const now = Date.now();
+  _pumpUntil = Math.max(_pumpUntil, now + (ms || 300));
+  if (_pumpRaf) return;
+  const tick = () => {
+    _pumpRaf = 0;
+    _runScheds();
+    if (Date.now() < _pumpUntil) _pumpRaf = requestAnimationFrame(tick);
+  };
+  _pumpRaf = requestAnimationFrame(tick);
+}
+function canvasEl() {
+  try {
+    if (app && app.canvas) return app.canvas.canvas || app.canvas.canvasEl || null;
+    return document.querySelector('canvas#graph-canvas') || document.querySelector('.litegraph canvas') || null;
+  } catch (_) { return null; }
+}
+export function scheduleOnRedraw(fn) {
+  if (typeof fn !== 'function') return;
+  _perfScheds.add(fn);
+  if (_perfScheds._bound) return;
+  _perfScheds._bound = true;
+  // ① LiteGraph 请求重绘（拖动节点 / 平移 / 缩放画布 都会走这里）→ 保持连续帧
+  try {
+    const C = (typeof LGraphCanvas !== 'undefined' && LGraphCanvas) ? LGraphCanvas : null;
+    if (C && typeof C.prototype.setDirty === 'function' && !C.prototype.__ezPumpHooked) {
+      C.prototype.__ezPumpHooked = true;
+      const prev = C.prototype.setDirty;
+      C.prototype.setDirty = function () { const r = prev.apply(this, arguments); try { pumpFrames(); } catch (_) {} return r; };
+    }
+  } catch (_) {}
+  // ② 画布上的指针/滚轮事件：Vue 节点编辑器模式下手拖节点不一定触发 setDirty，这里兜底
+  try {
+    const cv = canvasEl();
+    if (cv && !cv.__ezPumpBound) {
+      cv.__ezPumpBound = true;
+      ['pointerdown', 'pointermove', 'pointerup', 'wheel'].forEach((ev) => cv.addEventListener(ev, () => pumpFrames(), { passive: true }));
+    }
+  } catch (_) {}
+  // ③ 窗口变化
+  window.addEventListener('resize', () => pumpFrames(), { passive: true });
+  window.addEventListener('scroll', () => pumpFrames(), { passive: true, capture: true });
+  on('ezflex:changed', () => _runScheds());   // 注册表变化：立刻刷一次
+  if (EZ_PERF.labelFallbackMs > 0) setInterval(_runScheds, EZ_PERF.labelFallbackMs);
+}
+
 export const MODE_NUM = { on: 0, off: 2, bypass: 4 }; // LiteGraph.ALWAYS / NEVER / BYPASS
 export const BASE_PRESETS = ["全部开启", "全部禁用", "全部绕过"];
 export function isBasePreset(k) { return BASE_PRESETS.indexOf(k) >= 0; }
@@ -122,12 +184,17 @@ export function changeModeOfNodes(nodes, mode) {
 export function configWidget(node) {
   return (node.widgets || []).find((w) => w.name === 'config');
 }
+// 配置写完后广播：媒体编号表靠它即时重建，不用等轮询。
+export function notifyConfigChanged(node) {
+  try { window.dispatchEvent(new CustomEvent('ezflex:config-changed', { detail: { node: node } })); } catch (_) {}
+}
 export function writeConfig(node, state) {
   const w = configWidget(node);
   if (!w) return;
   w.value = JSON.stringify(state);
   if (typeof w.callback === 'function') w.callback(w.value);
   if (node.graph) node.graph.setDirtyCanvas(true, true);
+  notifyConfigChanged(node);
 }
 export function readConfig(node, fallback) {
   const w = configWidget(node);
@@ -271,7 +338,6 @@ function _applyPanelHitThrough(element) {
 }
 
 export function makeDomWidgetHitThrough(element) { _applyPanelHitThrough(element); }
-export function applyDomHitThrough(element) { _applyPanelHitThrough(element); }
 
 let _dlg = null;
 export function uiPrompt(msg, def) {
@@ -369,76 +435,9 @@ export function enlargeSocketHitArea(radius) {
   }
 }
 
-export function hideSocketNames(node) {
-  if (!node) return;
-  (node.inputs || []).forEach((i) => { try { i.label = ''; i.hideName = true; i.hidden = false; } catch (_) {} });
-  (node.outputs || []).forEach((o) => { try { o.label = ''; o.hideName = true; o.hidden = false; } catch (_) {} });
-}
 
 // 内嵌面板基础布局 CSS：shell 全节点穿透；root 居中（左右留 SIDE=20px 端口列）；端口列绝对穿透。
-export function socketPanelCSS(side) {
-  const S = Number(side) > 0 ? Number(side) : 20;
-  return `
-.ezfx-sh-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
-.ezfx-sh-root{position:absolute;inset:0 ${S}px 0 ${S}px;box-sizing:border-box;pointer-events:auto;background:#fff;border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;font-family:Inter,sans-serif;color:#1a1a2e;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
-.ezfx-sh-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
-.ezfx-sh-strip{position:absolute;top:0;bottom:0;width:${S}px;pointer-events:none;z-index:2;}
-.ezfx-sh-strip-l{left:0;}
-.ezfx-sh-strip-r{right:0;}
-`;
-}
 
-// ===== 统一自定义下拉（非破坏：隐藏原生 select，叠一个圆角按钮 + 自绘菜单，value/change 走原 select）=====
-let _ezddInjected = false;
-export function decorateSelect(sel) {
-  if (!sel || sel.nodeName !== 'SELECT' || sel._ezdd) return sel;
-  sel._ezdd = true;
-  if (!_ezddInjected) {
-    _ezddInjected = true;
-    const st = document.createElement('style');
-    st.textContent = '.ez-dd-wrap{position:relative;display:inline-flex;align-items:center;flex:0 0 auto;}.ez-dd-btn{appearance:none;-webkit-appearance:none;min-width:120px;height:32px;padding:4px 30px 4px 12px;border:1px solid #dce3ec;border-radius:999px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'6\'%3E%3Cpath d=\'M1 1l4 4 4-4\' stroke=\'%236b7a8e\' stroke-width=\'1.5\' fill=\'none\' stroke-linecap=\'round\'/%3E%3C/svg%3E") no-repeat right 13px center;font-size:12px;color:#1a1f2b;cursor:pointer;outline:none;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;}.ez-dd-btn:hover,.ez-dd-btn:focus{border-color:#2b3a4a;background-color:#fff;}.ez-dd-menu{display:none;position:absolute;top:35px;left:0;z-index:1200;min-width:160px;max-width:280px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.14);padding:4px;max-height:260px;overflow:auto;}.ez-dd-menu.open{display:block;}.ez-dd-item{padding:6px 12px;font-size:12px;color:#1a1f2b;border-radius:8px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;}.ez-dd-item:hover{background:#f3f5f9;}.ez-dd-item.active{background:rgba(43,58,74,.08);font-weight:600;color:#2b3a4a;}';
-    document.head.appendChild(st);
-  }
-  const wrap = document.createElement('div'); wrap.className = 'ez-dd-wrap';
-  const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'ez-dd-btn';
-  const menu = document.createElement('div'); menu.className = 'ez-dd-menu';
-  const holder = sel.parentNode;
-  if (!holder) return sel;
-  holder.insertBefore(wrap, sel);
-  sel.style.cssText = 'position:absolute;opacity:0;pointer-events:none;width:0;height:0;left:0;top:0;';
-  wrap.appendChild(sel); wrap.appendChild(btn); wrap.appendChild(menu);
-  const refresh = () => {
-    btn.textContent = sel.value || (sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : '');
-    menu.innerHTML = '';
-    if (!sel.options.length) { const e = document.createElement('div'); e.className = 'ez-dd-item'; e.textContent = '（无）'; e.style.color = '#94a3b8'; menu.appendChild(e); }
-    for (let i = 0; i < sel.options.length; i++) {
-      const o = sel.options[i]; const it = document.createElement('div'); it.className = 'ez-dd-item' + (o.selected ? ' active' : ''); it.textContent = o.textContent || o.value; it.dataset.v = o.value;
-      it.addEventListener('click', () => { sel.value = o.value; try { sel.dispatchEvent(new Event('change', { bubbles: true })); } catch (_) {} refresh(); menu.classList.remove('open'); });
-      menu.appendChild(it);
-    }
-  };
-  sel.addEventListener('change', refresh);
-  btn.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('open'); });
-  menu.addEventListener('mousedown', (e) => e.preventDefault());
-  document.addEventListener('click', () => { menu.classList.remove('open'); });
-  refresh();
-  return sel;
-}
-const _ddState = { roots: new Set(), ob: null };
-export function decorateSelectsIn(root) {
-  if (root && root.querySelectorAll) _ddState.roots.add(root);
-  if (!_ddState.ob) {
-    _ddState.ob = new MutationObserver((muts) => {
-      muts.forEach((m) => m.addedNodes.forEach((n) => {
-        const sels = n.nodeName === 'SELECT' ? [n] : (n.querySelectorAll ? Array.from(n.querySelectorAll('select')) : []);
-        sels.forEach((s) => { if (!s._ezdd && _ddState.roots.size && [..._ddState.roots].some((r) => r.contains(s))) decorateSelect(s); });
-      }));
-    });
-    _ddState.ob.observe(document.body, { childList: true, subtree: true });
-  }
-  const scope = (root && root.querySelectorAll ? root : document);
-  scope.querySelectorAll('select').forEach((s) => { if (!s._ezdd) decorateSelect(s); });
-}
 
 export const TYPE_ICONS = {
   image: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="16" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M3 17l4-5 4 4 3-3 4 4"/></svg>',

@@ -1,0 +1,19 @@
+# 仓库里一律存 LF、检出一律 LF（消除 Windows autocrlf=true 在 git add 时的警告）
+* text=auto eol=lf
+
+# 二进制资源不做行尾转换
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.gif  binary
+*.ico  binary
+*.mp4  binary
+*.webm binary
+*.mp3  binary
+*.wav  binary
+*.flac binary
+*.glb  binary
+*.fbx  binary
+*.zip  binary
+*.tgz  binary

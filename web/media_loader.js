@@ -6,11 +6,14 @@
 // 文件来源：服务器 input 目录（/media_loader/files），非浏览器本地文件（无法拿到服务器路径）。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { NODE_TYPES, nodeTypeOf, configWidget, installResizeHandles, makeDomWidgetHitThrough, uiPrompt, uiConfirm, makeAudioPlayer } from "./ezflex_service.js";
+import { NODE_TYPES, nodeTypeOf, configWidget, installResizeHandles, makeDomWidgetHitThrough, uiPrompt, uiConfirm, makeAudioPlayer, notifyConfigChanged, scheduleOnRedraw, pumpFrames, EZ_PERF } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.MEDIA_LOADER;
 const PRESET_API = "/media_loader/presets";
 const OUTPUT_API = "/media_loader/outputs";
+// 卡片口专属类型：与 Python 侧 _MEDIA_CARD 一致（传的是卡片对象，只能接 EzFlex-MediaOut）
+const CARD_TYPE = 'EZFLEX_MEDIA_CARD';
+const CARD_COLOR = '#d94848';   // 深红（原来靠 '*' 的默认色，现在自定义类型自己上色）
 const MIN_WIDTH = 640;
 
 const CSS = `
@@ -18,7 +21,7 @@ const CSS = `
 .eml-shell .eml-root{pointer-events:auto;}
 .eml-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1a1f2b;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .eml-root *{box-sizing:border-box;user-select:none;-webkit-user-select:none;}
-.eml-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;flex-shrink:0;}
+.eml-top{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0;flex-shrink:0;} /* 顶部工具栏单行不换行（到「加载输出」为止） */
 .eml-preset{appearance:none;-webkit-appearance:none;min-width:140px;height:32px;padding:4px 32px 4px 14px;border:1px solid #dce3ec;border-radius:999px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 14px center;font-size:12px;color:#1a1f2b;cursor:pointer;flex:0 0 auto;outline:none;box-shadow:none;}
 .eml-preset:focus,.eml-preset:active,.eml-preset:hover{border-color:#2b3a4a;outline:none;box-shadow:none;background-color:#fff;}
 .eml-preset-btn{appearance:none;-webkit-appearance:none;min-width:150px;height:32px;padding:4px 32px 4px 14px;border:1px solid #dce3ec;border-radius:999px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 14px center;font-size:12px;color:#1a1f2b;cursor:pointer;outline:none;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;}
@@ -73,7 +76,7 @@ const CSS = `
 .eml-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;min-height:80px;position:relative;border-radius:8px;}
 @media (max-width:920px){.eml-grid{grid-template-columns:repeat(3,1fr);}}
 @media (max-width:640px){.eml-grid{grid-template-columns:repeat(2,1fr);}}
-.eml-media{background:#fbfcfe;border:1px solid #eef1f6;border-radius:9px;overflow:hidden;display:flex;flex-direction:column;min-height:96px;position:relative;cursor:pointer;transition:.15s;}
+.eml-media{background:#fbfcfe;border:1px solid #eef1f6;border-radius:9px;overflow:hidden;display:flex;flex-direction:column;min-height:192px;position:relative;cursor:pointer;transition:.15s;}
 .eml-media:hover{border-color:#d0d5dd;box-shadow:0 4px 12px rgba(0,0,0,.06);}
 .eml-media.mgr-sel:hover{border-color:rgba(59,130,246,.95);box-shadow:0 0 0 3px rgba(59,130,246,.9);background:rgba(59,130,246,.2);}
 .eml-media .pv{width:100%;background:#eef1f6;display:flex;align-items:center;justify-content:center;position:relative;aspect-ratio:16/9;overflow:hidden;flex-shrink:0;}
@@ -101,7 +104,7 @@ const CSS = `
 .eml-root input[type=number]::-webkit-inner-spin-button,.eml-root input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
 .eml-media .info .fmeta{font-size:10px;color:#64748b;display:flex;justify-content:space-between;}
 .eml-media .info .fmeta .suffix{background:rgba(255,255,255,.7);padding:0 6px;border-radius:4px;border:1px solid rgba(255,255,255,.6);}
-.eml-empty{background:#fbfcfe;border:2px dashed #d1d5db;border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:134px;cursor:pointer;transition:.15s;color:#94a3b8;gap:4px;}
+.eml-empty{background:#fbfcfe;border:2px dashed #d1d5db;border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:230px;cursor:pointer;transition:.15s;color:#94a3b8;gap:4px;}
 .eml-empty:hover{border-color:#94a3b8;background:#f3f5f9;}
 .eml-empty .big{font-size:28px;font-weight:300;line-height:1;}
 .eml-addbar{margin-top:8px;padding:8px 0;border-top:1px solid #eef1f6;text-align:center;cursor:pointer;color:#6b7a8e;font-size:13px;opacity:.6;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0;}
@@ -131,13 +134,15 @@ function configWidgetOf(node) { return configWidget(node); }
 function syncToConfig(node) {
   const st = stateFor(node); const w = configWidgetOf(node); if (!w) return;
   const json = JSON.stringify({ groups: st.groups, currentGroupId: st.currentGroupId, currentPreset: st.currentPreset, gridCols: st.gridCols || 3, gridRowH: st.gridRowH || 1 });
-  w.value = json; if (typeof w.callback === 'function') w.callback(json); if (node.graph) node.graph.setDirtyCanvas(true, true);
+  w.value = json; if (typeof w.callback === 'function') w.callback(json); if (node.graph) node.graph.setDirtyCanvas(true, true); notifyConfigChanged(node);
 }
 function loadFromConfig(node) {
   const st = stateFor(node); const w = configWidgetOf(node);
   let data = {};
   try { data = JSON.parse(w ? (w.value || '{}') : '{}') || {}; } catch (_) { data = {}; }
   st.groups = Array.isArray(data.groups) ? data.groups : [];
+  // 文件类型以扩展名为准：卡片里存的 type 可能是旧值/猜错的，会让预览、端口类型、编号都跑偏。
+  st.groups.forEach((g) => (g.cards || []).forEach((c) => (c.items || []).forEach((it) => (it.files || []).forEach((f) => { const k = mediaKind(f.name || f.path); if (k !== 'other') f.type = k; }))));
   st.currentPreset = data.currentPreset || 'default';
   st.gridCols = Math.max(1, parseInt(data.gridCols, 10) || 3);
   st.gridRowH = Math.max(0, parseInt(data.gridRowH, 10) || 1);
@@ -199,7 +204,7 @@ function render(node) {
   gcInput.addEventListener('change', () => { const v = Math.max(1, parseInt(gcInput.value, 10) || 3); st.gridCols = v; gcInput.value = String(v); syncToConfig(node); render(node); });
   top.appendChild(gcLabel); top.appendChild(gcInput);
   const rhLabel = el('span'); rhLabel.textContent = '高度'; rhLabel.style.cssText = 'font-size:11px;color:#5f6b7a;';
-  const rhInput = el('input'); rhInput.type = 'number'; rhInput.min = '0'; rhInput.step = '1'; rhInput.value = String(st.gridRowH || 1); rhInput.title = '卡片高度倍数：0=按 16:9 自适应；>=1=默认高度(96px)×值';
+  const rhInput = el('input'); rhInput.type = 'number'; rhInput.min = '0'; rhInput.step = '1'; rhInput.value = String(st.gridRowH || 1); rhInput.title = '卡片高度倍数：0=按 16:9 自适应；>=1=默认高度(192px)×值';
   rhInput.style.cssText = 'width:48px;height:30px;padding:4px 6px;font-size:12px;border:1px solid #dce3ec;border-radius:8px;text-align:center;background:#fff;';
   rhInput.addEventListener('change', () => { const v = Math.max(0, parseInt(rhInput.value, 10) || 1); st.gridRowH = v; rhInput.value = String(v); syncToConfig(node); render(node); });
   top.appendChild(rhLabel); top.appendChild(rhInput);
@@ -287,7 +292,7 @@ function buildMediaCard(node, g, card, item) {
   const files = item.files || []; const first = files[0] || {};
   const pv = el('div', 'pv');
   const rowH = stateFor(node).gridRowH;
-  if (rowH > 0) { pv.style.aspectRatio = 'auto'; pv.style.height = Math.max(1, rowH) * 96 + 'px'; }
+  if (rowH > 0) { pv.style.aspectRatio = 'auto'; pv.style.height = Math.max(1, rowH) * 192 + 'px'; }
   const rm = el('button', 'rm', { type: 'button', title: '移除素材' }); rm.textContent = '✕';
   rm.addEventListener('click', (e) => { e.stopPropagation(); card.items = card.items.filter((x) => x.id !== item.id); syncToConfig(node); render(node); });
   pv.appendChild(rm);
@@ -726,9 +731,9 @@ async function deletePreset(node) {
 
 // ===== 文件浏览（可导航任意路径：path bar + 左侧目录 + 底部图标工具栏 + ctrl/shift 多选）=====
 async function fetchBrowse(path) {
-  try { const r = await fetch('/media_loader/browse?path=' + encodeURIComponent(path || '')); const d = await r.json(); if (d && ((d.files && d.files.length) || (d.dirs && d.dirs.length) || d.path)) return { path: d.path || '', parent: d.parent || '', name: d.name || '', dirs: d.dirs || [], files: d.files || [], roots: d.roots || [] }; } catch (_) {}
-  try { const r = await fetch('/media_loader/files'); const d = await r.json(); const fl = d.files || []; return { path: '', parent: '', name: 'input', dirs: [], files: fl, roots: [], _legacy: true }; } catch (_) {}
-  return { path: '', parent: '', name: '', dirs: [], files: [], roots: [] };
+  try { const r = await fetch('/media_loader/browse?path=' + encodeURIComponent(path || '')); const d = await r.json(); if (d && ((d.files && d.files.length) || (d.dirs && d.dirs.length) || d.path)) return { path: d.path || '', parent: d.parent || '', name: d.name || '', dirs: d.dirs || [], files: d.files || [] }; } catch (_) {}
+  try { const r = await fetch('/media_loader/files'); const d = await r.json(); const fl = d.files || []; return { path: '', parent: '', name: 'input', dirs: [], files: fl, _legacy: true }; } catch (_) {}
+  return { path: '', parent: '', name: '', dirs: [], files: [] };
 }
 function openBrowse(node, g, card) {
   const ov = el('div');
@@ -753,11 +758,11 @@ function openBrowse(node, g, card) {
   document.addEventListener('mousedown', onDown);
   ov.querySelector('.eml-bbclose').addEventListener('click', closeBrowse);
   ov.addEventListener('mousedown', (e) => { if (e.target === ov) closeBrowse(); });
-  const tree = ov.querySelector('.eml-bbtree'), list = ov.querySelector('.eml-bblist'), count = ov.querySelector('.eml-bbcount'), search = ov.querySelector('.eml-bbsearch'), pathInput = ov.querySelector('.eml-path');
+  const tree = ov.querySelector('.eml-bbtree'), list = ov.querySelector('.eml-bblist'), count = ov.querySelector('.eml-bbcount'), search = ov.querySelector('.eml-bbsearch');
   const icons = { image: '🖼', video: '🎬', audio: '🎵', model_3d: '🧊' };
   const icon = (t) => icons[t] || '📄';
   const isAbsImg = (f) => f.type === 'image';
-  let cur = ''; let curData = { files: [], dirs: [], parent: '', roots: [], path: '' };
+  let cur = ''; let curData = { files: [], dirs: [], parent: '', path: '' };
   let selFolder = ''; let paneFiles = [];
   let selected = new Set(); let lastAnchor = -1; let view = 'big';
   let hist = []; let histIdx = -1;
@@ -768,12 +773,8 @@ function openBrowse(node, g, card) {
     curData = d; cur = d.path || path;
     selFolder = cur; paneFiles = (d.files || []).slice();
     selected = new Set(); lastAnchor = -1;
-    storeRoots(d.roots);
     treeCache[cur] = (d.dirs || []).map((x) => ({ name: x.name, path: x.path }));
     drawTree(); drawPane();
-  };
-  const storeRoots = (roots) => {
-    // 手动路径输入框：保持为空，回车跳转；不自动填充
   };
   const _fSVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>';
   const treeCache = {}; const treeExpanded = {};
@@ -804,12 +805,33 @@ function openBrowse(node, g, card) {
     dirs.forEach((d) => mkNode(d, 0));
   };
   const refreshSel = () => { list.querySelectorAll('.eml-bb-item').forEach((x) => x.classList.toggle('sel', selected.has(x.dataset.path))); count.textContent = '已选 ' + selected.size + ' 个'; };
+  // 卡片右上角 +/− 按钮（ModelsCombo 同款）：把一个素材加入/移出当前素材卡片。
+  const fileEntryOf = (f) => ({ id: genId(), name: f.name, path: f.path || f.name, subfolder: '', dir: 'input', type: f.type || mediaKind(f.name), url: fileUrl(f), size: f.size, mtime: f.mtime });
+  const cardHasFile = (f) => (card.items || []).some((it) => (it.files || []).some((x) => (x.path || x.name) === (f.path || f.name)));
+  const toggleCardFile = (f) => {
+    const p = f.path || f.name;
+    let removed = false;
+    (card.items || []).forEach((it) => { const before = (it.files || []).length; it.files = (it.files || []).filter((x) => (x.path || x.name) !== p); if (it.files.length !== before) removed = true; });
+    if (!removed) card.items.push({ id: genId(), files: [fileEntryOf(f)] });
+    card.items = card.items.filter((it) => (it.files || []).length);
+    syncToConfig(node); render(node);
+    return !removed;
+  };
+  const mkAddBtn = (f) => {
+    const b = el('button'); b.type = 'button';
+    b.style.cssText = 'position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.55);color:#1a1f2b;font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;font-family:inherit;padding:0;';
+    const refresh = () => { const on = cardHasFile(f); b.textContent = on ? '−' : '+'; b.title = on ? '从素材卡片移除' : '添加到素材卡片'; b.style.background = on ? 'rgba(74,106,90,.85)' : 'rgba(255,255,255,.55)'; b.style.color = on ? '#fff' : '#1a1f2b'; };
+    refresh();
+    b.addEventListener('mouseenter', () => { b.style.transform = 'scale(1.05)'; });
+    b.addEventListener('mouseleave', () => { b.style.transform = ''; });
+    b.addEventListener('click', (e) => { e.stopPropagation(); toggleCardFile(f); refresh(); });
+    return b;
+  };
   const drawPane = () => {
     const q = (search.value || '').toLowerCase();
     let listF = (paneFiles || []).filter((f) => !q || (f.name || '').toLowerCase().indexOf(q) >= 0);
     list.innerHTML = '';
     if (!listF.length) { const e = el('div'); e.textContent = '未找到媒体文件'; e.style.cssText = 'color:#8a9aa8;text-align:center;padding:40px 12px;font-size:13px;'; list.appendChild(e); return; }
-    const refreshSel = () => { list.querySelectorAll('.eml-bb-item').forEach((x) => x.classList.toggle('sel', selected.has(x.dataset.path))); count.textContent = '已选 ' + selected.size + ' 个'; };
     const toggleSel = (i, ev) => {
       const f = listF[i]; const p = f.path || f.name;
       if (ev.shiftKey && lastAnchor >= 0) {
@@ -821,19 +843,20 @@ function openBrowse(node, g, card) {
       refreshSel();
     };
     const renderRow = (f) => {
-      const row = el('div'); row.classList.add('eml-bb-item'); row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;'; row.dataset.path = f.path || f.name;
+      const row = el('div'); row.classList.add('eml-bb-item'); row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;position:relative;'; row.dataset.path = f.path || f.name;
       const ic = el('span'); ic.textContent = icon(f.type); row.appendChild(ic);
       const nm = el('span'); nm.textContent = f.name; nm.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'; row.appendChild(nm);
       const sv = el('span'); sv.textContent = typeShort(f.type); sv.style.cssText = 'color:#6b7a8e;font-size:10px;background:#f3f5f9;padding:0 8px;border-radius:30px;'; row.appendChild(sv);
+      row.appendChild(mkAddBtn(f));
       row.addEventListener('click', (e) => toggleSel(listF.indexOf(f), e));
       return row;
     };
     const renderTile = (f) => {
-      const tile = el('div'); tile.classList.add('eml-bb-item'); tile.style.cssText = 'cursor:pointer;border:1px solid #eef1f6;border-radius:9px;overflow:hidden;background:#fff;align-self:start;'; tile.dataset.path = f.path || f.name;
+      const tile = el('div'); tile.classList.add('eml-bb-item'); tile.style.cssText = 'cursor:pointer;border:1px solid #eef1f6;border-radius:9px;overflow:hidden;background:#fff;align-self:start;position:relative;'; tile.dataset.path = f.path || f.name;
       const pv = el('div'); pv.style.cssText = 'height:88px;max-height:88px;min-height:88px;background:#eef1f6;display:flex;align-items:center;justify-content:center;font-size:30px;color:#94a3b8;overflow:hidden;';
       if (isAbsImg(f)) { const im = el('img'); im.src = fileUrl(f); im.style.cssText = 'display:block;max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;'; pv.appendChild(im); } else pv.textContent = icon(f.type);
       const nm = el('div'); nm.textContent = f.name; nm.style.cssText = 'font-size:10px;padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-      tile.appendChild(pv); tile.appendChild(nm);
+      tile.appendChild(pv); tile.appendChild(nm); tile.appendChild(mkAddBtn(f));
       tile.addEventListener('click', (e) => toggleSel(listF.indexOf(f), e));
       return tile;
     };
@@ -864,8 +887,7 @@ function openBrowse(node, g, card) {
   ov.querySelector('.eml-bbadd').addEventListener('click', () => {
     const picked = (paneFiles||[]).filter((f) => selected.has(f.path || f.name));
     if (!picked.length) { uiToast('请先选择文件'); return; }
-    // 外部路径：保留绝对路径；input 目录内转相对 path
-    card.items.push({ id: genId(), files: picked.map((f) => ({ id: genId(), name: f.name, path: f.path || f.name, subfolder: '', dir: 'input', type: f.type || mediaKind(f.name), url: fileUrl(f), size: f.size, mtime: f.mtime })) });
+    card.items.push({ id: genId(), files: picked.map((f) => fileEntryOf(f)) });
     syncToConfig(node); render(node); closeBrowse(); uiToast('已添加 ' + picked.length + ' 个素材');
   });
   try { navigate(''); } catch (err) { try { const e = el('div'); e.textContent = '浏览加载出错：' + (err && err.message || err); e.style.cssText = 'color:#c0392b;text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
@@ -990,7 +1012,7 @@ function openPreview(node, item, card) {
 
 // ===== 3D 预览模态框（内联 three.js，复用 /preview_any/3d/libs/）=====
 function ext3d(url) {
-  try { const u = new URL(url, location.href); const p = u.searchParams.get('path') || u.searchParams.get('filename') || u.pathname; const m = String(p).toLowerCase().match(/\.(gltf|glb|obj|fbx|stl|dae|ply)$/); return m ? m[1] : ''; } catch (_) { return ''; }
+  try { const u = new URL(url, location.href); const p = u.searchParams.get('path') || u.searchParams.get('filename') || u.pathname; const m = String(p).toLowerCase().match(/\.(gltf|glb|obj|fbx)$/); return m ? m[1] : ''; } catch (_) { return ''; }
 }
 function open3d(node, item, card) {
   const f = (item.files || [])[0]; if (!f) return;
@@ -1040,7 +1062,9 @@ function open3d(node, item, card) {
       let loader;
       if (ext === 'glb' || ext === 'gltf') { const gltf = await import(THREE_BASE + 'GLTFLoader.js'); loader = new gltf.GLTFLoader(); }
       else if (ext === 'fbx') { const fbx = await import(THREE_BASE + 'FBXLoader.js'); loader = new fbx.FBXLoader(); }
-      else { const objs = await import(THREE_BASE + 'OBJLoader.js'); loader = new objs.OBJLoader(); }
+      else if (ext === 'obj') { const objs = await import(THREE_BASE + 'OBJLoader.js'); loader = new objs.OBJLoader(); }
+      // 只随包带了 GLTF / FBX / OBJ 三个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
+      else { throw new Error(`不支持的 3D 格式 .${ext || '?'}（仅支持 glb / gltf / obj / fbx）`); }
       loader.load(url, (obj) => {
         status.textContent = '';
         const wrap = new THREE.Group(); wrap.add(obj);
@@ -1051,18 +1075,19 @@ function open3d(node, item, card) {
         // 简易轨道：左键环绕 / 滚轮缩放 / Shift+右键平移
         let theta = 0.6, phi = 1.0, radius = maxD * 3 || 4; const target = new THREE.Vector3(0, maxD * 0.2, 0);
         let drag = null;
-        const apply = () => { camera.position.set(target.x + radius * Math.sin(phi) * Math.sin(theta), target.y + radius * Math.cos(phi), target.z + radius * Math.sin(phi) * Math.cos(theta)); camera.lookAt(target); };
+        const render = () => { try { renderer.render(scene, camera); } catch (_) {} };
+        const apply = () => { camera.position.set(target.x + radius * Math.sin(phi) * Math.sin(theta), target.y + radius * Math.cos(phi), target.z + radius * Math.sin(phi) * Math.cos(theta)); camera.lookAt(target); render(); };
         canvas.addEventListener('pointerdown', (e) => { e.preventDefault(); drag = { x: e.clientX, y: e.clientY, btn: e.button }; canvas.setPointerCapture(e.pointerId); });
         canvas.addEventListener('pointermove', (e) => { if (!drag) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY; if (drag.btn === 2 || e.shiftKey) { const sx = (dx / 600) * radius, sy = (dy / 600) * radius, right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), theta), up = new THREE.Vector3(Math.cos(phi) * Math.sin(theta), -Math.sin(phi), Math.cos(phi) * Math.cos(theta)); target.add(right.multiplyScalar(-sx)); target.add(up.multiplyScalar(sy)); } else { theta -= dx * 0.01; phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi - dy * 0.01)); } apply(); });
         canvas.addEventListener('wheel', (e) => { e.preventDefault(); radius = Math.max(0.2, radius * (1 + (e.deltaY > 0 ? 0.09 : -0.09))); apply(); }, { passive: false });
         canvas.addEventListener('contextmenu', (e) => e.preventDefault());
         const up = () => { drag = null; };
         canvas.addEventListener('pointerup', up); canvas.addEventListener('pointerleave', up); canvas.addEventListener('pointercancel', up);
-        let raf = 0; const loop = () => { renderer.render(scene, camera); raf = requestAnimationFrame(loop); }; loop();
-        apply();
+        let raf = 0;
+        if (EZ_PERF.render3d === 'loop') { const loop = () => { render(); raf = requestAnimationFrame(loop); }; loop(); } else { apply(); }
         const doShot = (silent) => { try { apply(); renderer.render(scene, camera); const u2 = renderer.domElement.toDataURL('image/png'); _mlPreview[item.id] = u2; if (node) render(node); if (!silent) uiToast('已生成 3D 预览图'); } catch (_) { if (!silent) uiToast('生成预览失败'); } };
         if (!_mlPreview[item.id]) { const autoShot = () => { theta = 0; phi = 1.0; radius = maxD * 3 || 4; target.set(0, maxD * 0.2, 0); apply(); doShot(true); }; setTimeout(autoShot, 320); }
-        wfCb.addEventListener('change', () => { wrap.traverse((o) => { if (o.isMesh && o.material) o.material.wireframe = wfCb.checked; }); });
+        wfCb.addEventListener('change', () => { wrap.traverse((o) => { if (o.isMesh && o.material) o.material.wireframe = wfCb.checked; }); render(); });
         matSel.addEventListener('change', () => {
           const mode = matSel.value;
           wrap.traverse((o) => {
@@ -1074,8 +1099,9 @@ function open3d(node, item, card) {
             else if (mode === 'wire') { o.material.wireframe = true; }
             else { o.material.wireframe = false; }
           });
+          render();
         });
-        bgIn.addEventListener('input', () => { scene.background = new THREE.Color(bgIn.value || '#f7f9fd'); });
+        bgIn.addEventListener('input', () => { scene.background = new THREE.Color(bgIn.value || '#f7f9fd'); render(); });
         resetBtn.addEventListener('click', () => { theta = 0.6; phi = 1.0; radius = maxD * 3 || 4; target.set(0, maxD * 0.2, 0); apply(); });
         shotBtn.addEventListener('click', () => doShot());
         cleanup = () => { cancelAnimationFrame(raf); try { ro.disconnect(); } catch (_) {} try { renderer.dispose(); } catch (_) {} ov.remove(); };
@@ -1100,11 +1126,11 @@ function updatePorts(node, noRedraw) {
     let sock = null;
     for (let i = 0; i < old.length; i++) { if (!used.has(i) && old[i]._ezCardId != null && String(old[i]._ezCardId) === String(w.id)) { sock = old[i]; used.add(i); break; } }
     if (!sock) { for (let i = 0; i < old.length; i++) { if (!used.has(i)) { sock = old[i]; used.add(i); break; } } }
-    if (!sock) { node.addOutput(w.label, '*', {}); sock = node.outputs[node.outputs.length - 1]; changed = true; }
+    if (!sock) { node.addOutput(w.label, CARD_TYPE, {}); sock = node.outputs[node.outputs.length - 1]; changed = true; }
     if (sock._ezCardId !== w.id) { sock._ezCardId = w.id; changed = true; }
     if (sock.name !== w.label) { sock.name = w.label; changed = true; }
-    if (String(sock.type) !== '*') { try { sock.type = '*'; } catch (_) {} changed = true; }
-    try { sock.label = ''; sock.hideName = true; sock.hidden = false; sock._ezLabel = w.label; } catch (_) {}
+    if (String(sock.type) !== CARD_TYPE) { try { sock.type = CARD_TYPE; } catch (_) {} changed = true; }
+    try { sock.label = ''; sock.hideName = true; sock.hidden = false; sock._ezLabel = w.label; sock.color_on = CARD_COLOR; sock.color_off = CARD_COLOR; sock.color = CARD_COLOR; } catch (_) {}
     seq.push(sock);
   });
   old.forEach((o, i) => { if (!used.has(i)) { const idx = node.outputs.indexOf(o); if (idx >= 0) { node.removeOutput(idx); changed = true; } } });
@@ -1123,16 +1149,6 @@ function syncOutputTypes(node) {
 }
 
 // 供 PromptHelper graphMediaFiles 读取本节点素材文件
-function mediaFilesOf(node) {
-  const st = stateFor(node); const out = [];
-  st.groups.forEach((g) => g.cards.forEach((c) => c.items.forEach((it) => (it.files || []).forEach((f) => {
-    if (f && f.path) {
-      const url = f.url || ('/view?type=input&filename=' + encodeURIComponent(f.name || '') + (f.subfolder ? '&subfolder=' + encodeURIComponent(f.subfolder) : ''));
-      out.push({ name: f.name || '', path: f.path, type: f.type || mediaKind(f.name), url });
-    }
-  }))));
-  return out;
-}
 
 // ===== 黑框标签（输出 socket 深红圆点 + 半透明黑框）=====
 function forceShell(node) {
@@ -1147,18 +1163,18 @@ function installOutsideLabels(node) {
   let all = []; let sig = '';
   const mk = (text) => { const l = el('div', 'eml-socket-label'); l.textContent = text || ''; l.style.display = 'none'; document.body.appendChild(l); return l; };
   const scan = () => {
-    const cur = (node.outputs || []).map((s, i) => ({ i, name: s._ezLabel || s.name || '', type: s.type })).filter((x) => x.type === '*');
+    const cur = (node.outputs || []).map((s, i) => ({ i, name: s._ezLabel || s.name || '', type: s.type })).filter((x) => x.type === CARD_TYPE);
     const s = cur.map((x) => x.i + '|' + x.name).join(';');
     if (s !== sig) { sig = s; all.forEach((x) => { try { x.el.remove(); } catch (_) {} }); all = cur.map((x) => ({ el: mk(x.name), i: x.i })); node._emlOutEls = all.map((x) => x.el); }
   };
   const update = () => {
     const rootEl = node._emlRoot;
-    if (!rootEl || !rootEl.isConnected) { node._emlOutRaf = requestAnimationFrame(update); return; }
+    if (!rootEl || !rootEl.isConnected) { return; }
     if (app && app.graph && node.graph !== app.graph) { (node._emlOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); node._emlOutEls = []; return; }
-    let rect = null; try { rect = rootEl.getBoundingClientRect(); } catch (_) { node._emlOutRaf = requestAnimationFrame(update); return; }
-    if (!rect || rect.width <= 0) { node._emlOutRaf = requestAnimationFrame(update); return; }
+    let rect = null; try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
+    if (!rect || rect.width <= 0) { return; }
     const nodeW0 = (node.size && node.size[0]) || 1; const sx0 = rect.width / nodeW0;
-    if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.35) { all.forEach((item) => { item.el.style.display = 'none'; }); node._emlOutRaf = requestAnimationFrame(update); return; }
+    if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.35) { all.forEach((item) => { item.el.style.display = 'none'; }); return; }
     scan();
     const nodeH = (node.size && node.size[1]) || 1; const sy = rect.height / nodeH;
     all.forEach((item) => {
@@ -1171,9 +1187,20 @@ function installOutsideLabels(node) {
       const tw = item.el.offsetWidth; const th = item.el.offsetHeight || 16; const offX = 10 * zoom;
       item.el.style.left = (cx + offX) + 'px'; item.el.style.top = (cy - th / 2) + 'px';
     });
-    node._emlOutRaf = requestAnimationFrame(update);
   };
-  update();
+  // 不再每帧自递归：画布重绘（onDrawForeground）+ resize/滚动 触发，一帧最多一次；静止时零开销
+  const schedule = () => pumpFrames();
+  {
+    const prevDraw = node.onDrawForeground;
+    node.onDrawForeground = function (ctx) {
+        if (prevDraw) prevDraw.call(this, ctx);
+        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）
+        update();
+        pumpFrames();
+      };
+    scheduleOnRedraw(update);
+    schedule();
+  }
 }
 function hideConfigWidget(node) {
   try { const ins = node.inputs || []; for (let i = ins.length - 1; i >= 0; i--) { if (ins[i] && ins[i].name === 'config') { try { node.inputs.splice(i, 1); } catch (_) { try { ins[i].hidden = true; } catch (_) {} } } } } catch (_) {}
@@ -1249,5 +1276,8 @@ app.registerExtension({
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },
   nodeCreated(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
   loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
-  setup() { ((app.graph && app.graph._nodes) || []).forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); }); },
+  setup() {
+    try { if (typeof LGraphCanvas !== 'undefined' && LGraphCanvas.link_type_colors) { LGraphCanvas.link_type_colors[CARD_TYPE] = CARD_COLOR; } } catch (_) {}
+    ((app.graph && app.graph._nodes) || []).forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); });
+  },
 });

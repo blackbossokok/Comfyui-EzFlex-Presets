@@ -3,7 +3,7 @@
 // 由 config 输入框进 prompt、驱动 Python 节点 → 不再依赖会被缓存的独立 HTML 页面。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { makeDomWidgetHitThrough } from "./ezflex_service.js";
+import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames } from "./ezflex_service.js";
 
 // ===== 现代乳白风样式（ModelsCombo 内嵌面板同套观感）=====
 const MC_CSS = `
@@ -2149,7 +2149,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     };
     const update = () => {
       const rootEl = node._mcRoot;
-      if (!rootEl || !rootEl.isConnected) { node._mcOutRaf = requestAnimationFrame(update); return; }
+      if (!rootEl || !rootEl.isConnected) { return; }
       // 节点不在当前图（子图切换/隐藏）→ 移除黑框并停止，避免残留
       if (app && app.graph && node.graph !== app.graph) {
         (node._mcOutEls || []).forEach((el) => { try { el.remove(); } catch (_) { /* 忽略 */ } });
@@ -2157,14 +2157,13 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         return;
       }
       let rect = null;
-      try { rect = rootEl.getBoundingClientRect(); } catch (_) { node._mcOutRaf = requestAnimationFrame(update); return; }
-      if (!rect || rect.width <= 0) { node._mcOutRaf = requestAnimationFrame(update); return; }
+      try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
+      if (!rect || rect.width <= 0) { return; }
       // 节点被缩放/平移到视口外或缩得太小 → 隐藏黑框，避免残留在屏幕左侧
       const nodeW0 = (node.size && node.size[0]) || 1;
       const sx0 = rect.width / nodeW0;
       if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.35) {
         all.forEach((item) => { item.el.style.display = 'none'; });
-        node._mcOutRaf = requestAnimationFrame(update);
         return;
       }
       scan();
@@ -2201,9 +2200,20 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         item.el.style.top = (cy - th / 2) + 'px';
         node._mcOutPosLogged = true;
       });
-      node._mcOutRaf = requestAnimationFrame(update);
     };
-    update();
+    // 不再每帧自递归：画布重绘（onDrawForeground）+ resize/滚动/注册表变化 触发，一帧最多一次；静止时零开销
+    const schedule = () => pumpFrames();
+    {
+      const prevDraw = node.onDrawForeground;
+      node.onDrawForeground = function (ctx) {
+        if (prevDraw) prevDraw.call(this, ctx);
+        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）
+        update();
+        pumpFrames();
+      };
+      scheduleOnRedraw(update);
+      schedule();
+    }
   }
 
   function openMenu(node, x, y, items, onPick) {
@@ -2422,8 +2432,6 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
   // 节点删除时清理：停掉 rAF + 移除外部黑框标签 + 移除 DOM 面板
   function cleanupMcNode(node) {
-    try { if (node._mcOutRaf) cancelAnimationFrame(node._mcOutRaf); } catch (_) { /* 忽略 */ }
-    try { if (node._mcLabelRaf) cancelAnimationFrame(node._mcLabelRaf); } catch (_) { /* 忽略 */ }
     (node._mcOutEls || []).forEach((el) => { try { el.remove(); } catch (_) { /* 忽略 */ } });
     node._mcOutEls = [];
     try { if (node._mcRoot) node._mcRoot.remove(); } catch (_) { /* 忽略 */ }
