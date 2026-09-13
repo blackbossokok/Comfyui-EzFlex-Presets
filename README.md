@@ -24,8 +24,8 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV116tz6xE5V)
 
 ## Changelog
 
-- V1.2.2: Fixed the `EzFlex-NodeSwitchGroup` preset dropdown; fixed the "cannot validate input" errors in `EzFlex-ParamPresetOutput`, `EzFlex-PreviewAny` and others after switching presets in `EzFlex-ParamPresetControl`; improved where custom size presets sit in `EzFlex-FreeLatent`.
-- V1.2.1: Fixed the Node 2.0 click bugs in Prompt Helper (`EzFlex-PromptHelper`), Media Loader (`EzFlex-MediaLoader`) and Media Out (`EzFlex-MediaOut`). Prompt Helper (`EzFlex-PromptHelper`) and Node Switch Group (`NodeSwitchGroup`) gained collapsible toolbar rows.
+- V1.2.2: Fixed the `EzFlex-NodeSwitchGroup` preset dropdown; fixed the "cannot validate input" errors in `EzFlex-ParamPresetOutput`, `EzFlex-PreviewAny` and others after switching presets in `EzFlex-ParamPresetControl`; improved where custom size presets sit in `EzFlex-FreeLatent`; fixed the unclickable controls in the Media Loader preview popup; fixed Media Loader's slow 3D model loading and preview-image generation; fixed Prompt Helper's highlight logic.
+- V1.2.1: Fixed the Node 2.0 click bugs in Prompt Helper (`EzFlex-PromptHelper`), Media Loader (`EzFlex-MediaLoader`) and Media Out (`EzFlex-MediaOut`). Prompt Helper (`EzFlex-PromptHelper`) and Node Switch Group (`NodeSwitchGroup`) gained collapsible toolbar rows. Comprehensive security hardening across the plugin.
 - V1.2.0: Security hardening across the plugin; Main Control (`MainControl`) gained an EN / 中文 language toggle.
 - V1.11: Prompt Helper polish and bug fixes.
 - V1.1: General node polish and performance work; Prompt Helper improvements; compatibility fixes.
