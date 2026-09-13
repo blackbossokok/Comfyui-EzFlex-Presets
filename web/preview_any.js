@@ -4,7 +4,7 @@
 // 参考 AUNPassthroughAnyMulti（onExecuted entries + 固定 ANY 输入槽）。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
+import { ezT, onLocaleChange, ezRelabel } from "./ezflex_i18n.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough,
@@ -351,7 +351,9 @@ function openKeyValueModal(title, obj) {
     if (node && typeof node === 'object') {
       const toggle = document.createElement('span'); toggle.textContent = '▸'; toggle.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:#5f6b7a;flex:0 0 auto;';
       const kk = document.createElement('span');
-      kk.textContent = (key === null ? '' : String(key)) + (Array.isArray(node) ? ' [' + node.length + ']' : ' {' + Object.keys(node).length + '}');
+      const kkTxt = document.createElement('span'); kkTxt.textContent = (key === null ? '' : String(key));   // 值单独一个文本节点，ezRelabel 才能整串匹配
+      const kkSuf = document.createElement('span'); kkSuf.textContent = Array.isArray(node) ? ' [' + node.length + ']' : ' {' + Object.keys(node).length + '}';
+      kk.appendChild(kkTxt); kk.appendChild(kkSuf);
       kk.title = hintKey(key) || String(key);
       kk.style.cssText = 'flex:0 0 45%;color:#5f6b7a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
       row.appendChild(toggle); row.appendChild(kk);
@@ -377,6 +379,7 @@ function openKeyValueModal(title, obj) {
   } else if (data != null) {
     m._list.appendChild(renderNode(data, 'value', 0));
   }
+  try { ezRelabel(m); } catch (_) {}   // 元数据键是英文源串，按当前语言就地译
   m.style.display = 'flex';
 }
 function mediaEl() {
@@ -436,6 +439,7 @@ function openMediaPreview(payload) {
   else if (payload.audio) { m._audio.src = payload.audio; m._audio.style.display = 'block'; } // 不自动播放，交给用户点 play
   if (payload.meta) { m._meta.textContent = payload.meta; m._meta.style.display = 'block'; }
   m._cap.textContent = payload.caption || '';
+  try { ezRelabel(m); } catch (_) {}   // meta 摘要同样是英文源串
   if (m._resetZoom) m._resetZoom();
   m.classList.add('active');
 }
@@ -938,6 +942,7 @@ function renderEntries(node) {
   for (let i = 0; i < conn; i++) list.appendChild(renderCard(node, i, (st.entries || [])[i]));
   attachDnD(list, '.ezpv-card', '.ezpv-handle', (from, to) => reorderCard(node, from, to));
   fitNode(node);
+  try { ezRelabel(root); } catch (_) {}   // 后端返回的是英文源串，按当前语言就地译一次（切语言时各面板重画后再走这里）
 }
 
 function renderCard(node, index, entry) {

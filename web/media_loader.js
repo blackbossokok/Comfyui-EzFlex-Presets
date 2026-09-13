@@ -291,6 +291,7 @@ function buildMediaCard(node, g, card, item) {
   const m = el('div', 'eml-media' + (isItemMgr && node._ezItemSel && node._ezItemSel.has(String(item.id)) ? ' mgr-sel' : ''));
   m.dataset.itemId = item.id; m.dataset.cid = card.id;
   const files = item.files || []; const first = files[0] || {};
+  m.title = (first.name || '') + (files.length > 1 ? ' (+' + (files.length - 1) + ')' : '') + ' — ' + ezT('Click to preview');
   const pv = el('div', 'pv');
   const rowH = stateFor(node).gridRowH;
   if (rowH > 0) { pv.style.aspectRatio = 'auto'; pv.style.height = Math.max(1, rowH) * 192 + 'px'; }
@@ -333,6 +334,7 @@ function buildMediaCard(node, g, card, item) {
 
 function buildEmptyCard(node, g, card) {
   const e = el('div', 'eml-empty');
+  e.title = ezT('Click to browse and add media');
   const big = el('span', 'big'); big.textContent = '+'; e.appendChild(big);
   const t = el('span'); t.textContent = ezT('Add media'); e.appendChild(t);
   e.addEventListener('click', () => openBrowse(node, g, card));

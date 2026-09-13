@@ -1,20 +1,25 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。原版逐轮改动流水账已压缩掉，只留**必要参数 / 踩过的坑 / 解法**。
-> 本文件是唯一交接入口；改动前先看 §5「经验与避坑」，本轮要做什么看 §8.1「体验优化」。
+> 本文件是唯一交接入口；改动前先看 §5「经验与避坑」，下一步做什么看 §8「待办」。
+> **当前状态（V1.2.1）**：评审点名的 5 条（4 条安全收口 + UI 英文化/i18n）已全部完成，第二轮安全审计发现的问题也已修（见 §9.3）；本地仓库待 `git push`；发布相关看 §9.1。
+> **本轮（前端未发版）**：平铺面板刷新/重启后保持打开（含位置尺寸）、中英切换实时生效、PH/NSG 工具条收起展开、PH 卡片弹窗标题=卡片名、空白处拖节点/滚动 —— 见 §5.9。
+> **⚠️ 强制要求（不可违反）：经典模式与 Nodes 2.0（Vue）必须分开。** 任何行为/样式改动都要有明确作用域
+> （`.ezfx-is-vue` 或 `:not(.ezfx-is-vue)`），**禁止写对两种模式同时生效的行为规则**；改一种模式前先确认另一种不受影响，
+> 两种模式各自回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式（必要参数）
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.11"`（`__init__.py` / `pyproject.toml`，README 记 V1.11） |
+| 版本 | `__version__ = "1.2.1"`（`__init__.py:65` / `pyproject.toml`，README 记 V1.2.1） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 插件目录 | `D:\software\AI_software\Comfy-Desktop\ComfyUI-Installs\Comfyui0.30.1\ComfyUI\custom_nodes\Comfyui-EzFlex-Presets` |
-| 规模 | `__init__.py` ≈ 6261 行；`web/prompt_helper.js` ≈ 4064 行 |
+| 规模 | `__init__.py` ≈ 6724 行；`web/prompt_helper.js` ≈ 4467 行；`web/ezflex_i18n.js` 953 行（面板 i18n 字典） |
 | **生效方式** | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS（`_serve_no_store`）→ **页面强刷 Ctrl+F5** |
-| 依赖 | 唯一必须额外装的：`mutagen>=1.46.0`（音频/视频标签与容器元数据）；**可选**：`llama-cpp-python`（提示词助手"进程内 llama"模式；本机 0.3.46 验证过，看图要带 mtmd 的较新构建）、`gguf` / `onnx`（只有读这些模型才用到，缺了跳过"模型元数据卡"不报错）、`ffprobe` 外部可选（`shutil.which` 探测，没有就只走 sidecar JSON）；其余 torch/numpy/Pillow/safetensors/av 由 ComfyUI 自带 —— 见 `requirements.txt` 的分组注释 |
-| 前端版本横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-12-dockv9`），控制台看 `[PromptHelper] 模块已加载 · build …` |
+| 依赖 | 唯一必须额外装的（`requirements.txt` 现在只列它）：`mutagen>=1.46.0`（音频/视频标签与容器元数据）；**可选（已从 requirements 移出，避免 ComfyUI-Manager 安装时强装；手动 `pip install` 或 `pip install -e .[llama,metadata]`）**：`llama-cpp-python`（提示词助手"进程内 llama"模式；本机 0.3.46 验证过，看图要带 mtmd 的较新构建）、`gguf` / `onnx`（只有读这些模型才用到，缺了跳过"模型元数据卡"不报错）、`ffprobe` 外部可选（`shutil.which` 探测，没有就只走 sidecar JSON）；其余 torch/numpy/Pillow/safetensors/av 由 ComfyUI 自带 —— 见 `requirements.txt` 的分组注释 |
+| 前端版本横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-13-i18nv16`），控制台看 `[PromptHelper] 模块已加载 · build …` |
 
 ## 1. 节点清单（11 个，category 全 `EzFlex`）
 
@@ -31,12 +36,15 @@ Add-Node 顺序：
 
 ```
 Comfyui-EzFlex-Presets/
-├── __init__.py            # 11 节点类 + 全部后端路由（6261 行），__version__="1.11"
-├── pyproject.toml         # version="1.11"，dependencies=["mutagen>=1.46.0"]
-├── README.md              # 使用说明（V1.11）
-├── requirements.txt       # 分组写明：ComfyUI 自带（torch/numpy/Pillow/safetensors/av）｜额外必装 mutagen>=1.46.0｜可选 llama-cpp-python / gguf / onnx
+├── __init__.py            # 11 节点类 + 全部后端路由，__version__="1.2.1"
+├── pyproject.toml         # version="1.2.1"，dependencies=["mutagen>=1.46.0"]；[tool.comfy] DisplayName / requires-comfyui（PublisherId 注释待填）
+├── README.md              # 英文说明（默认首页，V1.2.1）；含安全 / 多语言 / 根目录风险警告
+├── README_ZH.md           # 中文说明（同内容）；README_EN.md 只是指路小文件
+├── requirements.txt       # 只列必装的 mutagen>=1.46.0（ComfyUI 自带的 torch/numpy/Pillow/safetensors/av 与可选依赖都写成注释，避免 Manager 安装时强装）｜原分组说明：ComfyUI 自带（torch/numpy/Pillow/safetensors/av）｜额外必装 mutagen>=1.46.0｜可选 llama-cpp-python / gguf / onnx
 ├── .gitignore             # 忽略 __pycache__ / user_data（运行期预设）/ _backups / *.corrupt-backup / _dev_tests（整套回归） / 三份手写笔记 / release.ps1 / *.tgz
-├── user_data/             # 命名预设库（运行期由预设路由写入，每节点一个 json）
+├── .comfyignore           # 发布包排除开发文件（_dev_tests / user_data / .github）
+├── locales/zh/nodeDefs.json  # 官方 i18n：11 个节点的中文 display_name / description / tooltip
+├── user_data/             # 命名预设库（运行期由预设路由写入，每节点一个 json）；仓库不跟踪，缺了不影响功能（§8 说明）
 ├── _dev_tests/            # 本地回归套件（§7）；其 extensions/ / scripts/ / _tmp/ 均为跑测试时自动生成，可随时删（详见 §7）
 └── web/
     ├── ezflex_service.js       # 共享：NODE_TYPES / 注册表 / 事件总线 / 分组匹配 / 预设库 API / 弹窗 / 缩放手柄 / 面板穿透 / TYPE_ICONS / makeAudioPlayer / EZ_PERF
@@ -45,7 +53,8 @@ Comfyui-EzFlex-Presets/
     ├── param_preset_control.js / param_preset_output.js
     ├── modelscombo_node.js / freelatent_node.js
     ├── media_loader.js / media_out.js / preview_any.js
-    ├── prompt_helper.js        # PromptHelper 面板（4064 行）
+    ├── prompt_helper.js        # PromptHelper 面板（4467 行）
+    ├── ezflex_i18n.js          # 面板 i18n：ezT(key) + 中文词典（953 行）
     └── libs/ utils/ curves/    # three.js 与 GLTF/OBJ/FBX 加载器、NURBS 曲线（本地离线，供 3D 查看器）
 ```
 
@@ -290,7 +299,16 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - **排布节点别直接用 `node.pos`，也别用 `node.getBounding()`**：LiteGraph 的 `node.pos` 是「标题栏下沿」的左上角，标题栏画在 `pos` 上方（高 `LiteGraph.NODE_TITLE_HEIGHT`，30px）。按 pos 排两个节点、间隔取 30，视觉上就是**贴在一起**。正确做法：视觉顶 = `pos[1] - NODE_TITLE_HEIGHT`，**下一节点的视觉顶 = 上一节点的 body 底边 + 间距**，纵向推进量 = `NODE_TITLE_HEIGHT + size[1]`；「底部平齐」对齐的是 body 底边（`pos[1] + size[1]`，下方没有额外内容）。`NODE_TITLE_HEIGHT` 直接取常数（与渲染同源）。**标题高度不要用 `node.getBounding()` 取**：litegraph 里 `getBounding()` 返回的是节点的 `boundingRect`（`measure()` 时才写），**刚建出来的节点还没测量，读到的是脏值** → 算出离谱偏移，整列节点被排到屏幕外（实测踩过）。另外坐标要 `isFinite` 兜底再赋给 `node.pos`。MainControl「加载全部」见 §2，排完 350ms 还要再对一次齐（DOM 面板高度下一帧才定型）。
 - 3D 用**本地离线** three.js：ComfyUI 内置 `vendor-three-*.js` 非独立（import 内部模块），故把自包含 `three@0.160.0` + GLTF/OBJ/FBXLoader + BufferGeometryUtils + fflate + NURBSCurve 放 `web/libs`、`web/utils`、`web/curves`；serve 走 `/preview_any/3d/{path}`（ComfyUI 默认不递归 expose `web/` 子目录）。
 
+### 5.9 本轮体验修复（5 项，前端未发版）
+- **平铺面板刷新/重启后保持打开 + 保持位置尺寸**：开/关状态、尺寸、**位置**写进节点 config 的 `ui.dockOpen`（`{card: cardId|null, all, ref}`）/ `ui.dockMem`（画布单位 `{w,h,cx,cy}`）。记录点：`phDockApply` **末尾**（此时 mem 已初始化，别放开头 —— 之前放开头导致「开着但尺寸没记住」）、`closeEditModal` / `saveAllEditor` / 总体编辑的 ✕·取消 / 引用媒体 `closeBrowser`、三层的 `_phOnClose`（点外侧关掉时）、以及拖动/缩放的 `save()`（**松手立刻落盘**，否则不关面板就刷新会丢）。恢复：`setupNode` 里 `phDockRestoreSoon(node)` 按 250ms 重试（**config 要等 `onConfigure` 才到位，`nodeCreated` 时还是空**），有 `dockOpen` 才恢复、只在平铺态恢复；卡片弹窗按 `editingId` 找回那张卡，引用媒体复用卡片/总体编辑的编辑器。`phDockApply` **只在 `mem.cx === undefined` 时回节点右侧/下方默认落点**，之后（含刷新重启）保持记忆位置，双击标题栏才复位。默认尺寸单列在 `PH_DOCK_DEFAULT`：卡片弹窗 `0.42×0.30`（矮一半）、引用媒体 `0.32×0.50`（小一号）、其余走老默认 0.42×0.60。**改了默认尺寸/语义要把 `PH_DOCK_SIZE_V` +1** —— 旧 config 的 `dockMem` 带版本号，版本不符就作废一次、用新默认值，不然老用户一直沿用旧尺寸。
+- **中英切换实时生效（含构建一次就不再重建的按钮/下拉）**：`ezflex_i18n.js` 加 `ezRelabel(root)` / `ezRelabelAll()`，`ezSetLocale` 在跑完各面板重画 hooks 后再扫一遍页面上的 EzFlex DOM。只做**整段文本正好等于词条**的替换（正表英→中、反查表中→英），动态内容（卡片/分组/文件名/正文）靠 `_EZ_SKIP_RE` + `contenteditable` 排除；组合串（如 `Merge 3 cards`）不在词典里天然不受影响。⚠️ 别改成「替换子串」——那会改到卡片正文和规则表。
+- **工具条收起 / 展开（无底边小三角、单独一行、悬停才显形）**：PromptHelper 卡片弹窗与总体编辑各加一条 `.eph-tb-toggle` 行（`toolbarToggleRow`，存 `ui.cardToolbar` / `ui.allToolbar`），位置 = **工具条与「默认/优化」行之间**（卡片弹窗：toolbar→toggle→tabs；总体编辑：tabs→toggle→toolbar）；NodeSwitchGroup 的预设行（`.ezg-hd`）与匹配行（`.ezg-filters`）各一个（`triBtn`，存 `filters.presetCollapsed` / `filters.matchCollapsed`），放在行尾。三角用**边框拼**（`border-bottom` 实色 + 左右透明 = 无底边，默认朝上=展开态，点它收起；收起时 `rotate(180deg)` 朝下=可展开）。平时 `opacity:0`、`:hover` 才显形并给一点底色（opacity 不影响点击）。收起 = 给工具条加 `.collapsed` → `display:none`（不再是隐藏子元素）。和「收起小标题（`Collapse headers` / `.eph-all.collapsed`）」是两件事，别混。
+- **卡片弹窗标题 = 卡片自定义名（且实时跟随）**：`editModalEl` 建标题时存 `_editModal._titleEl`，`openEditModal` 里设成 `card.title || ezT('Edit prompt')`；面板行 / 总体编辑里改标题时走 `syncEditModalTitle(node, card)` 同步到还开着的弹窗标题（否则要重开）。总体编辑标题不变（`Overall edit`）。
+- **空白处可拖节点 + 卡片能点 + 悬停滚轮（经典 / Nodes 2.0 分开做，见文首强制要求）**：**两种模式各走各的**（第一版统一成一套，经典滚动条/空白拖动、Vue 空白拖动全被带坏）。① **CSS**：经典模式**一条 Vue 规则都不加**（面板根由各节点 CSS 的 `.*-root{pointer-events:auto}` 保持命中）；Vue 走 `.ezfx-is-vue [class*="-root"]{pointer-events:none!important;cursor:default}` + 白名单（只放 `button/select/input/textarea` 与 div/span 卡片/行/手柄；**滚动容器故意不放** —— 放开就挡住穿透、空白处拖不动）。② **拖动**：经典 = `installClassicPanel` 里 `installBlankDrag` 手动改 `node.pos`；Vue = 面板穿透后由 `.lg-node` 自身接管（前端 `useNodePointerInteractions`，`node.pos` 手动改在 Vue 下不动）。③ **滚轮**：经典 = `installPanelWheel`（shell 捕获，滚动最近容器）；Vue = `installVueWheel`（**window 捕获**，按 `_SCROLL_SEL` 的矩形找滚动容器手动滚并挡掉画布缩放 —— 因为滚动容器不放开命中，只能在全局兜）。④ `installResizeHandles` 里 `if (vue) installVuePanel(); else installClassicPanel();` 分流，不要再合成一个函数。⑤ NSG 收起行：`.ezg-tri-row{height:12px;margin:-10px 0}` 吃掉 `.ezg-root` gap；**收起时给三角加 `.no-above`（margin-top:0）**，否则三角会被上一行叠住 → 闪烁、点不中。PH 收起行：`.eph-modal-body > .eph-tb-toggle{margin:-8px 0}` / `.eph-all-box > .eph-tb-toggle{margin:-6px 0 0}`。⑥ 卡片补 `title` 悬停提示（PH「点击编辑卡片」、素材卡「点击预览」），可点卡片 `cursor:pointer`。
+- **Vue 下 ModelsCombo / FreeLatent 白面板底部凸出**：根因是这两个节点各自的布局函数（`applySocketOverlayLayout` / `layoutPanel`）用**内联 `!important`** 把壳高写成 `100%` —— 内联 important 会压过公共 CSS 的 `.ezfx-is-vue[class*="-shell"]{top:30px;height:calc(100% - 30px)}`，于是壳从节点顶(0)拉到「内容高+30」，白面板底边比节点底边低 30px。修法：在这两个函数里加 Vue 分支（`if (window.__ezflexIsVueNodes())`），把壳 `top = var(--ezfx-vue-title,30px)`、`height = calc(100% - var(--ezfx-vue-title,30px))`、`bottom:auto`。**规律：以后凡是往壳上写内联 important 的布局，都必须自己带 Vue 的 title 偏移，别指望公共 CSS 兜。**
+
 ## 6. 性能设计（EZ_PERF，V1.1）
+
 
 > 原则：**只改刷新时机与频率，不动连通逻辑**（registerNode / ezflex:changed / api.current() / 引用编号语义未改）；后端 `__init__.py` 执行路径零改动。
 
@@ -324,6 +342,7 @@ foreach($f in (Get-ChildItem "$d\web" -Filter *.js -Recurse)){ $tmp=Join-Path $e
 & $py "$t\preview_types_test.py"        # 98 条：每种值类型的识别 + 卡片内容（MESH/SPLAT/VOXEL、CONDITIONING、无裸 repr）
 & $py "$t\prompt_helper_test.py"        # 160 条：卡片合并规则 / 卡片管理 / API 调用参数 / 综合媒体 / 规范编译 / 先合并再整体优化
 & $py "$t\prompt_helper_dock_test.py"   #  61 条：平铺模式接线（CSS/持久化/三处 open/点外守卫/协调器放行/拖动·缩放/跟随画布+随缩放/不夹视口+双击复位/节点默认落点/层叠 900/页签重排/引用自动跟新/去重/动态控件/防重建）
+& $py "$t\ui_ux_test.py"                #  21 条：本轮 5 项（平铺保持 / 中英实时重标注 / 工具条收起 / 卡片弹窗标题 / Nodes 2.0 内容层可点）
 # 5) Node 套件
 node "$t\import_test.mjs"               # 11 个 registerExtension + NODE_TYPES 一致性
 node "$t\media_out_prune_test.mjs"      # 14 条：运行期空传 —— 禁用端口在提交前从 prompt 摘掉（混合组/没盖章/找不到节点一律不动）
@@ -335,7 +354,7 @@ node "$t\media_index_test.mjs"          # 48 条：编号表（含过期 type / 
 & $py "$t\py_ui_audit.py"               # __init__.py 的 schema 文案 + 报错/响应文案无中文
 ```
 
-- 实测全绿基线（13 个套件：10 个 Python + 3 个 Node）：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、9 个套件全通过（7 个 Python + 2 个 Node）。
+- 实测全绿基线（13 个套件：10 个 Python + 3 个 Node，＋ 4 个静态扫描）：`PY OK`、`OK：没有"用了但没定义"的私有名字`、路由 `缺: 0`（`DEAD` 几条为误报：路径由动态字符串拼出，如 `/extensions/Comfyui-EzFlex-Presets/`、`/preview_any/serve_3d`、`/preview_any/serve_video`、`/preview_any/folders`）、全 `web/**/*.js` `node --check` 通过、13 个套件全通过（10 个 Python + 3 个 Node）。
 - 测试脚本注意：`_dev_tests/_tmp` 用于临时文件（ComfyUI temp 目录在沙箱外会 `PermissionError`）；PreviewAny 存档测试需要 `folder_paths` shim。
 - ⚠️ **源文件改写不要用 PowerShell `Get-Content`/`Set-Content`**（会毁编码，曾把 `web/prompt_helper.js` 写坏；那份损坏备份已清理）；用编辑器工具或 Python `newline=''`。
 - `_dev_tests/` 里 `extensions/`（web 副本）、`scripts/`（app.js/api.js 桩）、`_tmp/`（素材与存档）**全是跑测试时自动生成的**：两个 `.mjs` 测试开头就 `mkdirSync + readdirSync(web/) + copyFileSync`，Python 套件自己 `makedirs` 写素材。所以这三个目录随时可删，跑测试会重建；反过来说，**改完 `web/*.js` 直接跑测试拿到的就是最新副本，不存在副本过期**。
@@ -344,22 +363,25 @@ node "$t\media_index_test.mjs"          # 48 条：编号表（含过期 type / 
 
 ### 8.1 体验优化（待做，按用户痛点排序）
 
+> **下次开窗口建议顺序**：① 临时预览文件自动清理（真实占磁盘）→ ② `RETURN_TYPES` 多实例槽位（§8.2）→ ③ PromptHelper 规范字段 → ④ MediaOut 增强。
+
 - [ ] **临时预览文件（`ezpv_*`，含新的 `ezpv_vid_*`）会一直积累** → 自动清理（启动时扫一次 + 定期清）。视频临时文件按内容 sha1 命名，同一段视频反复预览只占一个，但换内容仍会涨。
-- [ ] **Vue（Nodes 2.0）下 ModelsCombo / FreeLatent 白面板底部略凸**；黑框标签叠加层可能需按 Vue 端口坐标再校准（两处都是观感问题，不回退白框）。
+- [ ] **Vue（Nodes 2.0）黑框标签叠加层**可能需按 Vue 端口坐标再校准（观感问题，不回退白框）。（ModelsCombo / FreeLatent 白面板底部凸出已在 §5.9 修掉。）
 - [ ] **MediaOut 可选增强**（用户尚未点头）：额外 `count` / `image_path` 输出端口；JPEG/WebP 存档也写工作流元数据；存档登记进 ComfyUI 历史画廊。
 - [ ] **PromptHelper 规范还缺「画面构成 / shot at 时间」的对应字段**（是卡片级字段还是模板片段未定，先定数据再进模板）；`rules` 现在只存节点 config，若要「一次设置全局复用」需加 `userdata/ezflex_rules.json` 兜底（可抄 `_ph_scan_paths_file()` / `_ph_model_paths_file()`）。
 - [ ] 综合媒体端口目前只做计数/引用提示（编号、@ 菜单可用），**不参与合并文本**。
 - [ ] 图生图 / 视频生视频后续单独拆节点，不再塞进 FreeLatent；图像缩放（按比例/按像素/按固定宽高）、VAE 编码、获取图像尺寸 由内置节点承担，或后续做 EzFlex 单功能节点。
 
-- [ ] **提示词规范仍缺官方条目**（V1.11 核对结论，详见 §9.4）：素材数量/时长上限（Seedance 2.5 图 0-30/视 0-10/音 0-10 且 [4,30]s；2.0 图 1-9/视 0-3/音 0-3 且 [4,15]s）、字幕/Logo/水印约束句模板、素材按上传顺序编号 + `<主体N>@<图片N>` 绑定规则、Kling prompt ≤3072（建议 ≤2500）与每镜头 ≤512 字符、负面提示词处理（Kling 3.0 写在正向提示词里的否定句）、Seedance 按 1.0/1.5/2.0/2.5 拆成多条规范。
+- [ ] **提示词规范仍缺官方条目**（V1.11 核对结论，详见 §10.4）：素材数量/时长上限（Seedance 2.5 图 0-30/视 0-10/音 0-10 且 [4,30]s；2.0 图 1-9/视 0-3/音 0-3 且 [4,15]s）、字幕/Logo/水印约束句模板、素材按上传顺序编号 + `<主体N>@<图片N>` 绑定规则、Kling prompt ≤3072（建议 ≤2500）与每镜头 ≤512 字符、负面提示词处理（Kling 3.0 写在正向提示词里的否定句）、Seedance 按 1.0/1.5/2.0/2.5 拆成多条规范。
 ### 8.2 技术注意（非体验）
 
 - [ ] 类 `RETURN_TYPES` 全局共享（多实例由最后 POST 者决定）—— **PromptHelper 已改为固定最大表、不受影响**；ModelsCombo / ParamPreset* / PreviewAny / MediaLoader / MediaOut 仍在精确同步，多实例卡数不同时高位槽可能取越界（见 §4.1）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
-- [ ] 仓库 `blackbossokok/Comfyui-EzFlex-Presets` 落后于本地（建议提交；github.com API 可达，raw.githubusercontent.com 不可达）。
+- [ ] 仓库 `blackbossokok/Comfyui-EzFlex-Presets`：**待 `git push`**（V1.2.1）；之后若又改了 README / requirements，复制时别漏。
+- [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 的禁用端口仍是 `None` 值语义（前端排队才会按"未连接"从 prompt 里摘掉）—— README 已说明，暂不处理。
 - [ ] Python 改动（新节点/路由/类）需完整重启 ComfyUI；前端 JS no-store，刷新页面即生效。
 
-## 10. 安全收口（评审要求，V1.11 后）
+## 9. 安全收口与发布（评审要求，V1.2.1）
 
 > 背景：ComfyUI 注册表评审指出「开放路由用调用方给的路径读文件/列目录/拉起本机程序/出站 SSRF」。收口原则：**路径先落进服务端自己的根目录（realpath + commonpath）**，敏感动作只认本机客户端，出站主机必须显式允许。
 
@@ -368,49 +390,69 @@ node "$t\media_index_test.mjs"          # 48 条：编号表（含过期 type / 
 | `_ez_real(p)` | realpath + abspath 规范 |
 | `_ez_roots()` | 根 = input / output / temp / models ＋ 用户登记的扫描目录（全是服务端状态） |
 | `_ez_inside(p, roots?)` | realpath + commonpath 判定；根外返回 ''（含 `..`、绝对路径、兄弟前缀、符号链接） |
-| `_ez_adopt_to_temp(p)` | 根外文件复制进临时目录再服务（保住预览功能） |
-| `_ez_local(req)` | `req.remote ∈ {127.0.0.1, ::1, localhost}` |
+| `_ez_adopt_to_temp(p)` | 根外文件复制进临时目录再服务 —— **仅本机**（否则远端能借"视频预览"读任意文件） |
+| `_ez_local(req)` | 三重校验：remote 回环 ＋ `Host` 回环名（挡 DNS rebinding）＋ `Origin/Referer` 与 Host 同源（挡跨站 CSRF） |
 | `_ph_allowed_hosts()` / `_ph_check_outbound(url)` | 出站主机允许列表 = 内置厂商 ＋ 本机自定义厂商 ＋ `userdata/ezflex_api_hosts.json` |
+| `_ml_default_roots()` / `_ml_user_roots()` | 素材浏览器默认根 = input ＋ output；用户登记的根存 `userdata/ezflex_media_roots.json`；**整盘（`C:\`、`/`）拒绝登记**，历史整盘条目读取时自愈清除 |
 
 - 已收口路由：`/preview_any/serve_video|serve_3d`（限根＋根外转存）、`/preview_any/fs/{path}`（限根）、`/preview_any/3d/{path}`（插件 web 目录内 realpath）、`/preview_any/folders`（realpath）、`/media_loader/serve|browse|save_as`（限根；browse 限「可浏览根」）、`/preview_any/open`+`/media_loader/open`+`pick_folder`+`pick_skill`（本机限）、`scan_paths`/`model_paths`/`custom_providers`/`prompt_cards` 写入（本机限）、`/prompt_helper/optimize`（出站白名单）。
 - 新路由：`GET/POST /media_loader/roots`（可浏览根，本机写）、`GET/POST /prompt_helper/api_hosts`（主机登记，本机写）。
-- 前端接线：设置保存时登记 apiUrl/llama server 主机（`saveSettings`）；素材浏览器工具栏「＋根」。
+- 前端接线：设置保存时登记 apiUrl/llama server 主机（`saveSettings`）；素材浏览器工具栏「保存根目录 / 删除根目录」（保存/删除后下拉即时刷新，删除按钮只对"自己登记的根"可用）。
+- **注意**：根内**读取不限本机** —— 根越宽、暴露面越大（登记/删除才限本机）；ComfyUI 默认只听 `127.0.0.1` 时无外部访问。README 素材加载器一节有面向用户的警告。
 - 回归：`_dev_tests/route_security_test.py`（含 `..` / 绝对路径 / 兄弟前缀 / 符号链接 / 云元数据地址 / 内网地址 / file: 协议 用例）。
 - 注意：JS 语法检查要把副本放进**工作区内的**目录（`_dev_tests/_tmp`）再 `node --check` —— 沙箱下 `%TEMP%` 可能不可读，会静默 exit 1。
 
-### 10.1 发布注册表要求（研究结论）
+- **第二轮安全收口（注册表评审补充，见 §9.3）**：
+  - `/prompt_helper/llama_models|clip_models` 的 `?root=` 只认本机 —— 否则远端能递归遍历任意目录。
+  - `ph_resolve_model` / `_ph_resolve_gguf` 加 `strict`：`/prompt_helper/optimize` 的**远端**调用只允许在「已登记模型根」内解析（`_ph_model_roots()`），本机点击即用与运行期保持原样。
+  - 出站代理主机也走 `_ph_check_outbound`；`saveSettings` 把 proxy 一起登记进 `/prompt_helper/api_hosts`（只加了一次前端）。`_ph_check_outbound` 支持无 scheme 地址（补 `http://`）。
+  - `_ez_local`：拒绝 `Origin: null`（沙箱 iframe / `data:` 页面）与 `Sec-Fetch-Site: cross-site`；非浏览器客户端没有这些头，不受影响。
+  - 出站重定向用 `_SafeRedirect` 每跳重新校验允许列表（防被允许主机 302 到内网）。
+  - `*/outputs` 动态端口同步路由加 `_EZ_OUTPUT_CAP` 长度/条数上限（不加 `_ez_local`：那会打断局域网远程 UI）。
+  - 回归：`route_security_test.py` 新增 Origin `null` / cross-site / 无 scheme 代理 / 5 条源码级断言。
+  - **运行期展示文案已英文化（F10 完成）**：`__init__.py` 里 PreviewAny 的类型标签 / 摘要 / 生成信息与元数据键全部改英文源（127 处）；前端在 `renderEntries` / `openKeyValueModal` / `openMediaPreview` 里调 `ezRelabel(...)` 按当前语言就地译，所以点 MainControl 语言键时跟着各面板重画一起实时切换。中文进 `_dev_tests/_i18n/preview_any.json`（66 条）+ `media_loader.json` / `prompt_helper_a.json`（5 条）→ `_i18n_merge2.py` 重建 `EZ_ZH`（956 条）。⚠️ 组合串（`Audio N samples @ ...` / `Mesh N vertices / M faces` 这类带数字的）只能整体存在，`ezRelabel` 是整串匹配，所以这类动态值在中文界面下仍是英文 —— 要彻底双语得改成「结构化字段 + 前端 `ezT` 模板」，目前不做。有意保留的中文串只有 8 条：LLM 系统提示里的 `@图片1` 示例、`MEDIA_WORDS` 正则、`_ph_optimize` 的报错状态匹配关键词。
 
+### 9.3 第二轮安全审计（本次）
+
+- 评审点名的 5 条：路径包含性 / 本机限定 / save_as 源 / 出站允许列表 **均已修**（见 §9 表）；UI 英文化**基本完成**（schema/报错/JS 全绿），仅剩上面那批运行期展示文案。
+- 新发现并已修：`?root=` 遍历、strict 模型路径、代理主机、`Origin: null`、重定向每跳校验、outputs 上限。
+- 未改（有意）/低危：`/preview_any/open` 接受任意绝对路径（已本机限定，`Popen` 用 list 不进 shell）；根列表/扫描路径 GET 对远端返回服务端绝对路径；`_ml_seed_roots` 会把预设里引用过的目录提升为可浏览根（数据来源是用户自己的预设）。
+
+### 9.1 发布注册表要求（研究结论）
+
+- **PublisherId 取决于走哪条路**：只给 ComfyUI-Manager 提 PR（改 `custom-node-list.json`，字段 author / title / reference / files / install_type）→ **不需要**；走 Comfy Registry（`comfy node publish`）→ 官方规范里是 `### PublisherId (required)`，必填。现在 `pyproject.toml` 里是注释状态。
+- **`version` 必须三位 `X.Y.Z`**（已改 `1.2.1`）；`name` 含 "ComfyUI" 属**最佳实践**不达标（非硬校验），但 Registry 的 name **发布后不可改**。
 - `pyproject.toml`：`name`（不可改、别带 "ComfyUI"）、严格 semver `version`、`license = { file = "LICENSE" }`（**裸字符串不合法**）、`[project.urls] Repository`、`[tool.comfy] PublisherId`（必填）+ `DisplayName`/`Icon`/`requires-comfyui`。
 - 建议加 `.comfyignore`（gitignore 语法）排除开发文件；`comfy node validate` 会跑 **ruff**（硬禁：`eval`/`exec`、运行期 pip 安装、代码混淆、干扰别的节点）。
 - i18n：`GET /i18n`（ComfyUI ≥ 0.3.13）读 `locales/<lang>/main.json + nodeDefs.json + settings.json + commands.json`；**只有节点 schema（display_name/description/inputs/outputs/tooltips/combo options）、settings、commands 会被翻译**，自绘面板 DOM 文本不在覆盖范围（官方文档该节仍是 [To be updated]）。
 
-### 10.2 英文 UI 串（已完成，V1.11）
+### 9.2 英文 UI 串（已完成）
 
 - 形态：**源码用英文**（评审要求），中文进两套字典 —— 节点 schema 走官方 i18n（`locales/zh/nodeDefs.json`），自绘面板走插件自己的 `web/ezflex_i18n.js`（`ezT(key)`，key = 英文原文，中文在 `EZ_ZH`）。语言优先级 `localStorage.ezflex.locale` > `window.Comfy.Locale` > `navigator.language`；MainControl 头部有 `EN / 中文` 开关。
-- 已改完：`__init__.py` 的 `DESCRIPTION` / 输入 tooltip（含 `_control_input_types` 的位置参数）/ 报错与 HTTP 响应文案；`web/` 全部面板 JS（main_control、node_switch_*、param_preset_*、freelatent、modelscombo、preview_any、media_loader、media_out、prompt_helper、ezflex_service）。
+- 已改完：`__init__.py` 的 `DESCRIPTION` / 输入 tooltip（含 `_control_input_types` 位置参数）/ 报错与 HTTP 文案；`web/` 全部 11 个面板 JS。
 - 不翻（数据/协议/标识符）：注释保持中文；端口 type、config/预设 JSON 键、旧中文预设 id（`BASE_PRESETS_LEGACY` 兼容）、`MEDIA_WORDS` 的 `@图片` token、socket/widget 名、语言开关按钮上那个「中文」。
-- 有意保留的中文（`cjk_scan.py` 的 `ALLOW_MARKERS` / `ALLOW_RANGES` 里逐条注明）：语言自名标签 `[['zh','中'],['en','EN']]`、自定义厂商默认值 `'自定义'`（持久化数据）、`prompt_helper.js` 的规范表 `_PROMPT_RULES`（label/note/模板属规则内容，表自带 base/alt 双语机制，且是模块顶层常量 —— 包 `ezT` 会冻结语言）。
+- 有意保留的中文（`cjk_scan.py` 的 `ALLOW_MARKERS` / `ALLOW_TABLES` 里逐条注明）：语言自名标签 `[['zh','中'],['en','EN']]`、自定义厂商默认值 `'自定义'`（持久化数据）、`prompt_helper.js` 的规范表 `_PROMPT_RULES`（label/note/模板属规则内容，表自带 base/alt 双语机制，且是模块顶层常量 —— 包 `ezT` 会冻结语言）。
 - Python 侧报错/响应文案（27 处 `raise` + 7 处 `json_response`）也一并改英文；测试里原本按中文断言的 3 处（`media_merge_test`、`prompt_helper_test`）同步改成英文标记。
 - 词典维护：`_dev_tests/_i18n/<文件>.json`（每文件一份）+ `_i18n_base.json`（公共词条）→ `_i18n_merge2.py` 确定性重建 `EZ_ZH`（首现优先，冲突会打印）。
 - 校验：`i18n_test.py`（schema/多行 tooltip 无中文、`locales/zh` 覆盖 11 节点、代码 `ezT` 词条 ⊆ 字典、各文件字典已并入）、`cjk_scan.py`（JS：待翻中文 0 行，放行数据/标识符）、`py_ui_audit.py`（Python：schema + 报错/响应文案 0 中文）。
 
-## 9. 外部规范核对（已归档）
+## 10. 外部规范核对（已归档）
 
 原独立文件 **`_prompt_spec_audit.md`**（223 行官方核对报告）、**`提示词规范对照_官方与社区.txt`**（699 行素材）、**`性能优化方案_改动前后对比.txt`**（201 行）已清理，结论全部并入本节与 §6 / §8.1。
 
-### 9.1 规范本体在哪
+### 10.1 规范本体在哪
 
 - `web/prompt_helper.js` 的 `_PROMPT_RULES`（2383–2431 行）= **15 条内置条目**：`none`(不编译) / `api`(使用 API) + 13 家厂商 `h3` / `seedance` / `kling` / `wan3` / `wan22` / `ltx` / `hunyuan` / `qwen` / `flux2` / `hailuo` / `vidu` / `pixverse` / `runway`。（README 早先写「16 条」是笔误，已按 15 条改正。）
 - 每条结构：`{ id, label, base, ref{image,video,audio}, ts{tpl|off}, note }`；`alt` = 另一种语言那一份（中|EN 开关切），`base` 标明本体语言，`ts.off` = 该家不用时间戳。
 - 用户改动存 `rules.overrides[id]`（`_applyOverride` 只覆盖 label/ref/ts/note/base/alt），自定义规范存 `rules.custom`；旧 id `seedance_en` 由 `_RULE_ALIAS` 归并到 `seedance`(lang=en)。
 
-### 9.2 官方文档怎么取（下次核实照这个来）
+### 10.2 官方文档怎么取（下次核实照这个来）
 
 - **火山方舟**（Seedance / Seedream）：文档页是 SPA，正文走内容接口 `https://www.volcengine.com/api/doc/getDocDetail?DocumentID=<id>`（返回 Quill delta）。
 - **可灵**（Kling）：任意文档 URL 末尾加 `.md` 直接拿 Markdown；索引 `https://kling.ai/document-api/llms.txt`。
 - **BytePlus 英文页**（`docs.byteplus.com/en/docs/ModelArk/…`）是 SPA，正文取不到、加 `&Language=en` 也只回中文 → **Seedance 英文引用写法至今没有官方原文**，`alt` 里那一版是「按中文版对应」，不要对外声称与官方一致。
 
-### 9.3 已按核对结果修掉的（V1.11）
+### 10.3 已按核对结果修掉的（V1.11）
 
 | 项 | 官方原文要点 | 现在怎么写 |
 |---|---|---|
@@ -423,6 +465,6 @@ node "$t\media_index_test.mjs"          # 48 条：编号表（含过期 type / 
 
 **未采纳**（官方无原文，属社区写法，保留但已在 note 里标注）：Kling「每段都要重复关键特征」、Kling 画面公式、Seedance 英文引用写法。
 
-### 9.4 仍缺的官方条目（已进 §8.1）
+### 10.4 仍缺的官方条目（已进 §8.1）
 
 素材数量/时长上限（Seedance 2.5 图 0-30 / 视 0-10 / 音 0-10 且 [4,30]s；2.0 图 1-9 / 视 0-3 / 音 0-3 且 [4,15]s）、字幕/Logo/水印约束句模板、素材按上传顺序编号 + `<主体N>@<图片N>` 绑定规则、Kling prompt ≤3072（建议 ≤2500）、负面提示词处理、Seedance 按 1.0/1.5/2.0/2.5 拆成多条（四版规则互相冲突：时间戳/引用语法/素材数量/时长范围全不同）。

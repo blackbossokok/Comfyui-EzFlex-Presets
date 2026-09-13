@@ -1097,6 +1097,13 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     setImp(panel, 'height', '100%');
     setImp(panel, 'max-height', '100%');
     setImp(panel, 'box-sizing', 'border-box');
+    // Nodes 2.0：节点高 = 内容高 + 标题偏移（widget.computeSize 里 +30），壳必须下移并减掉这段，
+    // 否则里面白面板底边会凸出节点底边（inline !important 会压过公共 CSS 的 calc，只能在这里补）。
+    if (window.__ezflexIsVueNodes && window.__ezflexIsVueNodes()) {
+      setImp(panel, 'top', 'var(--ezfx-vue-title,30px)');
+      setImp(panel, 'height', 'calc(100% - var(--ezfx-vue-title,30px))');
+      setImp(panel, 'bottom', 'auto');
+    }
   }
 
   function setupNode(node) {

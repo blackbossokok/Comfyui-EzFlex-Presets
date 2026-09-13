@@ -1,6 +1,6 @@
 [project]
 name = "Comfyui-EzFlex-Presets"
-version = "1.2.0"
+version = "1.2.1"
 description = "EzFlex preset suite for ComfyUI: models combo loader, resolution/latent selector, node switch master & group presets, parameter presets, preview any, prompt helper, media loader/output."
 readme = "README.md"
 requires-python = ">=3.10"

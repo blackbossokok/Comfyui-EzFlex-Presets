@@ -59,6 +59,13 @@ const CSS = `
 .ezg-mode button.mode-off.active{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;}
 .ezg-mode button.mode-bypass.active{background:#fffbeb;color:#92400e;border:1px solid #fcd34d;}
 .ezg-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
+/* 预设行 / 匹配行各配一条收起-展开三角（单独一条，放在该行下面）：无底边小三角，
+   平时隐藏、鼠标悬停才显形；展开态朝上、收起态朝下。 */
+.ezg-tri-row{display:flex;align-items:center;justify-content:center;height:12px;flex:0 0 auto;cursor:pointer;opacity:0;transition:opacity .15s;background:transparent;margin:-10px 0;}   /* 负 margin 吃掉 .ezg-root 的 10px gap：三角正好夹在两行中间、不占额外位置 */
+.ezg-tri-row.no-above{margin-top:0;}   /* 上面那行收起了：不要再往上顶，否则会和上一行叠在一起（会闪烁、点不中） */
+.ezg-tri-row:hover{opacity:1;background:rgba(43,58,74,.06);}
+.ezg-tri-row i{display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:6px solid #8a9aa8;transition:transform .15s;}
+.ezg-hd.collapsed,.ezg-filters.collapsed{display:none;}
 `;
 
 let _styleInjected = false;
@@ -79,6 +86,8 @@ function loadFromConfig(node) {
     match: typeof f.match === 'string' ? f.match : '',
     showAllGraphs: f.showAllGraphs !== false,
     sort: f.sort === 'alpha' ? 'alpha' : 'position',
+    presetCollapsed: !!f.presetCollapsed,   // 预设行收起（刷新/重启后保持）
+    matchCollapsed: !!f.matchCollapsed,     // 匹配行收起
   };
   st.states = (cfg.states && typeof cfg.states === 'object') ? cfg.states : {};
   st.presets = (cfg.presets && typeof cfg.presets === 'object' && !Array.isArray(cfg.presets)) ? cfg.presets : {};
@@ -214,6 +223,19 @@ async function deletePresetFromLib(node) {
 }
 
 // ===== 渲染 =====
+// 行的收起/展开：一条单独的三角行（放在要收起的那行下面），悬停才显形；状态存 config.filters
+function triRow(node, getRow, key) {
+  const bar = el('div', 'ezg-tri-row');
+  bar.appendChild(el('i'));
+  bar.addEventListener('click', (e) => { e.stopPropagation(); const st = stateFor(node); st.filters[key] = !st.filters[key]; syncToConfig(node); applyTri(bar, getRow(), st.filters[key]); });
+  return bar;
+}
+function applyTri(bar, row, collapsed) {
+  bar.classList.toggle('no-above', !!collapsed);   // 收起 = 上面那行不在了，三角不能再往上拉
+  if (row) row.classList.toggle('collapsed', !!collapsed);
+  const i = bar.querySelector('i'); if (i) i.style.transform = collapsed ? 'rotate(180deg)' : '';
+  bar.title = collapsed ? ezT('Expand toolbar') : ezT('Collapse toolbar');
+}
 function buildRoot(node) {
   injectStyle();
   const shell = el('div', 'ezg-shell');
@@ -226,12 +248,16 @@ function buildRoot(node) {
   const saveBtn = el('button', 'ezg-btn success'); saveBtn.textContent = ezT('Save preset');
   const delBtn = el('button', 'ezg-btn danger'); delBtn.textContent = ezT('Delete preset');
   hd.appendChild(presetSel); hd.appendChild(saveBtn); hd.appendChild(delBtn);
+  const presetTri = triRow(node, () => hd, 'presetCollapsed');
+  applyTri(presetTri, hd, stateFor(node).filters.presetCollapsed);
 
   // 匹配过滤行（节点级，rgthree 属性式）
   const filters = buildFilters(node, () => { refreshRows(node); });
+  const matchTri = triRow(node, () => filters, 'matchCollapsed');
+  applyTri(matchTri, filters, stateFor(node).filters.matchCollapsed);
   const list = el('div', 'ezg-list');
 
-  root.appendChild(hd); root.appendChild(filters); root.appendChild(list);
+  root.appendChild(hd); root.appendChild(presetTri); root.appendChild(filters); root.appendChild(matchTri); root.appendChild(list);
 
   async function render() {
     const st = stateFor(node);

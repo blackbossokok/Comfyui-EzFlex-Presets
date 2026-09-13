@@ -235,15 +235,129 @@ export async function deletePreset(apiPath, name) {
   return loadPresets(apiPath, true);
 }
 
+// ===== 面板内「自动命中」的空白 → 手动拖节点（经典 / Nodes 2.0 通用）=====
+// 真正穿透的空白交给画布（LiteGraph / Vue 节点）原生处理；滚动容器等被放开命中的区域由这里兜住，
+// 这样滚动条能拖、滚轮能滚，同时空白处仍能拖动节点。
+const _BLANK_SKIP = 'button,select,input,textarea,label,a,[contenteditable="true"],'
+  + '.eml-media,.eml-tab,.eml-card,.eml-card-head,.eml-empty,.eml-addbar,.eml-grip,.eml-preset-item,'
+  + '.eph-card,.ezg-tri-row,.ezc-handle,.ezpc-handle,.ezo-value,.ezpv-prev,.ezpv-handle,.mc-grip,'
+  + '.fl-handle,.fl-canvas-size,.fl-canvas-select,.ezfx-resize-handle';
+function installBlankDrag(node, shell) {
+  if (!node || !shell || shell._ezBlankDrag) return;
+  shell._ezBlankDrag = true;
+  shell.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const t = e.target;
+    if (!t || !t.closest || t.closest(_BLANK_SKIP)) return;
+    // 滚动条热区不抢，否则拖不动滚动条
+    let r = null; try { r = t.getBoundingClientRect(); } catch (_) { r = null; }
+    if (r) {
+      if (t.scrollHeight > t.clientHeight + 1 && e.clientX >= r.right - 18) return;
+      if (t.scrollWidth > t.clientWidth + 1 && e.clientY >= r.bottom - 18) return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const canvas = (typeof app !== 'undefined' && app) ? app.canvas : null;
+    const scale = (canvas && canvas.ds && canvas.ds.scale) || 1;
+    const pos = node.pos || [0, 0];
+    const ox = pos[0], oy = pos[1], sx = e.clientX, sy = e.clientY;
+    let moved = false;
+    const move = (ev) => {
+      if (!moved && Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < 3) return;   // 未越过阈值＝点选
+      moved = true;
+      try { if (node.pos) { node.pos[0] = ox + (ev.clientX - sx) / scale; node.pos[1] = oy + (ev.clientY - sy) / scale; } } catch (_) {}
+      try { node.setDirtyCanvas(true, true); } catch (_) {}
+      if (node.graph) node.graph.setDirtyCanvas(true, true);
+      if (canvas && canvas.setDirty) canvas.setDirty(true, true);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move, true);
+      window.removeEventListener('pointerup', up, true);
+      window.removeEventListener('pointercancel', up, true);
+      if (!moved && canvas && canvas.selectNode) { try { canvas.selectNode(node, false); } catch (_) {} }
+    };
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', up, true);
+    window.addEventListener('pointercancel', up, true);
+  });
+}
+
+// 面板内滚轮：手动滚动最近的滚动容器，并挡掉画布的缩放。
+// Nodes 2.0 下画布/节点会吞滚轮，导致「鼠标放上去滚不动」；这里统一兜住（经典模式等价于原生滚动）。
+function installPanelWheel(shell) {
+  if (!shell || shell._ezWheel) return;
+  shell._ezWheel = true;
+  shell.addEventListener('wheel', (e) => {
+    let el = e.target;
+    let s = null;
+    while (el && el !== shell) {
+      if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) { s = el; break; }
+      el = el.parentElement;
+    }
+    if (!s) return;   // 没有滚动容器 → 交给画布（缩放）
+    const canY = s.scrollHeight > s.clientHeight + 1;
+    const canX = s.scrollWidth > s.clientWidth + 1;
+    const mult = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? s.clientHeight : 1);
+    if (canY) s.scrollTop += e.deltaY * mult;
+    if (canX) s.scrollLeft += (e.deltaX || (canY ? 0 : e.deltaY)) * mult;
+    e.preventDefault();
+    e.stopPropagation();
+  }, { capture: true, passive: false });
+}
+
+// ===== 两种模式各自专属的面板交互（不要混用！）=====
+// 经典模式：面板整块命中，空白处手动拖节点 + 滚轮手动滚。
+function installClassicPanel(node, shell) {
+  installBlankDrag(node, shell);
+  installPanelWheel(shell);
+}
+// Nodes 2.0：面板体穿透、由 .lg-node 原生拖（CSS 负责），这里只装全局滚轮兜底。
+function installVuePanel(node, shell) {
+  installVueWheel();
+}
+
+const _SCROLL_SEL = '.eml-cards,.eml-tabs,.eph-list,.mc-list,.ezc-list,.ezg-list,.ezm-list,.ezpc-list,.ezo-list,.ezpv-list,.emoo-list';
+let _vueWheelBound = false;
+// Nodes 2.0 专属滚轮：滚动容器故意不放开命中（放开会挡住穿透、空白处就拖不动了），
+// 所以改在 window 捕获阶段兜：指针落在某个面板滚动容器的矩形里就手动滚它，并挡掉画布缩放。
+function installVueWheel() {
+  if (_vueWheelBound || typeof window === 'undefined') return;
+  _vueWheelBound = true;
+  window.addEventListener('wheel', (e) => {
+    let s = null;
+    try {
+      const list = document.querySelectorAll(_SCROLL_SEL);
+      for (let i = 0; i < list.length; i++) {
+        const el = list[i];
+        if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) continue;
+        const r = el.getBoundingClientRect();
+        if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) continue;
+        s = el; break;
+      }
+    } catch (_) {}
+    if (!s) return;
+    const canY = s.scrollHeight > s.clientHeight + 1;
+    const canX = s.scrollWidth > s.clientWidth + 1;
+    const mult = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? s.clientHeight : 1);
+    if (canY) s.scrollTop += e.deltaY * mult;
+    if (canX) s.scrollLeft += (e.deltaX || (canY ? 0 : e.deltaY)) * mult;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }, { capture: true, passive: false });
+}
+
 // ===== 自绘节点缩放手柄（参考 FreeLatent：Pointer Events + window 捕获，拖拽直接改 node.size）=====
 export function installResizeHandles(node, shell) {
+  const vue = typeof window !== 'undefined' && window.__ezflexIsVueNodes && window.__ezflexIsVueNodes();
+  if (vue) installVuePanel(node, shell); else installClassicPanel(node, shell);
   if (!shell || shell._ezHandles) return;
   // Vue（Nodes 2.0）模式：节点由 Vue 渲染，自绘手柄定位会错位；交给原生手柄处理。
-  if (typeof window !== 'undefined' && window.__ezflexIsVueNodes && window.__ezflexIsVueNodes()) return;
+  if (vue) return;
   shell._ezHandles = true;
   try { shell.style.overflow = 'visible'; } catch (_) {}
   const mk = (style, cursor, title, z) => {
     const d = document.createElement('div');
+    d.className = 'ezfx-resize-handle';   // installBlankDrag 要放过它，否则拖手柄会变成拖节点
     d.title = title;
     d.style.cssText = 'position:absolute;pointer-events:auto;z-index:' + (z || 30) + ';background:transparent;border:none;box-shadow:none;' + style + ';cursor:' + cursor + ';';
     shell.appendChild(d);
@@ -307,9 +421,33 @@ function injectSocketPanelBaseCSS() {
 /* Vue：隐藏 EzFlex 节点原生 socket 文字（圆点与面板间的残留字），只藏文本容器、不藏圆点 */
 .lg-node:has(.ezfx-panel-shell) .lg-slot .flex.h-full.min-w-0,
 .lg-node:has(.ezfx-panel-shell) .lg-slot span.truncate{display:none!important;}
-/* Vue：面板体（各节点 .*-root）也穿透，节点可整块拖；按钮/下拉/输入/文本域保持可交互。 */
-.ezfx-is-vue [class*="-root"]{pointer-events:none!important;}
-.ezfx-is-vue [class*="-root"] button,.ezfx-is-vue [class*="-root"] select,.ezfx-is-vue [class*="-root"] input,.ezfx-is-vue [class*="-root"] textarea{pointer-events:auto!important;}
+/* ===== Nodes 2.0（Vue）专用：面板根穿透，交给 Vue 节点原生拖动 ===== 
+   Vue 的节点拖动由 .lg-node 自己接管（前端 useNodePointerInteractions），所以面板体必须穿透：
+   空白处 pointerdown 直接落到 .lg-node；只白名单放开可交互的 div/span 卡片/行/手柄。
+   ⚠️ 经典模式**完全不使用这套**（经典走 installClassicPanel 的手动拖），两边独立。
+   滚动容器**故意不放开**（放开就挡住穿透、空白拖不动）；Vue 的滚动由 installVueWheel 全局处理。
+   根上 cursor:default 干掉卡片从 .lg-node 继承来的抓取小手。 */
+.ezfx-is-vue [class*="-root"]{pointer-events:none!important;cursor:default;}
+.ezfx-is-vue [class*="-root"] .eml-media,
+.ezfx-is-vue [class*="-root"] .eml-tab,
+.ezfx-is-vue [class*="-root"] .eml-card,
+.ezfx-is-vue [class*="-root"] .eml-card-head,
+.ezfx-is-vue [class*="-root"] .eml-empty,
+.ezfx-is-vue [class*="-root"] .eml-addbar,
+.ezfx-is-vue [class*="-root"] .eml-grip,
+.ezfx-is-vue [class*="-root"] .eml-preset-item,
+.ezfx-is-vue [class*="-root"] .eph-card,
+.ezfx-is-vue [class*="-root"] .ezg-tri-row,
+.ezfx-is-vue [class*="-root"] .ezc-handle,
+.ezfx-is-vue [class*="-root"] .ezpc-handle,
+.ezfx-is-vue [class*="-root"] .ezo-value,
+.ezfx-is-vue [class*="-root"] .ezpv-prev,
+.ezfx-is-vue [class*="-root"] .ezpv-handle,
+.ezfx-is-vue [class*="-root"] .mc-grip,
+.ezfx-is-vue [class*="-root"] .fl-canvas-size,
+.ezfx-is-vue [class*="-root"] .fl-canvas-select,
+.ezfx-is-vue [class*="-root"] .fl-handle{pointer-events:auto!important;}
+/* 经典模式：以上一条都不加（经典没有任何 Vue 专属样式）。 */
 /* 普通模式同理：面板里**后建**的按钮/输入也要能点 —— 一次性 querySelectorAll 快照管不到动态重建的行
    （实测：MediaOut 的 开/关 要点两下、或先点一下面板才点得动），这里改用常驻 CSS 兜住。 */
 .ezfx-panel-shell button,.ezfx-panel-shell select,.ezfx-panel-shell input,.ezfx-panel-shell textarea{pointer-events:auto!important;}

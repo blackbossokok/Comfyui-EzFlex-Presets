@@ -232,6 +232,8 @@ export const EZ_ZH = {
   "Loaded EzFlex-MediaOut": "已加载 EzFlex-MediaOut",
   "Failed to load output": "加载输出失败",
   "File": "文件",
+  "Click to preview": "点击预览",
+  "Click to browse and add media": "点击浏览并添加素材",
   "Media": "素材",
   "Card": "卡片",
   "First image": "第一张",
@@ -562,6 +564,58 @@ export const EZ_ZH = {
   "Latent upscaler": "latent 放大方式",
   "Module": "模块",
   "Base model architecture": "底模架构",
+  "Data combo": "数据组合",
+  "Negative prompt": "反向提示词",
+  "Sampling params": "采样参数",
+  "Raw text blocks": "原始文本块",
+  "Source file": "来源文件",
+  "Data": "数据",
+  "Assets": "资产",
+  "Extra info": "附加信息",
+  "Meshes": "网格数",
+  "Materials": "材质数",
+  "Animations": "动画数",
+  "Container tags": "容器标签",
+  "Streams": "流",
+  "Duration": "时长",
+  "Vertex colors": "顶点色",
+  "Textures": "贴图",
+  "Mesh": "网格",
+  "Gaussian splat": "高斯泼溅",
+  "Voxel": "体素",
+  "Voxel ": "体素 ",
+  "Architecture": "架构",
+  "Author/Source": "作者/来源",
+  "Organization": "归属/组织",
+  "Train dim": "训练维度 dim",
+  "Train alpha": "训练维度 alpha",
+  "Training tags/weights": "训练关键词/比重",
+  "Top trigger words": "主要触发词",
+  "Network type": "网络类型",
+  "Has embedded VAE": "是否内嵌 VAE",
+  "Yes (built-in VAE)": "是（内置 VAE）",
+  "No (may need external VAE)": "否（可能需外挂 VAE）",
+  "Model name": "模型名",
+  "Usage prompt/trigger words": "使用提示词/触发词",
+  "Source/Link": "来源/链接",
+  "Training params": "训练参数",
+  "Path": "存放路径",
+  "SHA256": "哈希值",
+  "(skipped for large files)": "(大文件未计算，避免阻塞)",
+  "All metadata": "全部元数据",
+  "Mesh {nv} vertices / {nf} faces": "网格 {nv} 顶点 / {nf} 面",
+  "Gaussian splat {n} points": "高斯泼溅 {n} 点",
+  " · SH {k} coeff (degree {deg})": " · SH {k} 系数（阶数 {deg}）",
+  " · resolution {res}": " · 分辨率 {res}",
+  "(visualization not supported yet)": "（暂不支持可视化）",
+  "3D model ({fmt})": "3D 模型 ({fmt})",
+  "3D model ({type(value).__name__})": "3D 模型 ({type(value).__name__})",
+  "first image": "第一张",
+  "crop": "等比裁剪",
+  "pad": "等比补边",
+  "stretch": "拉伸",
+  "Input ": "输入 ",
+  "Latent is the hidden latent space of a diffusion model (compressed features); shape=[B,C,H,W] means:B=batch, C=channels (usually 4), H=height, W=width. It is not the final image; it must be decoded by a VAE into an image. This shows its shape/dtype stats.": "Latent 是扩散模型的隐藏潜在空间（压缩后的特征），shape=[B,C,H,W] 含义：B=批次(batch)、C=通道(channel，通常为 4)、H=高度、W=宽度。它不是最终图像，需经 VAE 解码成图像。这里给出的是它的 shape/dtype 统计。",
   "Drag to move panel (double-click title bar to restore default position)": "拖动移动面板（双击标题栏回到默认位置）",
   "Drag to resize panel": "拖动缩放面板",
   "Popup": "弹窗",
@@ -654,6 +708,9 @@ export const EZ_ZH = {
   "This card has no prompt content to optimize.": "当前卡片没有可优化的提示词内容。",
   "To call \"Optimize prompt (API)\", fill in the provider API Key under \"Settings · API settings\" first (also check the model provider / API host).": "调用「优化提示词 (API)」需要先在「设置·API设置」里填写该厂商的 API Key（模型提供方/API 主机也请确认）。",
   " calling…": " 调用中…",
+  "Click to edit card": "点击编辑卡片",
+  "Collapse toolbar": "收起工具栏",
+  "Expand toolbar": "展开工具栏",
   "attached ": " 已附带 ",
   "images": "张图",
   "video/audio": "个视频/音频",
@@ -937,11 +994,65 @@ const _localeHooks = new Set();
 // 面板注册「语言切换后重画自己」：ezT 在渲染时求值，所以重画一次就等于换语言
 export function onLocaleChange(fn) { if (typeof fn === 'function') _localeHooks.add(fn); }
 
+// ===== 就地重标注（构建一次、之后不再重建的固定文案）=====
+// 各面板的 render()/refreshUI() 只重建「动态行」，工具条按钮、下拉标题、占位符这类固定控件
+// 建完就留在 DOM 里，换语言时不会自己变。这里按词典反查把这些整段文本就地换掉：
+// 中→英查反查表、英→中查正表；只认「整段正好等于词条」的文本，动态内容（卡片/分组/文件名/正文…）
+// 由 _EZ_SKIP_RE / contenteditable 排除 —— 组合串（如 "Merge 3 cards"）不在词典里，天然不受影响。
+const _EZ_REV = {};
+Object.keys(EZ_ZH).forEach((k) => { const v = EZ_ZH[k]; if (_EZ_REV[v] === undefined) _EZ_REV[v] = k; });
+// 面板/浮层根元素的前缀（ComfyUI 自身 DOM 不用这些前缀，所以只扫我们自己的）
+const _EZ_ROOT_RE = /(^|\s)(eph-|eml-|emoo-|ezg-|ezc-|ezm-|ezpc-|ezo-|ezpv-|ezfx-|fl-)/;
+// 动态内容的类名：整段文本可能碰巧等于词条（例如分组叫「分组」），一律不换
+const _EZ_SKIP_RE = /(^|\s)(gname|eph-preview|eph-ctitle|eph-ctitle-input|eph-rb-lab|eph-rb-fname|eph-rb-ins|eph-rb-cnt|eph-index|eph-time|eph-socket-label|eph-badge|eph-mref-txt|emoo-name|emoo-type|eml-bffname|eml-tab|tname|ctitle|ezo-name|ezo-value|mc-name|mc-idx|fl-num|fl-num-xs|fl-num-ratio|fl-batch)(\s|$)/;
+
+function _ezSkipEl(el) {
+  const tag = el.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SCRIPT' || tag === 'STYLE') return true;
+  try { if (el.isContentEditable) return true; } catch (_) {}
+  const cls = el.className;
+  return typeof cls === 'string' && _EZ_SKIP_RE.test(cls);
+}
+function _ezSwap(s) {
+  if (typeof s !== 'string' || !s) return s;
+  const t = s.trim();
+  if (!t) return s;
+  const key = (EZ_ZH[t] !== undefined) ? t : _EZ_REV[t];
+  if (key === undefined) return s;
+  return s.replace(t, () => ezT(key));
+}
+// 对一棵子树里的文本节点 + placeholder/title 属性做整段替换
+export function ezRelabel(root) {
+  if (!root || !root.querySelectorAll) return;
+  const walk = (el) => {
+    for (let n = el.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 3) { const v = _ezSwap(n.nodeValue); if (v !== n.nodeValue) n.nodeValue = v; }
+      else if (n.nodeType === 1 && !_ezSkipEl(n)) walk(n);
+    }
+    if (el.getAttribute) {
+      const ph = el.getAttribute('placeholder'); if (ph) el.setAttribute('placeholder', _ezSwap(ph));
+      const ti = el.getAttribute('title'); if (ti) el.setAttribute('title', _ezSwap(ti));
+    }
+  };
+  if (!_ezSkipEl(root)) walk(root);
+}
+// 语言切换后扫一遍页面上所有 EzFlex 面板/浮层（只取最外层，避免嵌套重复走）
+export function ezRelabelAll() {
+  let all = [];
+  try { all = Array.from(document.querySelectorAll('[class*="eph-"],[class*="eml-"],[class*="emoo-"],[class*="ezg-"],[class*="ezc-"],[class*="ezm-"],[class*="ezpc-"],[class*="ezo-"],[class*="ezpv-"],[class*="ezfx-"],[class*="fl-"]')); } catch (_) { return; }
+  for (const el of all) {
+    const p = el.parentElement; const pc = p && p.className;
+    if (typeof pc === 'string' && _EZ_ROOT_RE.test(pc)) continue;
+    ezRelabel(el);
+  }
+}
+
 export function ezSetLocale(loc) {
   _loc = (loc === 'zh') ? 'zh' : 'en';
   try { window.localStorage.setItem('ezflex.locale', _loc); } catch (_) {}
   _localeHooks.forEach((fn) => { try { fn(); } catch (_) {} });
   try { window.dispatchEvent(new CustomEvent('ezflex:locale', { detail: { locale: _loc } })); } catch (_) {}
+  try { ezRelabelAll(); } catch (_) {}
   return _loc;
 }
 

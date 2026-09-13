@@ -36,7 +36,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-09-12-dockv9';
+const PH_BUILD = '2026-09-13-i18nv16';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -149,6 +149,13 @@ function phDockTrack() {
     if (mem && mem.cx !== undefined) phDockPlace(ov, mem);
   }
 }
+// 各浮层的默认尺寸（窗口比例）：卡片弹窗矮一半、引用媒体小一号
+const PH_DOCK_DEFAULT = {
+  'eph-modal': { wf: 0.42, hf: 0.30, minW: 320, minH: 200 },
+  'eph-rb': { wf: 0.32, hf: 0.50, minW: 300, minH: 220 },
+};
+// 默认尺寸/数值语义改了就把这个 +1：旧 config 里的 dockMem 尺寸作废一次，让新默认值生效
+const PH_DOCK_SIZE_V = 2;
 function phDockApply(ov, node) {
   if (!ov) return;
   if (node) ov._dockNode = node;
@@ -158,18 +165,25 @@ function phDockApply(ov, node) {
   const mem = _phDockMem[phDockKey(ov)] || (_phDockMem[phDockKey(ov)] = {});
   const k0 = (phDockXform() || {}).scale || 1;
   // 尺寸存**画布单位**：滚轮缩放时面板跟节点一样一起缩；首次打开按窗口比例换算出来
-  if (!mem.w || !mem.h) { mem.w = Math.max(320, Math.round(window.innerWidth * 0.42)) / k0; mem.h = Math.max(240, Math.round(window.innerHeight * 0.6)) / k0; }
+  if (!mem.w || !mem.h) {
+    const d = PH_DOCK_DEFAULT[phDockKey(ov)];
+    if (d) { mem.w = Math.max(d.minW, Math.round(window.innerWidth * d.wf)) / k0; mem.h = Math.max(d.minH, Math.round(window.innerHeight * d.hf)) / k0; }
+    else { mem.w = Math.max(320, Math.round(window.innerWidth * 0.42)) / k0; mem.h = Math.max(240, Math.round(window.innerHeight * 0.6)) / k0; }
+  }
   const ord = Math.max(0, PH_DOCK_ORDER.indexOf(phDockKey(ov)));   // 错开默认位置，露出下面那个面板的拖动把手
-  // 每次打开都回到「PromptHelper 右侧 / 下方」的默认落点（可预期）；拿不到节点位置才退回屏幕右侧
+  // 只在**没有记忆位置**时回「PromptHelper 右侧 / 下方」默认落点；拖过 / 刷新重启恢复的都保持原位置（双击标题栏才复位）
   const def = phDockDefaultAnchor(ov, node);
-  if (def) { mem.cx = def[0]; mem.cy = def[1]; }
-  else if (mem.cx === undefined) phDockAnchorTo(mem, window.innerWidth - mem.w * k0 - 24 - ord * 44, 96);
+  if (mem.cx === undefined) {
+    if (def) { mem.cx = def[0]; mem.cy = def[1]; }
+    else phDockAnchorTo(mem, window.innerWidth - mem.w * k0 - 24 - ord * 44, 96);
+  }
   ov.style.right = 'auto'; ov.style.bottom = 'auto';
   ov.style.width = mem.w + 'px'; ov.style.height = mem.h + 'px'; ov.style.zIndex = String(phDockRaise());
   phDockPlace(ov, mem);
   phDockInstall(ov);
   scheduleOnRedraw(phDockTrack);   // 画布平移/缩放时面板跟着走（Set 去重，只装一次）
   requestAnimationFrame(() => phDockThumbs(ov));   // 面板刚铺开/换模式：页签滑块按新宽度重排一次
+  try { phDockRemember(ov._dockNode || ov._node); } catch (_) {}   // 记「开着」+ 当前尺寸/位置（放在最后：此时 mem 已初始化）
 }
 function phDockInstall(ov) {   // 平铺面板的两种交互：标题栏拖动 + 右下角缩放，都只装一次
   if (ov._dockUi) return;
@@ -179,7 +193,7 @@ function phDockInstall(ov) {   // 平铺面板的两种交互：标题栏拖动 
   const grip = el('span', 'eph-dock-grip'); grip.textContent = '⠿'; grip.title = ezT('Drag to move panel (double-click title bar to restore default position)');
   head.insertBefore(grip, head.firstChild);
   let on = false, sx = 0, sy = 0, ox = 0, oy = 0;
-  const save = () => { const r = ov.getBoundingClientRect(); const m = _phDockMem[phDockKey(ov)] || (_phDockMem[phDockKey(ov)] = {}); const k = (phDockXform() || {}).scale || 1; m.w = r.width / k; m.h = r.height / k; phDockAnchorTo(m, r.left, r.top); };
+  const save = () => { const r = ov.getBoundingClientRect(); const m = _phDockMem[phDockKey(ov)] || (_phDockMem[phDockKey(ov)] = {}); const k = (phDockXform() || {}).scale || 1; m.w = r.width / k; m.h = r.height / k; phDockAnchorTo(m, r.left, r.top); try { phDockRemember(ov._dockNode || ov._node); } catch (_) {} };   // 拖完/缩完立刻落盘（否则刷新时刚调好的位置尺寸会丢）
   head.addEventListener('pointerdown', (e) => {
     if (!ov.classList.contains('ph-dock') || e.button !== 0) return;
     if (e.target && e.target.closest && e.target.closest('button,input,select,.eph-dd-menu,.eph-tools-dropdown,.eph-color-dropdown,.eph-font-list')) return;
@@ -262,6 +276,53 @@ function phDockToggle(node) {
   phDockSyncBtn(node);
   [_editModal, _allModal, _refBrowser].forEach((ov) => { if (ov) phDockApply(ov, ov._dockNode || ov._node || node); });
 }
+// ===== 平铺状态持久化（刷新/重启后保持打开）=====
+// 记进节点 config 的 ui.dockOpen / ui.dockMem：三个浮层谁开着（卡片弹窗还记是哪张卡）+ 面板尺寸。
+// 只在平铺态记录（弹窗态点外侧即关，没有"一直开着"的语义）。
+function phDockRemember(node) {
+  if (!node) return;
+  const st = stateFor(node);
+  st.ui = st.ui || {};
+  const on = (ov) => !!(ov && ov.classList.contains('active') && ov._node === node);
+  const cardOn = on(_editModal);
+  st.ui.dockOpen = { card: cardOn ? (st.editingId || null) : null, all: on(_allModal), ref: on(_refBrowser) };
+  st.ui.dockSizeV = PH_DOCK_SIZE_V;
+  const mems = {};
+  PH_DOCK_ORDER.forEach((k) => { const m = _phDockMem[k]; if (m && m.w && m.h) mems[k] = { w: m.w, h: m.h, cx: m.cx, cy: m.cy }; });
+  if (Object.keys(mems).length) st.ui.dockMem = mems;
+  syncToConfig(node);
+}
+// 载入后恢复：config 要等 onConfigure 才到位，所以从 setupNode 起按 250ms 重试几次。
+function phDockRestore(node) {
+  const st = stateFor(node);
+  const rec = st.ui && st.ui.dockOpen;
+  if (!rec) return false;                       // config 还没读进来 → 继续重试
+  node._ezDockRestored = true;
+  if (!phDockOn(node)) return true;             // 当前不是平铺模式：不恢复
+  const mems = (st.ui && st.ui.dockMem) || {};
+  const sizeOk = st.ui && st.ui.dockSizeV === PH_DOCK_SIZE_V;   // 尺寸版本不符就别用旧值（默认尺寸改过）
+  Object.keys(mems).forEach((k) => { const m = mems[k]; if (!m) return; const t = _phDockMem[k] || (_phDockMem[k] = {}); if (sizeOk) { if (m.w) t.w = m.w; if (m.h) t.h = m.h; } if (m.cx !== undefined) { t.cx = m.cx; t.cy = m.cy; } });
+  const card = rec.card ? (st.cards || []).find((c) => c.id === rec.card) : null;
+  if (rec.all) { try { openAllEditor(node); } catch (_) {} }
+  if (card) { try { openEditModal(node, card.id); } catch (_) {} }
+  if (rec.ref) {
+    const ed = (_editModal && _editModal._node === node && _editModal.classList.contains('active') && _editModal._editor)
+      || (_allModal && _allModal._node === node && _allModal.classList.contains('active') && _allModal._ed) || null;
+    if (ed) { try { openRefBrowser(node, ed, card || null); } catch (_) {} }
+  }
+  return true;
+}
+function phDockRestoreSoon(node) {
+  if (!node || node._ezDockRestoring) return;
+  node._ezDockRestoring = true;
+  let n = 0;
+  const tick = () => {
+    if (node._ezDockRestored) return;
+    try { if (phDockRestore(node)) return; } catch (_) {}
+    n += 1; if (n < 8) setTimeout(tick, 250);
+  };
+  setTimeout(tick, 400);
+}
 
 const CSS = `
 .eph-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
@@ -279,7 +340,7 @@ const CSS = `
 .eph-btn.danger:hover{background:#fee2e2;}
 .eph-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
 .eph-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:16px;}
-.eph-card{display:flex;align-items:center;gap:10px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;padding:9px 10px;flex-wrap:nowrap;}
+.eph-card{display:flex;align-items:center;gap:10px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;padding:9px 10px;flex-wrap:nowrap;cursor:pointer;}
 .eph-card.dragging{opacity:.4;}
 .eph-handle{cursor:grab;color:#8a99ae;font-size:14px;line-height:1.6;padding:0 2px;}
 .eph-handle:hover{color:#1a1a2e;}
@@ -341,6 +402,14 @@ const CSS = `
 
 /* 编辑器工具条 */
 .eph-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:8px 12px;background:#f8fafc;border-bottom:1px solid #e6edf7;}
+/* 工具条收起/展开：自己占一行（工具条与「默认/优化」行中间），无底边小三角；
+   平时隐藏、鼠标悬停才显形；展开态箭头朝上（点它收起），收起态朝下（点它展开）。 */
+.eph-tb-toggle{display:flex;align-items:center;justify-content:center;height:10px;flex:0 0 auto;cursor:pointer;opacity:0;transition:opacity .15s;background:transparent;margin:0;}
+.eph-modal-body > .eph-tb-toggle{margin:-8px 0;}   /* 吃掉 .eph-modal-body 的 8px gap，夹在工具条与页签之间 */
+.eph-all-box > .eph-tb-toggle{margin:-6px 0 0;}   /* 吃掉 .eph-tabs 的 6px margin-bottom，夹在页签与工具条之间 */
+.eph-tb-toggle:hover{opacity:1;background:rgba(43,58,74,.06);}
+.eph-tb-toggle i{display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:6px solid #8a9aa8;transition:transform .15s;}
+.eph-toolbar.collapsed,.eph-all-toolbar.collapsed{display:none;}
 .eph-tb-group{display:flex;align-items:center;gap:2px;position:relative;}
 .eph-tb-btn{width:30px;height:30px;display:flex;align-items:center;justify-content:center;border:none;background:transparent;border-radius:7px;color:#1a1a2e;cursor:pointer;font-size:13px;font-family:inherit;}
 .eph-tb-btn:hover{background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.08);}
@@ -1076,16 +1145,23 @@ function attachDnD(container, itemSel, handleSel, onDrop) {
   });
 }
 
+// 卡片弹窗开着时，面板 / 总体编辑里改卡片标题要实时反映到弹窗标题上（不用重开）
+function syncEditModalTitle(node, card) {
+  if (!card || !_editModal || !_editModal.classList.contains('active') || _editModal._node !== node) return;
+  if (!_editModal._titleEl || stateFor(node).editingId !== card.id) return;
+  _editModal._titleEl.textContent = card.title || ezT('Edit prompt');
+}
 function buildCardRow(node, card, index) {
   const linked = !!(node._ezLinkedCards && node._ezLinkedCards[card.id]);
   const row = el('div', 'eph-card' + (linked ? ' linked' : '')); row.dataset.id = card.id;
+  row.title = (card.title ? card.title + ' — ' : '') + ezT('Click to edit card');
   const handle = el('span', 'eph-handle'); handle.textContent = '⠿';
   const idx = el('span', 'eph-index'); idx.textContent = String(index + 1);
   const ctitle = el('div', 'eph-ctitle');
   const title = el('span', 'eph-ctitle-input'); title.contentEditable = 'true'; title.setAttribute('data-ph', ezT('Title')); title.title = ezT('Card title');
   title.textContent = card.title || '';
   // 输入即更新（实时刷新黑框标签文字，类似 ModelsCombo）；失焦再重排/刷新列表。
-  title.addEventListener('input', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updateSocketLabels(node, card.id, card.title || ezT('Prompt')); });
+  title.addEventListener('input', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updateSocketLabels(node, card.id, card.title || ezT('Prompt')); syncEditModalTitle(node, card); });
   title.addEventListener('blur', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updatePorts(node); refreshUI(node); });
   ctitle.appendChild(title);
   let badge = null;
@@ -1159,12 +1235,37 @@ function caretToEditorEnd(ed) {
   } catch (_) {}
   try { ed.scrollTop = ed.scrollHeight; } catch (_) {}
 }
+// 工具条「收起 / 展开」：单独一行（工具条与「默认/优化」行中间），无底边小三角；平时隐藏、悬停才显形。
+// 状态存节点 config 的 ui（cardToolbar / allToolbar），刷新/重启后保持。
+function toolbarToggleRow(getNode, key) {
+  const bar = el('div', 'eph-tb-toggle');
+  bar.appendChild(el('i'));
+  bar.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const nd = getNode(); if (!nd) return;
+    const st = stateFor(nd); st.ui = st.ui || {};
+    st.ui[key] = !st.ui[key];
+    syncToConfig(nd);
+    applyToolbarToggle(bar, st.ui[key]);
+  });
+  return bar;
+}
+function applyToolbarToggle(bar, collapsed) {
+  if (!bar) return;
+  const box = bar.parentNode;
+  const tb = box && box.querySelector('.eph-toolbar, .eph-all-toolbar');
+  if (tb) tb.classList.toggle('collapsed', !!collapsed);
+  const i = bar.querySelector('i');
+  if (i) i.style.transform = collapsed ? 'rotate(180deg)' : '';
+  bar.title = collapsed ? ezT('Expand toolbar') : ezT('Collapse toolbar');
+}
 function editModalEl() {
   if (_editModal && _editModal.parentNode) return _editModal;
   _editModal = el('div', 'eph-modal');
   const box = el('div', 'eph-modal-box');
   const hd = el('div', 'eph-modal-hd');
   const t = el('b'); t.textContent = ezT('Edit prompt');
+  _editModal._titleEl = t;   // 打开时改成该卡片的自定义名（总体编辑不改）
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
   const fullBtn = el('button', 'eph-btn eph-modal-full'); fullBtn.type = 'button'; fullBtn.textContent = ezT('Fullscreen'); fullBtn.title = ezT('Fullscreen / exit fullscreen');
   const hdRight = el('div', 'eph-modal-hd-right');
@@ -1228,7 +1329,9 @@ function editModalEl() {
   const tabOptimized = el('button', 'eph-tab'); tabOptimized.textContent = ezT('Optimized prompt');
 
   const body = el('div', 'eph-modal-body');
+  const tbToggle = toolbarToggleRow(() => _editModal && _editModal._node, 'cardToolbar');
   body.appendChild(toolbar);
+  body.appendChild(tbToggle); _editModal._toolbarToggle = tbToggle;
   const tabThumb = el('span', 'eph-tabs-thumb');
   const editorWrap = el('div', 'eph-tabs');
   editorWrap.appendChild(tabThumb);
@@ -1320,6 +1423,7 @@ function editModalEl() {
   let _ecStartInBox = false;
   _editModal.addEventListener('mousedown', (e) => { _ecStartInBox = box.contains(e.target); });
   _editModal.addEventListener('mouseup', (e) => { if (!_editModal.classList.contains('ph-dock') && e.target === _editModal && _phDownTarget === _editModal && !_ecStartInBox && (_phClosedEl === null || _phClosedEl === _editModal)) closeEditModal(true); _ecStartInBox = false; });
+  _editModal._phOnClose = () => { try { phDockRemember(_editModal._node); } catch (_) {} };   // 点外侧关掉时也把平铺状态记回 config
   return _editModal;
 }
 
@@ -1331,6 +1435,7 @@ function openEditModal(node, cardId) {
   const tab = card.editTab || 'default';   // 记住上次所选页签
     st.currentTab = tab;
   const m = editModalEl(); m._node = node;
+  if (m._titleEl) m._titleEl.textContent = card.title || ezT('Edit prompt');
   if (tab === 'optimized') {
     m._tabOptimized.classList.add('active'); m._tabDefault.classList.remove('active');
     m._editor.innerHTML = card.contentOptimizedHTML || card.contentOptimized || '';
@@ -1341,6 +1446,7 @@ function openEditModal(node, cardId) {
   if (m._ruleDD) { m._ruleDD.setItems(ruleDropdownItems(node, false)); m._ruleDD.value = _normRuleId(phRulesModel(node).ruleId) || 'none'; }
   if (m._updMerge) m._updMerge();
   m._indentInput.value = String(card.indent || 0);
+  if (m._toolbarToggle) applyToolbarToggle(m._toolbarToggle, !!(stateFor(node).ui && stateFor(node).ui.cardToolbar));
   m.classList.add('active');
   phDockApply(m, node);
   _phActiveEditor = m._editor;
@@ -1393,6 +1499,7 @@ function closeEditModal(save) {
   }
   _phActiveEditor = null;
   _editModal && _editModal.classList.remove('active');
+  try { phDockRemember(nd); } catch (_) {}
 }
 function moveTabThumb() {
   const m = _editModal;
@@ -1706,9 +1813,9 @@ function refBrowserEl() {
   box.appendChild(hd); box.appendChild(body);
   _refBrowser.appendChild(box); document.body.appendChild(_refBrowser);
   _refBrowser._box = box; _refBrowser._body = body;
-  const closeBrowser = () => { refBrowserCleanup(); _refBrowser.classList.remove('active'); };
+  const closeBrowser = () => { refBrowserCleanup(); _refBrowser.classList.remove('active'); try { phDockRemember(_refBrowser._node); } catch (_) {} };
   _refBrowser._close = closeBrowser;
-  _refBrowser._phOnClose = refBrowserCleanup;   // 点外侧时由层协调器调用（只关这一层，不连带关下面的弹窗）
+  _refBrowser._phOnClose = () => { refBrowserCleanup(); try { phDockRemember(_refBrowser._node); } catch (_) {} };   // 点外侧时由层协调器调用（只关这一层，不连带关下面的弹窗）
   close.addEventListener('click', closeBrowser);
   phLayerPush(_refBrowser);
   return _refBrowser;
@@ -3560,7 +3667,7 @@ function saveSettings() {
   } catch (_) {}
   // 安全：把自定义 API / llama 服务器主机登记进服务端「出站允许列表」（只有列表里的主机允许被调用）
   try {
-    const urls = [apiUrl, (ll && ll.server) || ''].filter(Boolean);
+    const urls = [apiUrl, (ll && ll.server) || '', proxy].filter(Boolean);   // 代理也要登记，否则出站代理会被允许列表拦下
     if (urls.length) fetchApi('/prompt_helper/api_hosts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls }) }).catch(() => {});
   } catch (_) {}
   m.classList.remove('active');
@@ -3866,6 +3973,8 @@ function allEl() {
   const editor = el('div', 'eph-all-editor'); editor.contentEditable = 'true';
   attachMention(editor, () => ({ node: _allModal._node, card: caretCard(_allModal._node) }));
   toolbar.insertBefore(skillButton(editor), collapseBtn);
+  const tbToggle = toolbarToggleRow(() => _allModal && _allModal._node, 'allToolbar');
+  _allModal._toolbarToggle = tbToggle;
   // 卡片正文之间隔着不可编辑的小标题行：在块首退格 / 块尾删除时，浏览器会拿这些不可编辑元素和正文包
   // 开刀（删掉 .eph-all-block-body 甚至小标题行），结构一坏「引用媒体」取不到正文、输入也失效。
   // 这里拦住跨块删除（把光标挪到相邻卡片正文），并在结构已经坏了时就地重建一次。
@@ -3931,13 +4040,13 @@ function allEl() {
   const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = ezT('Cancel');
   const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = ezT('Save');
   ft.appendChild(ruleBar); ft.appendChild(cancelBtn); ft.appendChild(saveBtn);
-  box.appendChild(hd); box.appendChild(tabs); box.appendChild(toolbar); box.appendChild(editor); box.appendChild(ft);
+  box.appendChild(hd); box.appendChild(tabs); box.appendChild(tbToggle); box.appendChild(toolbar); box.appendChild(editor); box.appendChild(ft);
   _allModal.appendChild(box); document.body.appendChild(_allModal);
   _allModal._box = box; _allModal._ed = editor; _allModal._indentIn = indentIn;
   _allModal._tabDefault = tabDefault; _allModal._tabOptimized = tabOptimized; _allModal._tabThumb = tabThumb;
   _allModal._hlDD = hlDD; _allModal._fcDD = fcDD; _allModal._toolsDD = toolsDD;
-  close.addEventListener('click', () => { _phActiveEditor = null; _allModal.classList.remove('active'); });
-  cancelBtn.addEventListener('click', () => { _phActiveEditor = null; _allModal.classList.remove('active'); });
+  close.addEventListener('click', () => { _phActiveEditor = null; _allModal.classList.remove('active'); try { phDockRemember(_allModal._node); } catch (_) {} });
+  cancelBtn.addEventListener('click', () => { _phActiveEditor = null; _allModal.classList.remove('active'); try { phDockRemember(_allModal._node); } catch (_) {} });
   saveBtn.addEventListener('click', () => saveAllEditor());
   tabDefault.addEventListener('click', () => switchAllTab('default'));
   tabOptimized.addEventListener('click', () => switchAllTab('optimized'));
@@ -3951,6 +4060,7 @@ function allEl() {
   let _allStartInBox = false;
   _allModal.addEventListener('mousedown', (e) => { _allStartInBox = box.contains(e.target); });
   _allModal.addEventListener('mouseup', (e) => { if (!_allModal.classList.contains('ph-dock') && e.target === _allModal && _phDownTarget === _allModal && !_allStartInBox && (_phClosedEl === null || _phClosedEl === _allModal)) saveAllEditor(); _allStartInBox = false; });
+  _allModal._phOnClose = () => { try { phDockRemember(_allModal._node); } catch (_) {} };
   return _allModal;
 }
 function switchAllTab(tab) {
@@ -4106,7 +4216,7 @@ function renderAllEditor(node) {
     const num = el('span', 'eph-all-num'); num.textContent = String(idx + 1);
     const titleEl = el('span', 'eph-all-title'); titleEl.contentEditable = 'true'; titleEl.setAttribute('data-ph', ezT('Title'));
     titleEl.textContent = card.title || '';
-    titleEl.addEventListener('input', () => { card.title = titleEl.textContent.replace(/\u200b/g, ''); syncToConfig(node); });
+    titleEl.addEventListener('input', () => { card.title = titleEl.textContent.replace(/\u200b/g, ''); syncToConfig(node); syncEditModalTitle(node, card); });
     const delEl = el('button', 'eph-all-del'); delEl.textContent = '－'; delEl.title = ezT('Delete this card');
     delEl.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); deleteCard(node, card.id); renderAllEditor(node); });
     // 每张卡片自己的「引用媒体」：插进本卡片内容里，引用状态与卡片弹窗共用（同一个 card.refTarget）
@@ -4158,6 +4268,7 @@ function openAllEditor(node) {
   _phActiveEditor = m._ed;   // 让颜色等工具作用到总体编辑
   renderAllEditor(node);
   requestAnimationFrame(moveAllTabThumb);
+  if (m._toolbarToggle) applyToolbarToggle(m._toolbarToggle, !!(stateFor(node).ui && stateFor(node).ui.allToolbar));
   m.classList.add('active');
   phDockApply(m, node);
 }
@@ -4171,6 +4282,7 @@ function saveAllEditor() {
   syncAllContent(nd);
   _phActiveEditor = null;
   _allModal.classList.remove('active');
+  try { phDockRemember(nd); } catch (_) {}
 }
 // 总体编辑「工具→优化提示词」：把所有卡片（按「合」过滤）合并成一份、整体优化一次；
 // 结果只写进「总体编辑·优化」，不逐卡片回写（分卡优化只在卡片弹窗里由用户手动触发）。
@@ -4438,6 +4550,7 @@ function setupNode(node) {
     updatePorts(node, true);
     setTimeout(() => updatePorts(node), 80);
     installSocketLabels(node);
+    phDockRestoreSoon(node);   // 上次平铺开着的面板（卡片弹窗/总体编辑/引用媒体）载入后自动恢复
   } catch (e) { console.error('[PromptHelper] init failed:', e); }
 }
 function hookPrototype(nt) {
