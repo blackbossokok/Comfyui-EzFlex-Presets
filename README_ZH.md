@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.2.1 稳定版）
+# Comfyui-EzFlex-Presets（V1.2.2 稳定版）
 
 [English](README.md) | **中文**
 
@@ -22,8 +22,8 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV116tz6xE5V)
 - 共 **11 个节点**
 
 ## 版本更新内容：
-
-- V1.2.1:修复node2.0模式提示词助手（`EzFlex-PromptHelper`）、素材加载器（`EzFlex-MediaLoader`）、素材输出（`EzFlex-MediaOut`）无法点击的bug。提示词助手（`EzFlex-PromptHelper`）和节点开关组（`NodeSwitchGroup`)新增收起展开栏。全面优化安全潜在问题，增强插件安全性。
+- V1.2.2:修复EzFlex-NodeSwitchGroup下拉列表bug，修复EzFlex-ParamPresetControl换预设后EzFlex-ParamPresetOutput、EzFlex-PreviewAny等无法校验输入的bug，优化EzFlex-FreeLatent自定义宽高预设位置。
+- V1.2.1:修复node2.0模式提示词助手（`EzFlex-PromptHelper`）、素材加载器（`EzFlex-MediaLoader`）、素材输出（`EzFlex-MediaOut`）无法点击的bug。提示词助手（`EzFlex-PromptHelper`）和节点开关组（`NodeSwitchGroup`)新增收起展开栏。全面优化安全潜在问题，增强插件安全性。修复medialoader加载3d模型及预览图速度过慢的bug。修复promptHelper 高亮逻辑。
 - V1.2.0：全面优化安全相关问题,总控制节点( `MainControl`）增加英文切换。
 - V1.11：提示词助手功能全面优化，修复bug。
 - V1.1：插件节点全面完善、性能、提示词助手（`EzFlex-PromptHelper`）功能全面增强、修复适配bug。

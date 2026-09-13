@@ -5,7 +5,7 @@
 import { app } from "../../scripts/app.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
-  NODE_TYPES, BASE_PRESETS, isBasePreset,
+  NODE_TYPES, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
   configWidget, writeConfig, readConfig,
   loadPresets, savePreset, deletePreset, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
@@ -44,13 +44,13 @@ function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e
 
 // ===== 节点状态（config 只存当前总预设名；行与映射来自画布发现 + 预设库）=====
 function stateFor(node) {
-  if (!node._ezMaster) node._ezMaster = { current: '全部开启' };
+  if (!node._ezMaster) node._ezMaster = { current: BASE_PRESETS[0] };
   return node._ezMaster;
 }
 function loadFromConfig(node) {
   const st = stateFor(node);
   const cfg = readConfig(node, {});
-  st.current = (typeof cfg.current === 'string' && cfg.current) ? cfg.current : '全部开启';
+  st.current = (typeof cfg.current === 'string' && cfg.current) ? basePresetName(cfg.current) : BASE_PRESETS[0];
 }
 function syncToConfig(node) {
   writeConfig(node, { current: stateFor(node).current });
@@ -71,8 +71,8 @@ async function findLibPreset(name) {
 async function applyPreset(node, name) {
   const st = stateFor(node);
   let mapping = null;
-  if (BASE_PRESETS.indexOf(name) >= 0) {
-    mapping = baseMapping(node, name);
+  if (basePresetMode(name)) {
+    mapping = baseMapping(node, basePresetName(name));
   } else {
     const p = await findLibPreset(name);
     if (!p) return false;
@@ -80,18 +80,20 @@ async function applyPreset(node, name) {
   }
   nodesOfType(NODE_TYPES.GROUP).forEach((g) => {
     const key = String(g.id);
-    const presetName = mapping[key] || (g._ezGroupAPI ? g._ezGroupAPI.current() : '全部开启');
+    const presetName = mapping[key] || (g._ezGroupAPI ? basePresetName(g._ezGroupAPI.current()) : '') || BASE_PRESETS[0];
     if (g._ezGroupAPI) g._ezGroupAPI.setCurrent(presetName);
   });
   st.current = name; syncToConfig(node); refreshUI(node);
   return true;
 }
 async function savePresetToLib(node) {
-  const name = await uiPrompt(ezT('Enter master preset name'), ezT('New master preset'));
+  let name = await uiPrompt(ezT('Enter master preset name'), ezT('New master preset'));
+  // 基础预设名是内置项，自定义项同名会被盖住（选不中）→ 换个名字再来
+  while (name && name.trim() && isReservedPresetName(name)) name = await uiPrompt(ezT('That name is reserved for a built-in preset'), ezT('New master preset'));
   if (!name || !name.trim()) return;
   const groups = {};
   nodesOfType(NODE_TYPES.GROUP).forEach((g) => {
-    groups[String(g.id)] = (g._ezGroupAPI && g._ezGroupAPI.current()) || '全部开启';
+    groups[String(g.id)] = (g._ezGroupAPI && basePresetName(g._ezGroupAPI.current())) || BASE_PRESETS[0];
   });
   await savePreset(API, { name: name.trim(), label: name.trim(), groups });
   stateFor(node).current = name.trim(); syncToConfig(node); refreshUI(node);
@@ -100,7 +102,7 @@ async function deletePresetFromLib(node) {
   const st = stateFor(node);
   if (isBasePreset(st.current)) return;
   await deletePreset(API, st.current);
-  st.current = '全部开启'; syncToConfig(node); refreshUI(node);
+  st.current = BASE_PRESETS[0]; syncToConfig(node); refreshUI(node);
 }
 
 // ===== 实例 API（供 MainControl 调用）=====
@@ -148,7 +150,7 @@ function buildRoot(node) {
     masterSel.innerHTML = '';
     const opts = BASE_PRESETS.concat(lib.map((p) => p.name));
     if (opts.indexOf(st.current) < 0) { st.current = BASE_PRESETS[0]; syncToConfig(node); }
-    opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
+    opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
 
     const groups = nodesOfType(NODE_TYPES.GROUP);
     list.innerHTML = '';
@@ -171,7 +173,7 @@ async function refreshPresetOptions(node, sel) {
   const opts = BASE_PRESETS.concat(lib.map((p) => p.name));
   if (opts.indexOf(st.current) < 0) st.current = BASE_PRESETS[0];
   sel.innerHTML = '';
-  opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; sel.appendChild(o); });
+  opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; sel.appendChild(o); });
 }
 
 function renderRow(masterNode, groupNode, refresh) {
@@ -183,10 +185,10 @@ function renderRow(masterNode, groupNode, refresh) {
   const tag = el('span', 'ezm-tag'); tag.textContent = status.label; if (TAG_CSS[status.cls]) tag.style.cssText = TAG_CSS[status.cls];
 
   const fill = async () => {
-    const cur = api ? api.current() : '全部开启';
+    const cur = basePresetName(api ? api.current() : '');
     const names = api ? await api.presetNames() : BASE_PRESETS;
     sel.innerHTML = '';
-    names.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === cur) o.selected = true; sel.appendChild(o); });
+    names.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === cur) o.selected = true; sel.appendChild(o); });
   };
   fill();
   sel.addEventListener('mousedown', () => fill()); // 点开该分组预设下拉即实时刷新
@@ -213,7 +215,7 @@ function refreshUI(node) {
         const opts = BASE_PRESETS.concat(lib.map((p) => p.name));
         if (opts.indexOf(st.current) < 0) st.current = BASE_PRESETS[0];
         masterSel.innerHTML = '';
-        opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
+        opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
       }
     });
   }

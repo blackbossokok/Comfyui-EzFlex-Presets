@@ -1562,27 +1562,65 @@ function applyIndent(val) {
   flush();
   return paras;
 }
+// 无选区时的高亮/上色：给作用域里**每个文本节点**包一个 span（和选中时同一套写法）——
+// 不动块结构、逐行都看得见，壳落在 body.innerHTML 里，能随卡片内容一起保存。
+function _wrapTextRuns(scope, prop, color, key) {
+  if (!scope) return;
+  const texts = [];
+  const w = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null);
+  while (w.nextNode()) {
+    const t = w.currentNode;
+    if (!t.nodeValue || !t.nodeValue.length) continue;
+    const pe0 = t.parentElement;
+    if (pe0 && pe0.closest && pe0.closest('.eph-mref,[contenteditable="false"]')) continue;   // 引用媒体芯片里的字不碰
+    texts.push(t);
+  }
+  texts.forEach((t) => {
+    const pe = t.parentElement;
+    // 已经包过壳、且壳里没有块元素（块元素在里面背景色不显）→ 直接改这层壳的颜色
+    const reuse = pe && pe.dataset && pe.dataset.wr === key
+      && !Array.from(pe.children).some((c) => /^(DIV|P|LI|UL|OL|H[1-6]|BLOCKQUOTE|PRE|TABLE)$/.test(c.tagName));
+    if (reuse) { pe.style[prop] = color; return; }
+    const sp = document.createElement('span'); sp.dataset.wr = key; sp.style[prop] = color;
+    try { t.replaceWith(sp); sp.appendChild(t); } catch (_) {}
+  });
+}
+// 清一处高亮：抹掉内联背景色；若是自己包的壳、且再没别的样式，就把壳拆掉（别在正文里留一堆空 span）
+function _clearHl(sp) {
+  try {
+    if (!(sp.style && sp.style.backgroundColor)) return;
+    sp.style.backgroundColor = '';
+    if (sp.dataset && sp.dataset.wr && !sp.getAttribute('style')) sp.replaceWith(...sp.childNodes);
+  } catch (_) {}
+}
+// 颜色/高亮作用到「当前编辑器」：总体编辑 = 每张卡片正文，卡片弹窗 = 整个编辑器。
+// 有选区只动选区；**没选中就整块生效**（所有卡片的所有文字）。清除高亮走同一套判定。
 function applyColorOn(ed, target, color) {
   if (!ed) return;
   const prop = target === 'highlight' ? 'backgroundColor' : 'color';
   const clear = (target === 'highlight') && (color === 'transparent' || color === '');
   const sel = window.getSelection();
   const hasSel = !!(sel.rangeCount && !sel.isCollapsed && ed.contains(sel.getRangeAt(0).commonAncestorContainer));
-  // ── 清除高亮：有选区只清选区；没选中清整块（所有卡片正文） ──
+  const bodies = ed.querySelectorAll ? Array.from(ed.querySelectorAll('.eph-all-block-body')) : [];
+  const scopes = bodies.length ? bodies : [ed];   // 总体编辑 = 每张卡片正文；卡片弹窗 = 整段
   if (clear) {
     if (hasSel) {
       const range = sel.getRangeAt(0);
-      const root = range.commonAncestorContainer;
-      const node = (root && root.nodeType === 1) ? root : (root && root.parentElement);
-      if (node && node.querySelectorAll) node.querySelectorAll('span,font').forEach((sp) => { try { if (sp.style && sp.style.backgroundColor && range.intersectsNode(sp)) { sp.style.backgroundColor = ''; if (!sp.getAttribute('style')) sp.removeAttribute('style'); } } catch (_) {} });
+      let root = range.commonAncestorContainer;
+      if (root && root.nodeType !== 1) root = root.parentElement;
+      const hit = new Set();
+      const self = (root && root.closest) ? root.closest('span,font,[data-wr]') : null;   // 整段被包在一个壳里时，壳本身也要算
+      if (self) hit.add(self);
+      if (root && root.querySelectorAll) root.querySelectorAll('span,font,[data-wr]').forEach((sp) => { try { if (range.intersectsNode(sp)) hit.add(sp); } catch (_) {} });
+      hit.forEach(_clearHl);
     } else {
-      ed.querySelectorAll('span,font').forEach((sp) => { try { if (sp.style && sp.style.backgroundColor) { sp.style.backgroundColor = ''; if (!sp.getAttribute('style')) sp.removeAttribute('style'); } } catch (_) {} });
+      scopes.forEach((sc) => { sc.querySelectorAll('span,font,[data-wr]').forEach(_clearHl); });   // 没选中 → 清掉所有卡片的高亮
     }
     ed.focus();
     return;
   }
   ed.focus();
-  // ── 上色：有选区只改选区；没选中则整块（卡片编辑器整段 / 总体编辑每张卡片正文） ──
+  // ── 有选区：只改选区 ──
   if (hasSel) {
     const range = sel.getRangeAt(0);
     const sp = document.createElement('span'); sp.style[prop] = color;
@@ -1590,12 +1628,8 @@ function applyColorOn(ed, target, color) {
     sel.removeAllRanges();
     return;
   }
-  const bodies = ed.querySelectorAll ? ed.querySelectorAll('.eph-all-block-body') : [];
-  if (bodies.length) { bodies.forEach((b) => _wrapStyle(b, prop, color, prop)); ed.focus(); return; }
-  const range = document.createRange(); range.selectNodeContents(ed);
-  const sp = document.createElement('span'); sp.style[prop] = color;
-  try { const frag = range.extractContents(); sp.appendChild(frag); range.insertNode(sp); }
-  catch (_) { const sp2 = document.createElement('span'); sp2.style[prop] = color; while (ed.firstChild) sp2.appendChild(ed.firstChild); ed.appendChild(sp2); }
+  // ── 没选中：整块生效（总体编辑 = 所有卡片的正文；卡片弹窗 = 整段文字） ──
+  scopes.forEach((sc) => _wrapTextRuns(sc, prop, color, prop));
   sel.removeAllRanges(); saveSelection && saveSelection();
 }
 function _phActiveEd() {
@@ -2453,6 +2487,9 @@ function initColorDropdown(dd, target) {
     // 文字颜色不提供无颜色（foreColor  的 transparent 无效）。
     if (target === 'highlight') {
     const noColor = el('div', 'eph-color-item eph-no-color'); noColor.dataset.color = 'transparent'; noColor.title = ezT('Clear highlight');
+    // 以前这一格只画了没接事件 → 点了没反应（清除高亮失效）。与 colorItem 同一套写法。
+    noColor.addEventListener('mousedown', (e) => e.preventDefault());
+    noColor.addEventListener('click', (e) => { e.stopPropagation(); applyColor(target, 'transparent'); if (dd) dd.classList.remove('active'); });
     grid.appendChild(noColor);
   }
   (target === 'highlight' ? _STD_COLORS : _THEME_COLORS).forEach((c) => grid.appendChild(colorItem(c, target, dd)));

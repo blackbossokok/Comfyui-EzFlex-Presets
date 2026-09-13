@@ -1,11 +1,12 @@
 // EzFlex-NodeSwitchGroup 分组预设节点（rgthree 式）。
 // 自动扫描工作流中的 ComfyUI 分组（Ctrl+G），按 节点级 匹配颜色/匹配标题/子工作流/排序 过滤后自动成行；
 // 每行 = 一个画布分组，3 态（开启/禁用/绕过）滑块一键给该分组内节点设 node.mode 0/2/4。
-// 匹配配置存 config（面板可改，序列化保存）；分组预设（全部开启/全部禁用/全部绕过 + 自定义快照）存服务器 user_data。
+// 匹配配置存 config（面板可改，序列化保存）；分组预设（全部开启/全部禁用/全部绕过 + 自定义快照）也存**本节点 config**。
+// 刻意如此：同名分组在不同节点上含义不同，存服务器预设库会互相冲突（多节点同名会串）；代价是删掉节点，预设就没了。
 import { app } from "../../scripts/app.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
-  NODE_TYPES, MODE_NUM, BASE_PRESETS, isBasePreset,
+  NODE_TYPES, MODE_NUM, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
   registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig,
   uiPrompt,
@@ -74,7 +75,7 @@ function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e
 
 // ===== 节点状态 =====
 function stateFor(node) {
-  if (!node._ezGroup) node._ezGroup = { filters: { mode: 'title', match: '', showAllGraphs: true, sort: 'position' }, states: {}, presets: {}, current: '全部开启', _groups: [], _lastSig: '' };
+  if (!node._ezGroup) node._ezGroup = { filters: { mode: 'title', match: '', showAllGraphs: true, sort: 'position' }, states: {}, presets: {}, current: BASE_PRESETS[0], _groups: [], _lastSig: '' };
   return node._ezGroup;
 }
 function loadFromConfig(node) {
@@ -91,7 +92,7 @@ function loadFromConfig(node) {
   };
   st.states = (cfg.states && typeof cfg.states === 'object') ? cfg.states : {};
   st.presets = (cfg.presets && typeof cfg.presets === 'object' && !Array.isArray(cfg.presets)) ? cfg.presets : {};
-  st.current = (typeof cfg.current === 'string' && cfg.current) ? cfg.current : '全部开启';
+  st.current = (typeof cfg.current === 'string' && cfg.current) ? basePresetName(cfg.current) : BASE_PRESETS[0];
   st._groups = []; st._lastSig = '';
 }
 function syncToConfig(node) {
@@ -180,10 +181,10 @@ function ensureAPI(node) {
 // ===== 预设操作（按实例存 config，避免多节点同名互串；同节点内同名分组用 groupKey 区分）=====
 async function setCurrentPreset(node, name) {
   const st = stateFor(node);
-  if (BASE_PRESETS.indexOf(name) >= 0) {
-    const mode = name === '全部开启' ? 'on' : (name === '全部禁用' ? 'off' : 'bypass');
-    st._groups.forEach((g) => { st.states[groupKey(st, g)] = mode; });
-    st.current = name;
+  const baseMode = basePresetMode(name);
+  if (baseMode) {
+    st._groups.forEach((g) => { st.states[groupKey(st, g)] = baseMode; });
+    st.current = basePresetName(name);
   } else {
     const p = st.presets[name];
     if (!p) { refreshUI(node); return; }
@@ -203,7 +204,9 @@ async function setCurrentPreset(node, name) {
   refreshUI(node);
 }
 async function savePresetToLib(node) {
-  const name = await uiPrompt(ezT('Enter group preset name'), ezT('New preset'));
+  let name = await uiPrompt(ezT('Enter group preset name'), ezT('New preset'));
+  // 基础预设名（全部开启/全部禁用/全部绕过 + 旧中文名 + 当前语言显示名）是内置项：自定义项同名会被内置项盖住（选不中），直接不许用
+  while (name && name.trim() && isReservedPresetName(name)) name = await uiPrompt(ezT('That name is reserved for a built-in preset'), ezT('New preset'));
   if (!name || !name.trim()) return;
   const st = stateFor(node);
   const states = {};
@@ -219,7 +222,7 @@ async function deletePresetFromLib(node) {
   const st = stateFor(node);
   if (isBasePreset(st.current)) return;
   delete st.presets[st.current];
-  st.current = '全部开启'; syncToConfig(node); applyAll(node); refreshUI(node);
+  st.current = BASE_PRESETS[0]; syncToConfig(node); applyAll(node); refreshUI(node);
 }
 
 // ===== 渲染 =====
@@ -264,7 +267,7 @@ function buildRoot(node) {
     presetSel.innerHTML = '';
     const opts = presetOptions(node);
     if (opts.indexOf(st.current) < 0) { st.current = BASE_PRESETS[0]; syncToConfig(node); }
-    opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
+    opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
     refreshRows(node);
     fitNode(node); // 仅初次渲染自适应一次，后续交给用户手动缩放
   }
@@ -282,7 +285,7 @@ function refreshPresetOptions(node, sel) {
   const opts = presetOptions(node);
   if (opts.indexOf(st.current) < 0) st.current = BASE_PRESETS[0];
   sel.innerHTML = '';
-  opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; sel.appendChild(o); });
+  opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; sel.appendChild(o); });
 }
 
 const COLOR_PRESET_KEY = 'ezflex_group_color_presets';
@@ -451,7 +454,7 @@ function refreshUI(node) {
   const opts = presetOptions(node);
   if (opts.indexOf(st.current) < 0) st.current = BASE_PRESETS[0];
   presetSel.innerHTML = '';
-  opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
+  opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
 }
 function fitNode(node) {
   try {

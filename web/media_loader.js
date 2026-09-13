@@ -286,6 +286,20 @@ function buildCard(node, g, card) {
 }
 
 const _mlPreview = {};
+// 只把这张卡片的缩略图换掉：render(node) 会重建整个面板（卡片多时很慢），生成 3D 预览图后应该立刻就看得见。
+function setCardThumb(node, itemId, url) {
+  try {
+    const root = node && node._emlRoot; if (!root || !url) return false;
+    const card = root.querySelector('.eml-media[data-item-id="' + String(itemId).replace(/"/g, '\\"') + '"]');
+    if (!card) return false;
+    const pv = card.querySelector('.pv'); if (!pv) return false;
+    let im = pv.querySelector('img');
+    if (!im) { im = el('img'); im.style.cssText = 'width:100%;height:100%;object-fit:contain;'; pv.appendChild(im); }
+    im.src = url;
+    const ph = pv.querySelector('.ph'); if (ph) ph.remove();
+    return true;
+  } catch (_) { return false; }
+}
 function buildMediaCard(node, g, card, item) {
   const isItemMgr = node._ezItemMgr;
   const m = el('div', 'eml-media' + (isItemMgr && node._ezItemSel && node._ezItemSel.has(String(item.id)) ? ' mgr-sel' : ''));
@@ -698,6 +712,7 @@ async function saveCurrentPreset(node) {
   try { const l = await (await fetch(PRESET_API)).json(); dft = ezT('Preset') + ((l || []).length + 1); } catch (_) {}
   const name = await uiPrompt(ezT('Enter preset name:'), dft);
   if (!name || !name.trim()) return;
+  if (name.trim() === 'default') { uiToast(ezT('That name is reserved for a built-in preset')); return; }   // default 是前端合成的内置项，同名存档不会显示
   const st = stateFor(node);
   try {
     await fetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), groups: deepClone(st.groups), currentGroupId: st.currentGroupId }) });
@@ -998,12 +1013,23 @@ function openPreview(node, item, card) {
   const tt = box.querySelector('.eml-pvtt'), mode = box.querySelector('.eml-pvmode'), main = box.querySelector('.eml-pvmain'), strip = box.querySelector('.eml-pvstrip'), foot = box.querySelector('.eml-pvfoot'), stripL = box.querySelector('.eml-stripL'), stripR = box.querySelector('.eml-stripR');
   stripL.style.cssText = stripR.style.cssText = 'background:none;border:none;font-size:22px;color:#94a3b8;cursor:pointer;padding:2px;line-height:1;flex:0 0 auto;';
   let idx = 0; let batch = false; let selSet = new Set();
-  const mkArrow = (side) => { const a = el('div'); a.innerHTML = side === 'L' ? '‹' : '›'; a.style.cssText = 'position:absolute;top:0;bottom:0;' + (side === 'L' ? 'left:0' : 'right:0') + ';width:48px;display:flex;align-items:center;justify-content:center;font-size:34px;color:#8a9aa8;text-shadow:0 1px 3px rgba(0,0,0,.12);cursor:pointer;opacity:0;transition:.15s;z-index:5;user-select:none;'; main.appendChild(a); return a; };
+  // 左右翻页箭头：容器整高但 **不吃点击**（pointer-events:none），只有中间那个圆形手柄可点。
+  // 以前是 48px 宽、整高的可点条 —— 正好压在视频原生控制条左边的播放三角上，点三角当然没反应。
+  const mkArrow = (side) => {
+    const a = el('div');
+    a.style.cssText = 'position:absolute;top:0;bottom:0;' + (side === 'L' ? 'left:0' : 'right:0') + ';width:48px;display:flex;align-items:center;justify-content:center;opacity:0;transition:.15s;z-index:5;pointer-events:none;';
+    const hit = el('span');
+    hit.innerHTML = side === 'L' ? '‹' : '›';
+    hit.style.cssText = 'width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:30px;line-height:1;color:#3a4a5e;background:rgba(255,255,255,.88);box-shadow:0 2px 12px rgba(0,0,0,.18);cursor:pointer;pointer-events:auto;user-select:none;';
+    a.appendChild(hit); a._hit = hit;
+    main.appendChild(a);
+    return a;
+  };
   const aL = mkArrow('L'), aR = mkArrow('R');
   main.addEventListener('mouseenter', () => { aL.style.opacity = '1'; aR.style.opacity = '1'; });
   main.addEventListener('mouseleave', () => { aL.style.opacity = '0'; aR.style.opacity = '0'; });
-  aL.addEventListener('click', () => { if (files.length > 1) { idx = (idx - 1 + files.length) % files.length; draw(); } });
-  aR.addEventListener('click', () => { if (files.length > 1) { idx = (idx + 1) % files.length; draw(); } });
+  aL._hit.addEventListener('click', () => { if (files.length > 1) { idx = (idx - 1 + files.length) % files.length; draw(); } });
+  aR._hit.addEventListener('click', () => { if (files.length > 1) { idx = (idx + 1) % files.length; draw(); } });
   const prev = () => { if (files.length > 1) idx = (idx - 1 + files.length) % files.length; draw(); };
   const next = () => { if (files.length > 1) idx = (idx + 1) % files.length; draw(); };
   const openLoc = (f) => { try { fetch('/media_loader/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path }) }); } catch (_) {} };
@@ -1048,6 +1074,9 @@ function openPreview(node, item, card) {
   const draw = () => {
     if (!files.length) { ov.remove(); return; }
     if (idx >= files.length) idx = files.length - 1;
+    const showArrows = files.length > 1;   // 单文件没得翻：整个箭头都不显示，别挡控制条
+    aL.style.display = showArrows ? 'flex' : 'none';
+    aR.style.display = showArrows ? 'flex' : 'none';
     const d = files[idx]; if (!d) return;
     const t = d.type || 'other';
     const mk = () => {
@@ -1142,8 +1171,10 @@ function open3d(node, item, card) {
       const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf7f9fd);
       const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100000); camera.position.set(3, 2.4, 4);
       const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-      renderer.setSize(canvas.clientWidth || 800, canvas.clientHeight || 600, false);
-      const ro = new ResizeObserver(() => { try { renderer.setSize(canvas.clientWidth || 800, canvas.clientHeight || 600, false); camera.aspect = (canvas.clientWidth || 800) / (canvas.clientHeight || 600); camera.updateProjectionMatrix(); } catch (_) {} });
+      let repaint = () => {};   // 模型就绪后由加载回调填上；ResizeObserver setSize 会清空画布，必须跟着重画
+      const fit = () => { try { const w = canvas.clientWidth || 800, h = canvas.clientHeight || 600; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); } catch (_) {} };
+      fit();
+      const ro = new ResizeObserver(() => { fit(); repaint(); });
       ro.observe(canvas);
       scene.add(new THREE.AmbientLight(0xffffff, 0.9));
       const dir = new THREE.DirectionalLight(0xffffff, 0.8); dir.position.set(5, 10, 7); scene.add(dir);
@@ -1173,8 +1204,25 @@ function open3d(node, item, card) {
         const up = () => { drag = null; };
         canvas.addEventListener('pointerup', up); canvas.addEventListener('pointerleave', up); canvas.addEventListener('pointercancel', up);
         let raf = 0;
+        repaint = () => { try { apply(); } catch (_) {} };
         if (EZ_PERF.render3d === 'loop') { const loop = () => { render(); raf = requestAnimationFrame(loop); }; loop(); } else { apply(); }
-        const doShot = (silent) => { try { apply(); renderer.render(scene, camera); const u2 = renderer.domElement.toDataURL('image/png'); _mlPreview[item.id] = u2; if (node) render(node); if (!silent) uiToast(ezT('Generated 3D preview image')); } catch (_) { if (!silent) uiToast(ezT('Failed to generate preview')); } };
+        // 首次出画：弹窗尺寸这一两帧才定型，ResizeObserver 的 setSize 又会把画面清掉 —— 补两次，免得「一片空白，动一下鼠标才显示」
+        requestAnimationFrame(() => { fit(); repaint(); });
+        setTimeout(() => { fit(); repaint(); }, 120);
+        // 缩略图不需要原分辨率：先缩到 480px 宽的离屏 canvas 再编码。整幅 PNG 编码（toDataURL）是同步 GPU 回读 + PNG 压缩，
+        // 上千像素时能卡主线程几百毫秒，存下来还是张几百 KB 的 dataURL（卡片每次都重新解码，越用越慢）。
+        const doShot = (silent) => {
+          try {
+            apply(); renderer.render(scene, camera);
+            const src = renderer.domElement;
+            const W = 480, H = Math.max(1, Math.round(W * (src.height || 1) / (src.width || 1)));
+            const shot = document.createElement('canvas'); shot.width = W; shot.height = H;
+            shot.getContext('2d').drawImage(src, 0, 0, W, H);
+            _mlPreview[item.id] = shot.toDataURL('image/jpeg', 0.85);
+            if (!setCardThumb(node, item.id, _mlPreview[item.id]) && node) render(node);
+            if (!silent) uiToast(ezT('Generated 3D preview image'));
+          } catch (_) { if (!silent) uiToast(ezT('Failed to generate preview')); }
+        };
         if (!_mlPreview[item.id]) { const autoShot = () => { theta = 0; phi = 1.0; radius = maxD * 3 || 4; target.set(0, maxD * 0.2, 0); apply(); doShot(true); }; setTimeout(autoShot, 320); }
         wfCb.addEventListener('change', () => { wrap.traverse((o) => { if (o.isMesh && o.material) o.material.wireframe = wfCb.checked; }); render(); });
         matSel.addEventListener('change', () => {
@@ -1194,7 +1242,8 @@ function open3d(node, item, card) {
         resetBtn.addEventListener('click', () => { theta = 0.6; phi = 1.0; radius = maxD * 3 || 4; target.set(0, maxD * 0.2, 0); apply(); });
         shotBtn.addEventListener('click', () => doShot());
         cleanup = () => { cancelAnimationFrame(raf); try { ro.disconnect(); } catch (_) {} try { renderer.dispose(); } catch (_) {} ov.remove(); };
-      }, undefined, (err) => { status.textContent = ezT('Load error: ') + (err && err.message || err); });
+      }, (xhr) => { try { if (xhr && xhr.total) status.textContent = ezT('Loading 3D model…') + ' ' + Math.round((xhr.loaded / xhr.total) * 100) + '%'; } catch (_) {} },
+      (err) => { status.textContent = ezT('Load error: ') + (err && err.message || err); });
     } catch (e) { status.textContent = ezT('3D viewer failed to initialize: ') + (e && e.message || e); }
   })();
 }

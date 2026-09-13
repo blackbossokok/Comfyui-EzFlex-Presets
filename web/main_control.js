@@ -5,7 +5,7 @@
 import { app } from "../../scripts/app.js";
 import { ezT, onLocaleChange, ezLocale, ezSetLocale } from "./ezflex_i18n.js";
 import {
-  NODE_TYPES, isBasePreset,
+  NODE_TYPES, BASE_PRESETS, isBasePreset, basePresetName,
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
   configWidget, writeConfig, readConfig,
   loadPresets, savePreset, deletePreset, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
@@ -206,7 +206,7 @@ async function savePresetToLib(node) {
   TARGET_TYPES.forEach((type) => {
     nodesOfType(type).forEach((n) => {
       const api = targetAPI(n);
-      if (api) targets[String(n.id)] = { type, preset: api.current() || '全部开启' };
+      if (api) targets[String(n.id)] = { type, preset: basePresetName(api.current()) || BASE_PRESETS[0] };
     });
   });
   await savePreset(API, { name: name.trim(), label: name.trim(), targets });
@@ -308,14 +308,14 @@ function renderRow(mainNode, targetNode) {
   const api = targetAPI(targetNode);
   const isOptional = nodeTypeOf(targetNode) === NODE_TYPES.COMBO || nodeTypeOf(targetNode) === NODE_TYPES.LATENT;
   const fill = async () => {
-    const cur = api ? api.current() : '';
+    const cur = basePresetName(api ? api.current() : '');
     const names = api ? (await api.presetNames()) : [];
     const sig = JSON.stringify(names) + (isOptional ? '|opt' : '');
     if (sel._ezSig === sig) { if (cur && sel.value !== cur && Array.from(sel.options).some((o) => o.value === cur)) sel.value = cur; return; }
     sel._ezSig = sig;
     sel.innerHTML = '';
     if (isOptional) { const ph = el('option'); ph.value = ''; ph.textContent = ezT('—— Preset ——'); if (!cur) ph.selected = true; sel.appendChild(ph); }
-    names.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === cur) o.selected = true; sel.appendChild(o); });
+    names.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === cur) o.selected = true; sel.appendChild(o); });
   };
   fill();
   sel.addEventListener('mousedown', () => fill()); // 点开该卡片下拉即实时刷新预设

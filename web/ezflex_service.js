@@ -97,7 +97,17 @@ export function scheduleOnRedraw(fn) {
 export const MODE_NUM = { on: 0, off: 2, bypass: 4 }; // LiteGraph.ALWAYS / NEVER / BYPASS
 export const BASE_PRESETS = ["Enable All", "Disable All", "Bypass All"];
 const BASE_PRESETS_LEGACY = ["全部开启", "全部禁用", "全部绕过"];   // 旧工作流里存的中文预置名，继续认
+const BASE_PRESET_MODES = ['on', 'off', 'bypass'];   // 与 BASE_PRESETS 同序
 export function isBasePreset(k) { return BASE_PRESETS.indexOf(k) >= 0 || BASE_PRESETS_LEGACY.indexOf(k) >= 0; }
+// 自定义预设不允许占用基础预设名：英文规范名 / 旧中文名 / 当前语言的显示名任一命中都会盖住自定义项
+export function isReservedPresetName(k) {
+  const s = String(k == null ? '' : k).trim();
+  return !!s && (isBasePreset(s) || BASE_PRESETS.some((b) => ezT(b) === s));
+}
+// 预置名是存进 config 的 key（不进词典，展示时才 ezT）：旧中文名 → 英文规范名，命名预置原样返回
+export function basePresetName(k) { const i = BASE_PRESETS_LEGACY.indexOf(k); return i >= 0 ? BASE_PRESETS[i] : k; }
+// 基础预置 → 目标 mode；命名预置返回 null
+export function basePresetMode(k) { const i = BASE_PRESETS.indexOf(basePresetName(k)); return i >= 0 ? BASE_PRESET_MODES[i] : null; }
 
 // ===== 节点注册表（按类型收集画布上的 EzFlex 控制节点实例）=====
 const _registry = new Map(); // type -> Map<nodeId, node>
@@ -317,24 +327,57 @@ function installVuePanel(node, shell) {
 }
 
 const _SCROLL_SEL = '.eml-cards,.eml-tabs,.eph-list,.mc-list,.ezc-list,.ezg-list,.ezm-list,.ezpc-list,.ezo-list,.ezpv-list,.emoo-list';
+// 祖先链判断用的类名集合（比用选择器逐层 matches 便宜）
+const _SCROLL_CLASSES = ['eml-cards', 'eml-tabs', 'eph-list', 'mc-list', 'ezc-list', 'ezg-list', 'ezm-list', 'ezpc-list', 'ezo-list', 'ezpv-list', 'emoo-list'];
+// 已挂载的面板外壳：Vue 全局滚轮只在这些外壳里找滚动容器（不再每次 document.querySelectorAll 扫全页）
+const _panelShells = new Set();
 let _vueWheelBound = false;
-// Nodes 2.0 专属滚轮：滚动容器故意不放开命中（放开会挡住穿透、空白处就拖不动了），
-// 所以改在 window 捕获阶段兜：指针落在某个面板滚动容器的矩形里就手动滚它，并挡掉画布缩放。
+
+// 在一个外壳内找「指针下方且可滚动」的容器（只扫这个外壳）
+function _pickScrollable(root, x, y) {
+  let list = null;
+  try { list = root.querySelectorAll(_SCROLL_SEL); } catch (_) { return null; }
+  for (let i = 0; i < list.length; i++) {
+    const el = list[i];
+    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) continue;
+    let r = null; try { r = el.getBoundingClientRect(); } catch (_) { continue; }
+    if (x < r.left || x > r.right || y < r.top || y > r.bottom) continue;
+    return el;
+  }
+  return null;
+}
+
+// Nodes 2.0 专属滚轮：滚动容器故意不放开命中（放开会挡住穿透、空白处就拖不动了），所以在 window 捕获兜。
+// 顺序：① 先沿 e.target 的祖先链找滚动容器 —— 鼠标在卡片上时零额外查询、最省（大工作流也不会扫全页）；
+//       ② 祖先链没命中（Vue 下面板穿透，空白处的 target 是 .lg-node/canvas）才退化成「按已登记的外壳矩形定位」。
 function installVueWheel() {
   if (_vueWheelBound || typeof window === 'undefined') return;
   _vueWheelBound = true;
   window.addEventListener('wheel', (e) => {
     let s = null;
-    try {
-      const list = document.querySelectorAll(_SCROLL_SEL);
-      for (let i = 0; i < list.length; i++) {
-        const el = list[i];
-        if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) continue;
-        const r = el.getBoundingClientRect();
-        if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) continue;
-        s = el; break;
+    // ① 祖先链：只认「我们这个类 + 当前确实可滚」的元素（不可滚就继续往上，保留原有回落行为）
+    let el = e.target;
+    let hops = 0;
+    while (el && el.nodeType === 1 && el !== document.body && hops < 32) {
+      const cls = el.classList;
+      if (cls) {
+        for (let i = 0; i < _SCROLL_CLASSES.length; i++) {
+          if (cls.contains(_SCROLL_CLASSES[i]) && (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1)) { s = el; break; }
+        }
+        if (s) break;
       }
-    } catch (_) {}
+      el = el.parentElement; hops++;
+    }
+    // ② 面板外壳内定位（只在指针落进某个外壳矩形时，才在该外壳里按类找）
+    if (!s) {
+      for (const shell of _panelShells) {
+        if (!shell || !shell.isConnected) { _panelShells.delete(shell); continue; }
+        let r = null; try { r = shell.getBoundingClientRect(); } catch (_) { continue; }
+        if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) continue;
+        s = _pickScrollable(shell, e.clientX, e.clientY);
+        if (s) break;
+      }
+    }
     if (!s) return;
     const canY = s.scrollHeight > s.clientHeight + 1;
     const canX = s.scrollWidth > s.clientWidth + 1;
@@ -465,7 +508,7 @@ function injectSocketPanelBaseCSS() {
 
 function _applyPanelHitThrough(element) {
   if (!element) return;
-  try { element.classList.add('ezfx-panel-shell'); } catch (_) {}
+  try { element.classList.add('ezfx-panel-shell'); _panelShells.add(element); } catch (_) {}
   try { if (window.__ezflexIsVueNodes && window.__ezflexIsVueNodes()) element.classList.add('ezfx-is-vue'); } catch (_) {}
   injectSocketPanelBaseCSS();
   try { element.style.setProperty('pointer-events', 'none', 'important'); } catch (_) {}

@@ -234,6 +234,7 @@ export const EZ_ZH = {
   "File": "文件",
   "Click to preview": "点击预览",
   "Click to browse and add media": "点击浏览并添加素材",
+  "That name is reserved for a built-in preset": "这个名称是内置预设专用的，请换一个",
   "Media": "素材",
   "Card": "卡片",
   "First image": "第一张",

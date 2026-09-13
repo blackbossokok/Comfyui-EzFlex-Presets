@@ -301,6 +301,11 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     if (!m) return null;
     return { desc: m[1].trim(), w: parseInt(m[2], 10), h: parseInt(m[3], 10), ratio: m[4].trim() };
   }
+  // 预设项的「宽x高|比例」键：同一预设换过语言后会有中/英两个默认名各存一份，按内容认成同一项
+  function presetKeyOf(name) {
+    const info = parsePresetName(name);
+    return (info && info.w > 0 && info.h > 0) ? (info.w + 'x' + info.h + '|' + info.ratio) : null;
+  }
   // 是否旧的「比例描述 + 比例」但尺寸与当前默认不一致 → 视为被取代的默认项，丢弃不再展示
   function isStaleRatioPreset(name) {
     const info = parsePresetName(name);
@@ -309,13 +314,27 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     if (Object.values(RATIO_DESC).indexOf(info.desc) < 0) return false;
     return DEFAULT_PRESETS.every((dp) => dp.name !== name);
   }
-  // 把预设列表排成「默认项按 DEFAULT_PRESETS 顺序置顶 + 自定义项在后」，保证默认位置恒定
+  // 把预设列表排成「默认项按 DEFAULT_PRESETS 顺序置顶 + 自定义项在后」，保证默认位置恒定。
+  // 顺带折叠同一预设的跨语言重复项（中/英两个默认名各存一份，宽高比例完全一样，只留一份）。
   function canonicalOrder(list) {
     const byName = {};
     (Array.isArray(list) ? list : []).forEach((p) => { if (p && p.name && !(p.name in byName)) byName[p.name] = p; });
     const ordered = [];
-    DEFAULT_PRESETS.forEach((dp) => { if (byName[dp.name]) { ordered.push(byName[dp.name]); delete byName[dp.name]; } });
-    Object.keys(byName).forEach((n) => { if (isStaleRatioPreset(n)) { delete byName[n]; return; } ordered.push(byName[n]); });
+    const defKeys = {};
+    DEFAULT_PRESETS.forEach((dp) => {
+      const k = presetKeyOf(dp.name);
+      if (k) defKeys[k] = true;
+      if (byName[dp.name]) { ordered.push(byName[dp.name]); delete byName[dp.name]; }
+    });
+    const rest = [];
+    Object.keys(byName).forEach((n) => { if (isStaleRatioPreset(n)) { delete byName[n]; return; } rest.push(byName[n]); });
+    const seenKey = {};
+    rest.forEach((p) => {
+      const k = presetKeyOf(p.name);
+      if (k && (defKeys[k] || seenKey[k])) return;   // 与某个默认项同尺寸同比例（只是名字语言不同）→ 不重复展示
+      if (k) seenKey[k] = true;
+      ordered.push(p);
+    });
     return ordered;
   }
 
@@ -337,17 +356,40 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     return canonicalOrder(list);
   }
 
+  // 下拉分两组：默认项（canonicalOrder 已把默认项置顶）+ 自定义项，中间插一条分隔行
+  function splitPresets(list) {
+    const defNames = {};
+    DEFAULT_PRESETS.forEach((dp) => { defNames[dp.name] = true; });
+    const defaults = [], customs = [];
+    (Array.isArray(list) ? list : []).forEach((p) => {
+      if (!p || !p.name) return;
+      (defNames[p.name] ? defaults : customs).push(p);
+    });
+    return { defaults: defaults, customs: customs };
+  }
+
   function refreshPresetSel(sel, noSeed) {
     return loadPresetList().then((list) => seedPresets(list)).then((list) => {
       sel.innerHTML = '';
       const d = el('option', null, { value: '' });
       d.textContent = ezT('— Preset —');
       sel.appendChild(d);
-      list.forEach((p) => {
+      const groups = splitPresets(list);
+      groups.defaults.forEach((p) => {
         const o = el('option', null, { value: p.name });
         o.textContent = p.name;
         sel.appendChild(o);
       });
+      if (groups.customs.length) {
+        const div = el('option', null, { value: '' });
+        div.disabled = true; div.className = 'divider'; div.textContent = '';   // 同比例下拉的分隔行
+        sel.appendChild(div);
+        groups.customs.forEach((p) => {
+          const o = el('option', null, { value: p.name });
+          o.textContent = p.name;
+          sel.appendChild(o);
+        });
+      }
       return list;
     });
   }

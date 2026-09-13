@@ -62,7 +62,7 @@ import comfy.sd
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 WEB_DIRECTORY = "./web"
 
@@ -643,7 +643,7 @@ async def _mc_outputs(req):
         loaders = parse_config(config) if isinstance(config, str) else (config or [])
         loaders = loaders[:256] if isinstance(loaders, list) else []
         out_types, out_names = _mc_output_types(loaders)
-        ModelsComboLoader.RETURN_TYPES = tuple("*" for _ in out_types)
+        ModelsComboLoader.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
         ModelsComboLoader.RETURN_NAMES = tuple(out_names)
         return _web.json_response({"ok": True, "types": out_types, "names": out_names})
     except Exception as e:
@@ -768,6 +768,23 @@ def load_vae(loader):
     return vae
 
 
+class _DynamicOutputTypes(tuple):
+    """动态输出节点的类 RETURN_TYPES 容器：越界取槽位返回 "*"（ANY），不再抛 IndexError。
+
+    `execution.py:934` 校验链接类型时按「上游节点类 RETURN_TYPES[链接槽位]」取类型再和下游输入比对。
+    类的 RETURN_TYPES 全局共享，而同屏多个同类型节点端口数不同、前端同步还可能滞后或被链路守卫拦住 ——
+    表比链接槽位短时那里一取就越界，报出来的是看不懂的 `tuple index out of range`
+    （「EzFlex-ParamPresetOutput 无法校验 input_1」就是这么来的）。越界槽位当 ANY：校验放行，
+    真实数据仍来自 run() 的返回元组；len() 语义不变（execution.py 用它复制标量输出）。
+    """
+
+    def __getitem__(self, i):
+        try:
+            return tuple.__getitem__(self, i)
+        except IndexError:
+            return "*"
+
+
 class ModelsComboLoader:
     @classmethod
     def INPUT_TYPES(s):
@@ -781,7 +798,7 @@ class ModelsComboLoader:
             },
         }
 
-    RETURN_TYPES = tuple(["*"] * (MAX_PORTS_PER_TYPE * 3))
+    RETURN_TYPES = _DynamicOutputTypes(["*"] * (MAX_PORTS_PER_TYPE * 3))
     RETURN_NAMES = (
         tuple([f"MODEL {i + 1}" for i in range(MAX_PORTS_PER_TYPE)])
         + tuple([f"CLIP {i + 1}" for i in range(MAX_PORTS_PER_TYPE)])
@@ -859,7 +876,7 @@ class ModelsComboLoader:
             if loader["type"] in ("checkpoint", "vae") and entry["vae"] is not None:
                 out_types.append("VAE"); out_names.append(nm + "_vae"); outputs.append(entry["vae"])
 
-        self.__class__.RETURN_TYPES = tuple("*" for _ in out_types)
+        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
         self.__class__.RETURN_NAMES = tuple(out_names)
         return tuple(outputs)
 
@@ -1011,7 +1028,7 @@ class NodeSwitchGroupNode:
             "Config JSON produced by the Node Switch Group panel (switch list / match rules / current preset).",
         )
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
@@ -1031,7 +1048,7 @@ class NodeSwitchMasterNode:
             "Config JSON produced by the Node Switch Master panel (current master preset name).",
         )
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
@@ -1052,7 +1069,7 @@ class MainControlNode:
             "Config JSON produced by the Main Control panel (current master preset name).",
         )
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
@@ -1073,7 +1090,7 @@ class ParamPresetControlNode:
             "Config JSON produced by the Param Preset Control panel (parameter group list + current preset name).",
         )
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
@@ -1081,9 +1098,7 @@ class ParamPresetControlNode:
 
     def run(self, config="{}", **kwargs):
         groups = parse_param_groups(config)
-        types, names = _ppc_output_types(groups)
-        self.__class__.RETURN_TYPES = types
-        self.__class__.RETURN_NAMES = names
+        _ez_sync_dynamic_types(self.__class__, _ppc_output_names(groups))
         return tuple(groups)
 
 
@@ -1109,7 +1124,7 @@ class ParamPresetOutputNode:
             },
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
@@ -1130,17 +1145,15 @@ class ParamPresetOutputNode:
             params.append(p)
         group["params"] = params
         active = _ppo_effective_params(group)
-        types, names, outputs = ["EZFLEX_PARAM_GROUP"], ["Data combo"], [group]
+        names, outputs = ["Data combo"], [group]
         for i, p in enumerate(active):
             ptype = (p.get("type") or "string").lower()
-            types.append(PARAM_TYPE_MAP.get(ptype, "STRING"))
             names.append((p.get("name") or "").strip() or f"Parameter {i + 1}")
             if str(p.get("id")) in off:
                 outputs.append(_ppo_disabled_value(ptype))
             else:
                 outputs.append(param_value_to_comfy(p.get("value"), ptype))
-        self.__class__.RETURN_TYPES = tuple(types)
-        self.__class__.RETURN_NAMES = tuple(names)
+        _ez_sync_dynamic_types(self.__class__, names)
         return tuple(outputs)
 
 
@@ -1216,7 +1229,7 @@ class PreviewAnyNode:
             inputs["optional"][f"input_{i}"] = (_ANY, {"forceInput": True, "tooltip": f"Any input {i}."})
         return inputs
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     OUTPUT_NODE = True
     FUNCTION = "preview"
@@ -1234,7 +1247,7 @@ class PreviewAnyNode:
             entries.append(entry)
             outputs.append(kwargs.get(name))   # 透传原始值（不是卡文字），供工作流中间连接继续传递
         # 用 "*" 通配类型，让输出能连到任意类型的输入端口（透传原始值）
-        self.__class__.RETURN_TYPES = tuple("*" for _ in range(len(outputs)))
+        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in range(len(outputs)))
         self.__class__.RETURN_NAMES = tuple(f"output_{i + 1}" for i in range(len(outputs)))
         return {"ui": {"entries": _pv_sanitize(entries)}, "result": tuple(outputs)}
 
@@ -3452,25 +3465,11 @@ class PreviewAnyNode:
         return None
 
 
-_register_preset_routes("EzFlex-NodeSwitchGroup", "/nodeswitch_group/presets", with_ratios=False)
 _register_preset_routes("EzFlex-NodeSwitchMaster", "/nodeswitch_master/presets", with_ratios=False)
 _register_preset_routes("EzFlex-MainControl", "/main_control/presets", with_ratios=False)
 _register_preset_routes("EzFlex-ParamPresetControl", "/param_preset_control/presets", with_ratios=False)
 
 
-
-# 参数类型 -> ComfyUI 输出类型：复杂类型（complex/tuple/list/set/dictionary）没有原生端口，统一走 STRING(JSON)。
-PARAM_TYPE_MAP = {
-    "int": "INT",
-    "float": "FLOAT",
-    "string": "STRING",
-    "bool": "BOOLEAN",
-    "complex": "STRING",
-    "tuple": "STRING",
-    "list": "STRING",
-    "set": "STRING",
-    "dictionary": "STRING",
-}
 
 
 def _py_literal(s):
@@ -3680,28 +3679,41 @@ def param_value_to_comfy(value, ptype):
     return str(value)
 
 
-def _ppc_output_types(groups):
-    """按参数组顺序算 ParamPresetControl 的输出类型/名称（一个分组一个 EZFLEX_PARAM_GROUP 端口）。"""
+def _ez_sync_dynamic_types(cls, names):
+    """动态输出节点的类 RETURN_TYPES/RETURN_NAMES 同步（前端结构变化时 POST 调，run() 也调）。
+
+    ⚠️ 类的 RETURN_TYPES 是**全局共享的一份**（`execution.py:934` 用「上游类 RETURN_TYPES[链接槽位]」取类型
+    再和下游输入比对），而同屏多个同类型节点各自的端口数不同 —— 谁最后同步谁说了算。老写法「精确同步」一收缩，
+    另一个实例的高位槽就被挤掉：那条链接一校验就取越界，报错是看不懂的 `tuple index out of range`
+    （表现成「EzFlex-ParamPresetOutput 无法校验 input_1」）。两条不变量：
+
+      ① 长度**只增不减**：收缩时保留原表尾，不碰别的实例的高位槽；
+      ② 动态槽类型统一 `*`（ANY）：同槽位在不同实例可能是不同类型，写死任一个都会让另一个误报类型不匹配；
+         真实数据来自 run() 的返回元组，`*` 只放宽校验。
+    """
+    names = list(names or [])
+    prev_types = tuple(getattr(cls, "RETURN_TYPES", ()) or ())
+    prev_names = tuple(getattr(cls, "RETURN_NAMES", ()) or ())
+    n = max(len(names), len(prev_types))
+    if len(names) < n:
+        names += list(prev_names[len(names):n])
+        names += [f"Output {i + 1}" for i in range(len(names), n)]
+    cls.RETURN_TYPES = _DynamicOutputTypes(["*"] * n)
+    cls.RETURN_NAMES = tuple(names)
+
+
+def _ppc_output_names(groups):
+    """按参数组顺序算 ParamPresetControl 的输出名（一个分组一个 EZFLEX_PARAM_GROUP 端口）。"""
     groups = groups or []
-    names = []
-    for i, g in enumerate(groups):
-        nm = (g.get("name") or "").strip() or f"Group {i + 1}"
-        names.append(nm)
-    return tuple(["EZFLEX_PARAM_GROUP"] * len(groups)), tuple(names)
+    return tuple((g.get("name") or "").strip() or f"Group {i + 1}" for i, g in enumerate(groups))
 
 
-def _ppo_output_types(params):
-    """按输出顺序算 ParamPresetOutput 的类型/名称：第 0 个固定为整组数据(红色 EZFLEX_PARAM_GROUP)，其后每个激活参数一个端口。"""
-    params = params or []
-    types, names = [], []
-    for i, p in enumerate(params):
-        ptype = (p.get("type") or "string").lower()
-        if ptype == "ezflex_param_group":
-            types.append("EZFLEX_PARAM_GROUP")
-        else:
-            types.append(PARAM_TYPE_MAP.get(ptype, "STRING"))
+def _ppo_output_names(params):
+    """按输出顺序算 ParamPresetOutput 的输出名：第 0 个固定为整组数据，其后每个激活参数一个端口。"""
+    names = ["Data combo"]
+    for i, p in enumerate(params or []):
         names.append((p.get("name") or "").strip() or f"Parameter {i + 1}")
-    return tuple(types), tuple(names)
+    return tuple(names)
 
 
 def _ppo_effective_params(group):
@@ -3746,10 +3758,9 @@ async def _ppc_outputs(req):
         data = await req.json()
         groups = data.get("groups", [])
         groups = groups[:128] if isinstance(groups, list) else []
-        types, names = _ppc_output_types(groups)
-        ParamPresetControlNode.RETURN_TYPES = types
-        ParamPresetControlNode.RETURN_NAMES = names
-        return _web.json_response({"ok": True, "types": list(types), "names": list(names)})
+        _ez_sync_dynamic_types(ParamPresetControlNode, _ppc_output_names(groups))
+        return _web.json_response({"ok": True, "types": list(ParamPresetControlNode.RETURN_TYPES),
+                                   "names": list(ParamPresetControlNode.RETURN_NAMES)})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
 
@@ -3760,10 +3771,9 @@ async def _ppo_outputs(req):
         data = await req.json()
         params = data.get("params", [])
         params = params[:256] if isinstance(params, list) else []
-        types, names = _ppo_output_types(params)
-        ParamPresetOutputNode.RETURN_TYPES = types
-        ParamPresetOutputNode.RETURN_NAMES = names
-        return _web.json_response({"ok": True, "types": list(types), "names": list(names)})
+        _ez_sync_dynamic_types(ParamPresetOutputNode, _ppo_output_names(params))
+        return _web.json_response({"ok": True, "types": list(ParamPresetOutputNode.RETURN_TYPES),
+                                   "names": list(ParamPresetOutputNode.RETURN_NAMES)})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
 
@@ -3889,7 +3899,7 @@ async def _preview_any_outputs(req):
         data = await req.json()
         count = int(data.get("count", 0))
         count = max(0, min(count, _PREVIEW_MAX))
-        PreviewAnyNode.RETURN_TYPES = tuple("*" for _ in range(count))
+        PreviewAnyNode.RETURN_TYPES = _DynamicOutputTypes("*" for _ in range(count))
         PreviewAnyNode.RETURN_NAMES = tuple(f"output_{i}" for i in range(1, count + 1))
         return _web.json_response({"ok": True, "types": list(PreviewAnyNode.RETURN_TYPES), "names": list(PreviewAnyNode.RETURN_NAMES)})
     except Exception as e:
@@ -5752,7 +5762,7 @@ async def _ml_outputs(req):
         data = await req.json()
         labels = data.get("labels") or []
         labels = [str(x)[:128] for x in labels][:_EZ_OUTPUT_CAP] if isinstance(labels, list) else []
-        MediaLoaderNode.RETURN_TYPES = tuple(_MEDIA_CARD for _ in labels)
+        MediaLoaderNode.RETURN_TYPES = _DynamicOutputTypes(_MEDIA_CARD for _ in labels)
         MediaLoaderNode.RETURN_NAMES = tuple(labels)
         return _web.json_response({"ok": True, "names": labels})
     except Exception as e:
@@ -5784,7 +5794,7 @@ async def _mo_outputs(req):
             else:
                 types = [g["type"] for g in groupings]
                 names = [g["name"] for g in groupings]
-        MediaOutNode.RETURN_TYPES = tuple(types)
+        MediaOutNode.RETURN_TYPES = _DynamicOutputTypes(types)
         MediaOutNode.RETURN_NAMES = tuple(names)
         return _web.json_response({"ok": True, "types": types, "names": names})
     except Exception as e:
@@ -6320,7 +6330,9 @@ async def _ml_serve(req):
     if not abs_path or not os.path.isfile(abs_path):
         return _web.Response(status=404, text="not found")
     try:
-        return _web.FileResponse(abs_path, headers={"Cache-Control": "no-store"})
+        # 别用「禁止缓存」：模型/图片/视频每次打开都整份重下（3D 模型最明显，几 MB 起步）。
+        # no-cache = 允许存但每次协商，aiohttp 自带 ETag/Last-Modified → 文件没变就是 304，改了就立刻拿到新的。
+        return _web.FileResponse(abs_path, headers={"Cache-Control": "private, no-cache"})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
 
@@ -6482,7 +6494,7 @@ class MediaLoaderNode:
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     FUNCTION = "load"
     CATEGORY = "EzFlex"
@@ -6519,7 +6531,7 @@ class MediaLoaderNode:
             outputs.append({"_kind": "ezflex_media_card", "cardId": card.get("id"),
                             "label": card.get("label"), "files": flat, "_rows": rows})
             labels.append(card.get("label") or "Card")
-        self.__class__.RETURN_TYPES = tuple(_MEDIA_CARD for _ in outputs)
+        self.__class__.RETURN_TYPES = _DynamicOutputTypes(_MEDIA_CARD for _ in outputs)
         self.__class__.RETURN_NAMES = tuple(labels)
         return tuple(outputs)
 
@@ -6549,7 +6561,7 @@ class MediaOutNode:
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
-    RETURN_TYPES = ()
+    RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
     FUNCTION = "run"
     CATEGORY = "EzFlex"
@@ -6571,7 +6583,7 @@ class MediaOutNode:
                 types.append(MEDIA_TO_COMFY.get(str(ftype).lower(), "STRING"))
                 names.append(name)
                 outputs.append(None if str(fid) in off else (f.get("value") if isinstance(f, dict) else f))
-            self.__class__.RETURN_TYPES = tuple(types)
+            self.__class__.RETURN_TYPES = _DynamicOutputTypes(types)
             self.__class__.RETURN_NAMES = tuple(names)
             return tuple(outputs)
         # card / row / group：基于整张 MediaLoader 的结构
@@ -6595,7 +6607,7 @@ class MediaOutNode:
             if start or cap:
                 keep_vals = keep_vals[start:(start + cap) if cap else None]   # 「批量设置」里的 从第几张开始 / 最多取几张
             outputs.append(_mo_merge_values(keep_vals, g["name"], _mo_common_kind(g["files"]), fit))
-        self.__class__.RETURN_TYPES = tuple(types)
+        self.__class__.RETURN_TYPES = _DynamicOutputTypes(types)
         self.__class__.RETURN_NAMES = tuple(names)
         return tuple(outputs)
 
