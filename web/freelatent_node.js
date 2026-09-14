@@ -66,6 +66,15 @@ const FL_CSS = `
 .fl-badge{font-size:9px;background:#edebff;color:#6b6bff;padding:2px 10px;border-radius:30px;border:1px solid rgba(107,107,255,.15);}
 .fl-empty{flex:1 1 auto;display:flex;align-items:center;justify-content:center;color:#8a9aa8;font-size:12px;background:rgba(0,0,0,.02);border:1px dashed #d0d5dd;border-radius:7px;margin:2px;}
 .fl-ratio-sep{color:#8a9aa8;font-weight:600;font-size:11px;user-select:none;-webkit-user-select:none;}
+.fl-preset-btn{flex:2 1 60px;min-width:60px;text-align:center;overflow:hidden;text-overflow:ellipsis;}
+.fl-pmenu{position:fixed;z-index:99990;background:#fff;border:1px solid #d0d5dd;border-radius:9px;box-shadow:0 10px 28px rgba(20,30,50,.2);padding:4px;max-height:46vh;overflow:auto;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:12px;color:#1a1a2e;box-sizing:border-box;}
+.fl-pmenu-item{display:flex;align-items:center;gap:6px;padding:5px 8px;border-radius:6px;cursor:pointer;white-space:nowrap;}
+.fl-pmenu-item:hover{background:#f2f3fb;}
+.fl-pmenu-lab{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;}
+.fl-pmenu-sep{height:1px;background:#e6e9ef;margin:4px 6px;}
+.fl-defstar{flex:0 0 auto;color:#f6c343;font-size:13px;line-height:1;opacity:0;transform:scale(.4) rotate(-40deg);transition:opacity .16s ease,transform .2s cubic-bezier(.2,.9,.3,1.5);cursor:pointer;padding:0 2px;user-select:none;}
+.fl-defstar.show,.fl-defstar.on{opacity:1;transform:scale(1) rotate(0deg);}
+.fl-defstar:hover{color:#f0a800;transform:scale(1.2) rotate(0deg);}
 .fl-socket-label{position:fixed;z-index:20;pointer-events:none;background:rgba(26,36,48,0.5);color:#e8e8f0;font-size:9px;line-height:1;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,.18);white-space:nowrap;user-select:none;display:inline-flex;align-items:center;}
 .fl-dialog{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:9999;background:rgba(0,0,0,.35);}
 .fl-dialog-box{background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:14px;box-shadow:0 10px 34px rgba(0,0,0,.2);display:flex;flex-direction:column;gap:10px;min-width:280px;max-width:380px;outline:none;}
@@ -93,6 +102,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
   const NODE_NAME = 'EzFlex-FreeLatent';
   const PRESET_API = '/freelatent/presets';
   const RATIO_API = '/freelatent/presets/custom_ratios';
+  const DEFAULT_API = '/freelatent/presets/default';
   const MIN_WIDTH = 520; // 节点初始/最小宽度（容纳信息栏 + 控制行 + 预设/自定义比例行）
   const DEFAULT_LIMIT = 1024;
   const LIMIT_STEPS = [1024, 2048, 4096, 8192]; // 最大边下拉的预设档
@@ -264,6 +274,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     st.selectedRatioLabel = cfg.aspect || calcAspect(st.width, st.height);
     st.customRatios = Array.isArray(cfg.customRatios) ? cfg.customRatios.filter((r) => r && FIXED_RATIOS.indexOf(r) < 0) : [];
     st.force = !!cfg.force;
+    st._hasCfg = (cfg.width != null || cfg.height != null);   // 新建节点（空 config）才套用默认预设
   }
 
   function syncToConfig(node) {
@@ -293,6 +304,112 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       if (r && r.ok) return await r.json();
     } catch (_) { /* 忽略 */ }
     return [];
+  }
+
+  // ===== 「设为默认」：新建节点自动套用该预设 =====
+  async function loadDefaultPreset(node) {
+    try {
+      const r = await apiFetch(DEFAULT_API);
+      const d = (r && r.ok) ? await r.json() : {};
+      node._ezDefaultPreset = (d && d.name) ? d : null;
+    } catch (_) { node._ezDefaultPreset = null; }
+    return node._ezDefaultPreset;
+  }
+
+  // 按「预设名」显式设置/清除默认（不依赖当前下拉值，避免误清成空）
+  function setDefaultPresetByName(node, name, clear) {
+    const st = stateFor(node);
+    return loadPresetList().then((list) => {
+      const body = { clear: !!(clear || !name) };
+      if (!body.clear) {
+        const p = list.find((x) => x.name === name);
+        const c = (p && p.config) || { width: st.width, height: st.height, batch_size: st.batchSize };
+        body.name = name; body.width = int(c.width, st.width); body.height = int(c.height, st.height);
+        body.batch_size = Math.max(1, int(c.batch_size, st.batchSize));
+      }
+      return apiFetch(DEFAULT_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    }).then((r) => r.json()).then((d) => {
+      node._ezDefaultPreset = (d && d.default && d.default.name) ? d.default : null;
+      if (_flMenuEl) { closePresetMenu(); openPresetMenu(node); }   // 就地重画星标
+    }).catch(() => {});
+  }
+
+  function syncPresetTrigger(node) {
+    const st = stateFor(node); const els = st._els;
+    if (!els || !els.presetBtn) return;
+    els.presetBtn.textContent = els.presetSel.value || ezT('— Preset —');
+  }
+
+  // ===== 自绘预设下拉：原生 option 放不了「悬停 2 秒出现的星标」 =====
+  let _flMenuEl = null, _flStarTimer = null;
+
+  function closePresetMenu() {
+    if (_flStarTimer) { clearTimeout(_flStarTimer); _flStarTimer = null; }
+    if (_flMenuEl) { try { _flMenuEl.remove(); } catch (_) {} _flMenuEl = null; }
+    try { document.removeEventListener('mouseup', _flDocUp, true); } catch (_) {}
+  }
+
+  function _flDocUp(e) {
+    if (_flMenuEl && !_flMenuEl.contains(e.target)) closePresetMenu();
+  }
+
+  function openPresetMenu(node) {
+    closePresetMenu();
+    const st = stateFor(node); const els = st._els;
+    if (!els || !els.presetSel) return;
+    const menu = el('div', 'fl-pmenu');
+    Array.from(els.presetSel.options).forEach((o) => {
+      if (o.disabled) { menu.appendChild(el('div', 'fl-pmenu-sep')); return; }
+      const item = el('div', 'fl-pmenu-item');
+      const lab = el('span', 'fl-pmenu-lab'); lab.textContent = o.textContent || ezT('— Preset —');
+      const star = el('span', 'fl-defstar'); star.textContent = '★';
+      star.title = 'Set this preset as the default for new nodes (click again to clear)';
+      if (node._ezDefaultPreset && o.value === node._ezDefaultPreset.name) star.classList.add('on');
+      item.addEventListener('mouseenter', () => {
+        if (!o.value || star.classList.contains('on')) return;
+        _flStarTimer = setTimeout(() => star.classList.add('show'), 500);
+      });
+      item.addEventListener('mouseleave', () => {
+        star.classList.remove('show');
+        if (_flStarTimer) { clearTimeout(_flStarTimer); _flStarTimer = null; }
+      });
+      star.addEventListener('click', (e) => {
+        e.stopPropagation(); e.preventDefault();
+        const isDef = !!(node._ezDefaultPreset && node._ezDefaultPreset.name === o.value);
+        setDefaultPresetByName(node, o.value, isDef);
+      });
+      item.addEventListener('click', () => {
+        els.presetSel.value = o.value;
+        syncPresetTrigger(node);
+        closePresetMenu();
+        if (o.value) els.presetSel.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      item.appendChild(lab); item.appendChild(star);
+      menu.appendChild(item);
+    });
+    document.body.appendChild(menu);
+    _flMenuEl = menu;
+    const r = els.presetBtn.getBoundingClientRect();
+    menu.style.width = Math.max(220, r.width) + 'px';
+    menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - menu.offsetWidth - 4)) + 'px';
+    const mh = menu.offsetHeight;
+    menu.style.top = (r.bottom + 4 + mh > window.innerHeight && r.top - 4 - mh > 0) ? (r.top - 4 - mh) + 'px' : (r.bottom + 4) + 'px';
+    setTimeout(() => document.addEventListener('mouseup', _flDocUp, true), 0);
+  }
+
+  // 空 config（新建节点）时套用默认预设；已有工作流尺寸的不动
+  function applyDefaultIfNew(node) {
+    const st = stateFor(node);
+    if (st._hasCfg) return;
+    loadDefaultPreset(node).then((d) => {
+      if (!d || !d.width || !d.height || st._hasCfg) return;
+      st.width = int(d.width, st.width);
+      st.height = int(d.height, st.height);
+      st.batchSize = Math.max(1, int(d.batch_size, st.batchSize));
+      if (d.name && st._els && st._els.presetSel) { st._els.presetSel.value = d.name; syncPresetTrigger(node); }
+      syncToConfig(node);
+      refresh(node);
+    });
   }
 
   // 解析预设名「描述 - WxH - (比例)」，用于识别旧版「同比例不同尺寸」的默认项
@@ -618,7 +735,9 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
 
     // 预设行（选中即自动生效，无加载按钮）+ 自定义比例输入（放预设删除按钮之后）
     const presetRow = el('div', 'fl-row wrap');
-    const presetSel = el('select', 'fl-sel');
+    const presetSel = el('select', 'fl-sel'); presetSel.style.display = 'none';
+    const presetBtn = el('button', 'fl-btn fl-preset-btn'); presetBtn.textContent = ezT('— Preset —');
+    presetBtn.title = 'Open the preset list';
     const saveBtn = el('button', 'fl-btn success sm'); saveBtn.textContent = ezT('Save');
     const delBtn = el('button', 'fl-btn danger sm'); delBtn.textContent = ezT('Delete');
     const ratioW = el('input', 'fl-num-ratio'); ratioW.type = 'number'; ratioW.value = '1'; ratioW.min = '1'; ratioW.title = ezT('Custom ratio width');
@@ -626,7 +745,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     const ratioH = el('input', 'fl-num-ratio'); ratioH.type = 'number'; ratioH.value = '1'; ratioH.min = '1'; ratioH.title = ezT('Custom ratio height');
     const saveRatioBtn = el('button', 'fl-btn success sm'); saveRatioBtn.textContent = ezT('Save'); saveRatioBtn.title = ezT('Save custom ratio');
     const delRatioBtn = el('button', 'fl-btn danger sm'); delRatioBtn.textContent = ezT('Delete'); delRatioBtn.title = ezT('Delete selected custom ratio');
-    presetRow.appendChild(presetSel); presetRow.appendChild(saveBtn);
+    presetRow.appendChild(presetBtn); presetRow.appendChild(presetSel); presetRow.appendChild(saveBtn);
     presetRow.appendChild(delBtn);
     presetRow.appendChild(ratioW); presetRow.appendChild(ratioSep); presetRow.appendChild(ratioH);
     presetRow.appendChild(saveRatioBtn); presetRow.appendChild(delRatioBtn);
@@ -638,12 +757,13 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
 
     // 状态绑定
     const st = stateFor(node);
-    st._els = { limitSel, limitCustom, swapBtn, batchInput, forceBtn, algBtn, canvas, info, selection, handleBoth, handleWidth, handleHeight, wInput, hInput, alignInput, mpInput, aspectSel, presetSel, saveBtn, delBtn, ratioW, ratioH, saveRatioBtn, delRatioBtn };
+    st._els = { limitSel, limitCustom, swapBtn, batchInput, forceBtn, algBtn, canvas, info, selection, handleBoth, handleWidth, handleHeight, wInput, hInput, alignInput, mpInput, aspectSel, presetSel, presetBtn, saveBtn, delBtn, ratioW, ratioH, saveRatioBtn, delRatioBtn };
 
     // 初始化比例下拉
     buildAspectSel(aspectSel, st);
     // 初始化预设 + 自定义比例（从 user_data 读取）
-    refreshPresetSel(presetSel).catch(() => {});
+    refreshPresetSel(presetSel).then(() => syncPresetTrigger(node)).catch(() => {});
+    loadDefaultPreset(node);
     loadCustomRatios(node).then(() => buildAspectSel(aspectSel, st));
     // 同步默认控件显示
     limitSel.value = String(st.limit);
@@ -873,6 +993,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       const st = stateFor(node);
       const w = int(cfg.width, st.width);
       const h = int(cfg.height, st.height);
+      if (cfg.batch_size != null) st.batchSize = Math.max(1, int(cfg.batch_size, st.batchSize));   // 预设里存过批次就一并还原
       applyBestLimit(w, h, st);
       const aligned = applyAlignLimit(w, h, st);
       st.width = aligned.w; st.height = aligned.h;
@@ -981,6 +1102,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
 
     // 预设：选中即自动生效；保存 / 删除
     els.presetSel.addEventListener('change', () => {
+      syncPresetTrigger(node);
       if (!els.presetSel.value) return;
       // 外部宽高接入时预览/预设常规禁用，但「强」生效时需解除该限制（否则预设无法应用）
       if (st.externalWH && !st.force) return;
@@ -993,14 +1115,19 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         const trimmed = name.trim();
         apiFetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: trimmed, config: { width: st.width, height: st.height, batch_size: st.batchSize } }) })
           .then(() => refreshPresetSel(els.presetSel))
-          .then(() => { els.presetSel.value = trimmed; });
+          .then(() => { els.presetSel.value = trimmed; syncPresetTrigger(node); });
       });
     });
     els.delBtn.addEventListener('click', () => {
       const name = els.presetSel.value;
       if (!name) return;
       apiFetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' })
-        .then(() => refreshPresetSel(els.presetSel));
+        .then(() => refreshPresetSel(els.presetSel))
+        .then(() => syncPresetTrigger(node));
+    });
+    els.presetBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (_flMenuEl) closePresetMenu(); else openPresetMenu(node);
     });
 
     // 自定义比例（保存 / 删除），存 user_data（customRatios 键）
@@ -1163,11 +1290,12 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         presetNames: () => loadPresetList().then((list) => seedPresets(list)).then((l) => l.map((p) => p.name)),
         current: () => { const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) return s.value; return node._ezCurPreset || ''; },
         setCurrent: async (name) => {
-          if (!name) { node._ezCurPreset = ''; const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) s.value = ''; return; }
+          if (!name) { node._ezCurPreset = ''; const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) s.value = ''; syncPresetTrigger(node); return; }
           const list = await loadPresetList();
           if (!list.some((p) => p.name === name)) return; // 预设不存在则不动
           node._ezCurPreset = name; await applyPresetByName(node, name);
           const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s && s.value !== name) { s.value = name; }
+          syncPresetTrigger(node);
         },
         refresh: () => refresh(node),
       };
@@ -1219,7 +1347,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       updateExternalWH(node);
       loadCustomRatios(node).then(() => { try { const s = stateFor(node); buildAspectSel(s._els.aspectSel, s); } catch (_) { /* 忽略 */ } });
       // 等 ComfyUI 恢复工作流里的 config 值后再同步一次
-      setTimeout(() => { try { loadFromConfig(node); refresh(node); updateExternalWH(node); installOutsideLabels(node); } catch (_) { /* 忽略 */ } }, 400);
+      setTimeout(() => { try { loadFromConfig(node); applyDefaultIfNew(node); refresh(node); updateExternalWH(node); installOutsideLabels(node); } catch (_) { /* 忽略 */ } }, 400);
       // canvas 尺寸随节点大小变化时重绘（节点拉大/缩小）
       try {
         const cv = root.querySelector('canvas');

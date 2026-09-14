@@ -123,8 +123,9 @@ function discoverGroups(node) {
         return cs.some((c) => want.indexOf(c) >= 0);
       });
     } else {
-      const re = new RegExp(val, 'i');
-      groups = groups.filter((g) => { try { return re.exec(g.title || ''); } catch (_) { return false; } });
+      let re = null;
+      try { re = new RegExp(val, 'i'); } catch (_) { re = null; }   // 非法正则不能把 discoverGroups 整条链带崩
+      groups = groups.filter((g) => { if (!re) return false; try { return re.exec(g.title || ''); } catch (_) { return false; } });
     }
   }
   groups = groups.slice().sort((a, b) => {

@@ -11,7 +11,7 @@ import { api } from "../../scripts/api.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, uiConfirm, uiPrompt, TYPE_ICONS, makeAudioPlayer,
-  scheduleOnRedraw, pumpFrames,
+  scheduleOnRedraw, pumpFrames, ezSanitizeHtml,
 } from "./ezflex_service.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import {
@@ -36,7 +36,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-09-13-i18nv16';
+const PH_BUILD = '2026-09-14-defv20';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -1438,10 +1438,10 @@ function openEditModal(node, cardId) {
   if (m._titleEl) m._titleEl.textContent = card.title || ezT('Edit prompt');
   if (tab === 'optimized') {
     m._tabOptimized.classList.add('active'); m._tabDefault.classList.remove('active');
-    m._editor.innerHTML = card.contentOptimizedHTML || card.contentOptimized || '';
+    m._editor.innerHTML = ezSanitizeHtml(card.contentOptimizedHTML || card.contentOptimized || '');
   } else {
     m._tabDefault.classList.add('active'); m._tabOptimized.classList.remove('active');
-    m._editor.innerHTML = card.contentHTML || card.content || '';
+    m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || '');
   }
   if (m._ruleDD) { m._ruleDD.setItems(ruleDropdownItems(node, false)); m._ruleDD.value = _normRuleId(phRulesModel(node).ruleId) || 'none'; }
   if (m._updMerge) m._updMerge();
@@ -1473,10 +1473,10 @@ function switchTab(tab) {
   refreshUI(nd);   // 卡片列表的预览文字 / 优默标记跟着滑块走
   if (tab === 'default') {
     _editModal._tabDefault.classList.add('active'); _editModal._tabOptimized.classList.remove('active');
-    _editModal._editor.innerHTML = card.contentHTML || card.content || '';
+    _editModal._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || '');
   } else {
     _editModal._tabOptimized.classList.add('active'); _editModal._tabDefault.classList.remove('active');
-    _editModal._editor.innerHTML = card.contentOptimizedHTML || card.contentOptimized || '';
+    _editModal._editor.innerHTML = ezSanitizeHtml(card.contentOptimizedHTML || card.contentOptimized || '');
   }
   requestAnimationFrame(moveTabThumb);
   // 切页签会把编辑器内容整段换掉（光标跟着丢），跟打开弹窗一样把光标落回正文末尾
@@ -2367,7 +2367,7 @@ async function runOptimize(id, ed) {
       const tabDef = _editModal && _editModal._tabDefault;
       if (tabOpt) { tabOpt.classList.add('active'); tabDef && tabDef.classList.remove('active'); }
       st.currentTab = 'optimized';
-      if (_editModal) { _editModal._editor.innerHTML = card.contentOptimizedHTML; }
+      if (_editModal) { _editModal._editor.innerHTML = ezSanitizeHtml(card.contentOptimizedHTML); }
       requestAnimationFrame(moveTabThumb);
       syncToConfig(nd);
       refreshUI(nd);   // 列表里的预览文字 / 优默标记立刻切到优化版
@@ -3422,7 +3422,7 @@ function settingsEl() {
     btnDeleteCustom.style.display = m === 'custom' ? '' : 'none';
     if (m === 'custom') loadCustom();
   };
-  const persistMode = (m) => { if (!_settingsNode) return; const cfg = readConfig(_settingsNode, {}); const opt = (cfg.optimize && typeof cfg.optimize === 'object') ? cfg.optimize : {}; opt.customMode = (m === 'custom'); writeConfig(_settingsNode, { optimize: opt, cards: cfg.cards, rules: cfg.rules }); };
+  const persistMode = (m) => { if (!_settingsNode) return; const cfg = readConfig(_settingsNode, {}); const opt = (cfg.optimize && typeof cfg.optimize === 'object') ? cfg.optimize : {}; opt.customMode = (m === 'custom'); writeConfig(_settingsNode, Object.assign({}, cfg, { optimize: opt })); };
   mDef.addEventListener('click', () => { if (_curMode !== 'default') { setMode('default'); persistMode('default'); } });
   mCus.addEventListener('click', () => { if (_curMode !== 'custom') { setMode('custom'); persistMode('custom'); } });
   btnNewCustom.addEventListener('click', () => { _customSelected = null; clearCustomFields(); renderCustomDD(); });
@@ -3717,7 +3717,7 @@ async function resetSettings() {
   ['autoTextgen', 'autoApi', 'autoLlama', 'clearCache'].forEach((k) => { const cb = m._grid0 && m._grid0._auto && m._grid0._auto[k]; if (cb) { cb.checked = false; cb._upd && cb._upd(); } });
   m._setMode('default');
   Object.keys(_TG_DEFAULTS).forEach((k) => { const inp = m._grid2._tg && m._grid2._tg[k]; if (!inp) return; if (inp.type === 'checkbox') { inp.checked = !!_TG_DEFAULTS[k]; inp._upd && inp._upd(); } else inp.value = String(_TG_DEFAULTS[k]); });
-  Object.keys(_LL_DEFAULTS).forEach((k) => { const inp = m._grid3._ll && m._grid3._ll[k]; if (!inp) return; inp.value = String(_LL_DEFAULTS[k]); });
+  Object.keys(_LL_DEFAULTS).forEach((k) => { const inp = m._grid3._ll && m._grid3._ll[k]; if (!inp) return; if (inp.type === 'checkbox') { inp.checked = !!_LL_DEFAULTS[k]; inp._upd && inp._upd(); } else inp.value = String(_LL_DEFAULTS[k]); });
   if (m._grid1 && m._grid1._ap) { const g = m._grid1._ap; const d = _API_PARAMS_DEFAULTS; g.temperature.value = String(d.temperature); g.top_p.value = d.top_p; g.max_tokens.value = d.max_tokens; g.seed.value = d.seed; g.stop.value = d.stop; g.reasoning.value = d.reasoning; g.custom.value = ''; g.webSearch.checked = d.webSearch; g.webSearch._upd && g.webSearch._upd(); }
   m._provSel.value = 'OpenAI'; m._setModels();
   m._setCustomSelected(null); if (m._clearCustomFields) m._clearCustomFields(); if (m._customDD) m._customDD.value = ''; if (m._renderCustomDD) m._renderCustomDD();
@@ -3903,7 +3903,7 @@ async function openCardMgr(node) {
 let _allModal = null, _allTab = 'default';
 function runToolOn(ed, id) {
   if (!ed) return;
-  const mapFH = { '，': ',', '。': '.', '！': '!', '？': ',', '：': ':', '；': ';', '“': '"', '”': '"', '‘': "'", '’': "'", '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>', '、': ',', '—': '-', '～': '~' };
+  const mapFH = { '，': ',', '。': '.', '！': '!', '？': '?', '：': ':', '；': ';', '“': '"', '”': '"', '‘': "'", '’': "'", '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>', '、': ',', '—': '-', '～': '~' };
   const mapHF = { ',': '，', '.': '。', '!': '！', '?': '？', ':': '：', ';': '；', '"': '“', "'": '‘', '(': '（', ')': '）', '[': '【', ']': '】', '<': '《', '>': '》', '~': '～', '-': '—' };
   const convert = (s) => id === 'fullToHalf'  ?  s.replace(/[，。！？：；“”‘’（）【】《》、—～]/g, (ch) => mapFH[ch] || ch).replace(/\u3000/g, ' ') : s.replace(/[,\.!\?:;"'\(\)\[\]<>~-]/g, (ch) => mapHF[ch] || ch);
   const bodies = ed.querySelectorAll('.eph-all-block-body');
@@ -4240,7 +4240,7 @@ function renderAllEditor(node) {
     ttl.title = ezT('Result of runtime auto-optimize / Overall edit "Tools → Optimize prompt": only the default bodies of cards whose merge badge is green are merged (gray cards are skipped); editable directly');
     rw.appendChild(num); rw.appendChild(ttl);
     const body = el('div', 'eph-all-block-body');
-    body.innerHTML = st.overallOptimizedHTML || st.overallOptimized || '';
+    body.innerHTML = ezSanitizeHtml(st.overallOptimizedHTML || st.overallOptimized || '');
     block.appendChild(rw); block.appendChild(body);
     ed.appendChild(block);
     finishAllEditor(node);
@@ -4285,7 +4285,7 @@ function renderAllEditor(node) {
     block.appendChild(rw);
     // 下方内容（按当前页签）
         const body = el('div', 'eph-all-block-body');
-    body.innerHTML = card.contentHTML || card.content || '';
+    body.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || '');
     block.appendChild(body);
     ed.appendChild(block);
   });
@@ -4613,5 +4613,5 @@ app.registerExtension({
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },
   nodeCreated(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
   loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
-  setup() { const g = app && app.graph; const ns = (g && (g._nodes || g.nodes)) || []; ns.forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); }); startIndexWatcher(this); onIndexChange(() => { refreshMediaChips(); refreshRefBrowser(); }); },
+  setup() { const g = app && app.graph; const ns = (g && (g._nodes || g.nodes)) || []; ns.forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); }); startIndexWatcher(ns.find((n) => nodeTypeOf(n) === NODE)); onIndexChange(() => { refreshMediaChips(); refreshRefBrowser(); }); },
 });

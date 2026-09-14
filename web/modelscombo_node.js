@@ -3,8 +3,12 @@
 // 由 config 输入框进 prompt、驱动 Python 节点 → 不再依赖会被缓存的独立 HTML 页面。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames } from "./ezflex_service.js";
+import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezSanitizeHtml } from "./ezflex_service.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
+
+// javascript:/vbscript:/data:text/html 这类 URL 不落到 href/src/window.open（模型元数据来自外部文件）
+const _UNSAFE_URL_RE = /^\s*(javascript|vbscript|data:text\/html)/i;
+function isUnsafeUrl(u) { return _UNSAFE_URL_RE.test(String(u || '')); }
 
 // ===== 现代乳白风样式（ModelsCombo 内嵌面板同套观感）=====
 const MC_CSS = `
@@ -1749,7 +1753,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       const sec = el('div', 'mc-bd-sec');
       const st = el('div', 'mc-bd-sec-title'); st.textContent = ezT('About this version');
       sec.appendChild(st);
-      const txt = el('div', 'mc-bd-desc'); txt.innerHTML = descHtml;
+      const txt = el('div', 'mc-bd-desc'); txt.innerHTML = ezSanitizeHtml(descHtml);
       sec.appendChild(txt); body.appendChild(sec);
     }
     // 标签
@@ -1770,7 +1774,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       const link = el('a', 'mc-bd-link');
       link.target = '_blank'; link.rel = 'noopener';
       link.textContent = civ.modelId ? ('civitai.com/models/' + civ.modelId + (civ.id ? '?modelVersionId=' + civ.id : '')) : (civ.downloadUrl || '');
-      link.href = civ.modelId ? ('https://civitai.com/models/' + civ.modelId + (civ.id ? '?modelVersionId=' + civ.id : '')) : (civ.downloadUrl || '#');
+      const srcUrl = civ.modelId ? ('https://civitai.com/models/' + civ.modelId + (civ.id ? '?modelVersionId=' + civ.id : '')) : (civ.downloadUrl || '');
+      link.href = (!srcUrl || isUnsafeUrl(srcUrl)) ? '#' : srcUrl;
       sec.appendChild(link);
       if (civ.creator) { const c = el('div', 'mc-bd-text'); c.textContent = ezT('Author: ') + civ.creator; sec.appendChild(c); }
       if (civ.stats) {
@@ -1790,9 +1795,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       civ.images.slice(0, 12).forEach((im) => {
         if (!im.url) return;
         const g = document.createElement('img');
-        g.className = 'mc-bd-gal'; g.src = im.url; g.alt = '';
+        g.className = 'mc-bd-gal'; g.src = isUnsafeUrl(im.url) ? '' : im.url; g.alt = '';
         g.loading = 'lazy';
-        g.onclick = () => { try { window.open(im.url, '_blank'); } catch (_) { /* 忽略 */ } };
+        g.onclick = () => { if (isUnsafeUrl(im.url)) return; try { window.open(im.url, '_blank'); } catch (_) { /* 忽略 */ } };
         gal.appendChild(g);
       });
       sec.appendChild(gal); body.appendChild(sec);

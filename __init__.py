@@ -62,7 +62,7 @@ import comfy.sd
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.2"
+__version__ = "1.2.3"
 
 WEB_DIRECTORY = "./web"
 
@@ -618,6 +618,50 @@ _register_preset_routes("EzFlex-FreeLatent", "/freelatent/presets", with_ratios=
 _register_preset_routes("EzFlex-MediaLoader", "/media_loader/presets")
 
 
+# FreeLatent：「新建节点默认应用的预设」。存进预设文档的 default 键（快照宽高/批次），
+# 这样即使之后删掉该预设，新建节点仍能按当时的值起步。
+async def _fl_default_get(req):
+    doc, _ = _read_doc("EzFlex-FreeLatent")
+    d = doc.get("default")
+    return _web.json_response(d if isinstance(d, dict) else {})
+
+
+async def _fl_default_set(req):
+    try:
+        data = await req.json()
+    except Exception:
+        data = {}
+    doc, presets = _read_doc("EzFlex-FreeLatent")
+    doc["presets"] = presets
+    if data.get("clear"):
+        doc.pop("default", None)
+    else:
+        name = str(data.get("name") or "").strip()
+        if not name:
+            return _web.json_response({"error": "no name"}, status=400)
+        try:
+            rec = {"name": name, "width": int(data.get("width") or 0), "height": int(data.get("height") or 0),
+                   "batch_size": max(1, int(data.get("batch_size") or 1))}
+        except (TypeError, ValueError):
+            return _web.json_response({"error": "bad size"}, status=400)
+        if rec["width"] <= 0 or rec["height"] <= 0:
+            return _web.json_response({"error": "bad size"}, status=400)
+        doc["default"] = rec
+    try:
+        with open(_preset_file("EzFlex-FreeLatent"), "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+    return _web.json_response({"ok": True, "default": doc.get("default") or {}})
+
+
+try:
+    PromptServer.instance.routes.get("/freelatent/presets/default")(_fl_default_get)
+    PromptServer.instance.routes.post("/freelatent/presets/default")(_fl_default_set)
+except Exception:
+    pass
+
+
 # ComfyUI 校验节点输出类型时读的是「类 RETURN_TYPES」（execution.py validate），
 # 而 ModelsCombo 的输出随 config 变化，运行期 load_combo 改类属性赶不上校验。
 # 因此前端在每次输出结构变化时 POST 到这里，把类 RETURN_TYPES/RETURN_NAMES 同步成当前排列，
@@ -641,8 +685,10 @@ async def _mc_outputs(req):
         data = await req.json()
         config = data.get("config", "")
         loaders = parse_config(config) if isinstance(config, str) else (config or [])
-        loaders = loaders[:256] if isinstance(loaders, list) else []
+        loaders = loaders[:_EZ_OUTPUT_CAP] if isinstance(loaders, list) else []
         out_types, out_names = _mc_output_types(loaders)
+        out_types = out_types[:_EZ_OUTPUT_CAP]
+        out_names = [str(x)[:128] for x in out_names][:_EZ_OUTPUT_CAP]
         ModelsComboLoader.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
         ModelsComboLoader.RETURN_NAMES = tuple(out_names)
         return _web.json_response({"ok": True, "types": out_types, "names": out_names})
@@ -3352,15 +3398,19 @@ class PreviewAnyNode:
             ext = "." + (text_fmt if text_fmt in ("txt", "md", "json", "csv", "log", "html") else "txt")
         if data is None:
             return entry
+        if not ext or ext.lower() not in _SAVE_ALLOWED_EXTS:
+            return entry      # 只写媒体/文本文档后缀；未知格式（.bat/.desktop/.sh 等）不落盘
         try:
             rel = cfg.get("savePath", "").strip()
+            base = _ez_real(PreviewAnyNode._output_dir())
             if os.path.isabs(rel):
-                dirpath = os.path.normpath(rel)
+                # 绝对路径只允许 output，或本机「选择文件夹」对话框登记过的目录（服务端状态）
+                dirpath = _ez_inside(rel, _pv_save_roots() + [base])
             else:
-                base = PreviewAnyNode._output_dir()
-                dirpath = os.path.normpath(os.path.join(base, rel))
-                if not dirpath.startswith(os.path.normpath(base)):
-                    dirpath = base
+                dirpath = _ez_inside(os.path.join(base, rel), [base])
+            if not dirpath:
+                print(f"[PreviewAny] save path {rel!r} is outside the allowed save folders; saved under output instead")
+                dirpath = base
             os.makedirs(dirpath, exist_ok=True)
             import time
             fname = PreviewAnyNode._sanitize_filename(name) + "_" + str(int(time.time() * 1000)) + ext
@@ -3827,6 +3877,50 @@ async def _preview_any_open(req):
         return _web.json_response({"error": str(e)}, status=500)
 
 
+def _pv_save_roots_file():
+    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
+    if not base:
+        return ''
+    return os.path.join(base, 'ezflex_save_roots.json')
+
+
+def _pv_save_roots():
+    """PreviewAny 存档允许的根外目录：只记本机「选择文件夹」对话框选过的目录（服务端状态，不是请求参数）。"""
+    fn = _pv_save_roots_file()
+    out = []
+    if fn and os.path.isfile(fn):
+        try:
+            with open(fn, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                for x in data:
+                    r = _ez_real(x)
+                    if r and os.path.isdir(r):
+                        out.append(r)
+        except Exception:
+            out = []
+    return out
+
+
+def _pv_remember_save_root(path):
+    r = _ez_real(path)
+    if not r or not os.path.isdir(r):
+        return
+    cur = _pv_save_roots()
+    if r in cur:
+        return
+    fn = _pv_save_roots_file()
+    if not fn:
+        return
+    cur.append(r)
+    try:
+        os.makedirs(os.path.dirname(fn), exist_ok=True)
+        with open(fn, 'w', encoding='utf-8') as fh:
+            json.dump(cur, fh, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 async def _preview_any_pick_folder(req):
     """弹 Windows 原生“选择文件夹”对话框，默认 ComfyUI 输出目录。仅本机客户端。"""
     if not _ez_local(req):
@@ -3841,6 +3935,7 @@ async def _preview_any_pick_folder(req):
         path = filedialog.askdirectory(initialdir=base, title="Select save location")
         root.destroy()
         if path:
+            _pv_remember_save_root(path)
             return _web.json_response({"ok": True, "path": os.path.normpath(path), "base": base})
         return _web.json_response({"ok": False})
     except Exception as e:
@@ -4823,9 +4918,8 @@ async def _ph_optimize(req):
         # 远端调用：模型路径只认已登记的根（防拿任意本地文件当模型读）；本机点击即用保持原样
         text = await asyncio.to_thread(_ph_optimize_impl, data or {}, not _ez_local(req))
     except ValueError as e:
-        msg = str(e)
-        status = 400 if ("需在节点执行" in msg or "未填写" in msg or "为空" in msg or "请填写" in msg) else 502
-        return _web.json_response({"error": msg}, status=status)
+        # 优化失败（空提示词 / 模型没配 / 出站主机被拒…）统一按上游错误提示
+        return _web.json_response({"error": str(e)}, status=502)
     except Exception as e:
         return _web.json_response({"error": f"request failed: {e}"}, status=502)
     if (data or {}).get("clearCache"):
@@ -4997,9 +5091,12 @@ def _ph_check_outbound(url):
     if u and "://" not in u:
         u = "http://" + u
     try:
-        host = (_us(u).hostname or "").lower()
+        parts = _us(u)
+        host = (parts.hostname or "").lower()
     except Exception:
-        host = ""
+        parts, host = None, ""
+    if parts is None or parts.scheme not in ("http", "https"):
+        raise ValueError("only http/https outbound URLs are allowed (got " + repr(str(url))[:80] + ")")
     if not host or host not in _ph_allowed_hosts():
         raise ValueError(
             "API host " + (host or "?") + " is not in the allow-list (security restriction). "
@@ -5028,6 +5125,10 @@ async def _ph_custom_load(req):
         except Exception:
             arr = []
     if not isinstance(arr, list): arr = []
+    # 远端不下发 apiKey（写入本来就只限本机）：本地行为不变，避免明文密钥经端口外泄
+    if not _ez_local(req):
+        arr = [({k: v for k, v in rec.items() if k != "apiKey"} if isinstance(rec, dict) else rec) for rec in arr]
+        return _web.json_response({"providers": arr, "local_only": True})
     return _web.json_response({"providers": arr})
 
 
@@ -5531,6 +5632,8 @@ _MEDIA_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".t
 _MEDIA_VID_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
 _MEDIA_AUD_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma"}
 _MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".3ds", ".dae", ".blend"}
+# PreviewAny 存档允许的扩展名：只写媒体/文本文档，未知后缀（.bat/.desktop/.sh 等）一律不落盘。
+_SAVE_ALLOWED_EXTS = _MEDIA_IMG_EXTS | _MEDIA_VID_EXTS | _MEDIA_AUD_EXTS | {".txt", ".md", ".json", ".csv", ".log", ".html"}
 
 
 def _media_kind(name):
@@ -5794,6 +5897,8 @@ async def _mo_outputs(req):
             else:
                 types = [g["type"] for g in groupings]
                 names = [g["name"] for g in groupings]
+        types = types[:_EZ_OUTPUT_CAP]
+        names = [str(x)[:128] for x in names][:_EZ_OUTPUT_CAP]
         MediaOutNode.RETURN_TYPES = _DynamicOutputTypes(types)
         MediaOutNode.RETURN_NAMES = tuple(names)
         return _web.json_response({"ok": True, "types": types, "names": names})
@@ -6245,6 +6350,19 @@ def _media_safe(name):
     return name
 
 
+_ML_UPLOAD_MAX = 4 * 1024 * 1024 * 1024      # 单个上传文件上限 4 GiB（流式写盘，不整份进内存）
+
+
+def _ml_unique_name(root, name):
+    """重名不覆盖：<base>_1.<ext>、<base>_2.<ext> …"""
+    base, ext = os.path.splitext(name)
+    cand, i = name, 1
+    while os.path.exists(os.path.join(root, cand)):
+        cand = f"{base}_{i}{ext}"
+        i += 1
+    return cand
+
+
 async def _ml_upload(req):
     """接收拖拽上传的多媒体文件，保存到 ComfyUI input 目录，返回可加入素材卡片的文件描述。"""
     try:
@@ -6260,10 +6378,36 @@ async def _ml_upload(req):
             name = _media_safe(val.filename)
             if not name:
                 continue
-            data = val.file.read() if hasattr(val.file, "read") else val.file
+            if _media_kind(name) == "other":
+                continue      # 只接收媒体文件，挡掉任意后缀（.bat/.desktop/.sh/.html 等）
+            name = _ml_unique_name(root, name)
             dest = os.path.join(root, name)
-            with open(dest, "wb") as fh:
-                fh.write(data)
+            src = val.file if hasattr(val.file, "read") else None
+            if src is None:
+                data = bytes(val.file)
+                if len(data) > _ML_UPLOAD_MAX:
+                    continue
+                with open(dest, "wb") as fh:
+                    fh.write(data)
+            else:
+                total = 0
+                too_big = False
+                with open(dest, "wb") as fh:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > _ML_UPLOAD_MAX:
+                            too_big = True
+                            break
+                        fh.write(chunk)
+                if too_big:
+                    try:
+                        os.remove(dest)
+                    except Exception:
+                        pass
+                    continue
             typ = _media_kind(name)
             try:
                 size = os.path.getsize(dest)

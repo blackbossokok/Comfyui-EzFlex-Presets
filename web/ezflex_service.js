@@ -4,6 +4,36 @@ import { app } from "../../scripts/app.js";
 import { ezT } from "./ezflex_i18n.js";
 import { api } from "../../scripts/api.js";
 
+// 富文本 / 外部 HTML 的安全渲染：去掉可执行标签、所有 on* 事件属性与危险 URL，
+// 其余排版标签（div/span/font/style/color、@媒体芯片里的静态 svg）原样保留。
+const _EZ_DROP_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'base',
+  'form', 'input', 'textarea', 'select', 'button', 'noscript']);
+const _EZ_URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'poster', 'background']);
+const _EZ_UNSAFE_URL = /^\s*(javascript|vbscript|data:text\/html|data:application\/xhtml)/i;
+export function ezSanitizeHtml(html) {
+  const s = String(html == null ? '' : html);
+  if (!s) return '';
+  try {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = s;
+    const walk = (root) => {
+      for (const c of Array.from(root.children || [])) {
+        if (_EZ_DROP_TAGS.has((c.tagName || '').toLowerCase())) { c.remove(); continue; }
+        for (const a of Array.from(c.attributes || [])) {
+          const n = a.name.toLowerCase();
+          if (n.startsWith('on')) { c.removeAttribute(a.name); continue; }
+          if (_EZ_URL_ATTRS.has(n) && _EZ_UNSAFE_URL.test(a.value)) c.removeAttribute(a.name);
+        }
+        walk(c);
+      }
+    };
+    walk(tpl.content);
+    return tpl.innerHTML;
+  } catch (_) {
+    return s.replace(/<[^>]*>/g, '');   // 退化成纯文本，绝不原样注入
+  }
+}
+
 // 判断当前是否处于「Nodes 2.0」（Vue 节点编辑器）模式。
 // ComfyUI 用 setting `Comfy.VueNodes.Enabled` 控制；addDOMWidget 的 `canvasOnly` 需要据此取反：
 //   - Vue 模式：canvasOnly = false（否则节点空白）

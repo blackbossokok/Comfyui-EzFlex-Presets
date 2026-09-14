@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets (V1.2.2 stable)
+# Comfyui-EzFlex-Presets (V1.2.3 stable)
 
 **English** | [中文](README_ZH.md)
 
@@ -24,6 +24,7 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV116tz6xE5V)
 
 ## Changelog
 
+- V1.2.3: Bug fixes, continued security hardening, and node feature enhancements.
 - V1.2.2: Fixed the `EzFlex-NodeSwitchGroup` preset dropdown; fixed the "cannot validate input" errors in `EzFlex-ParamPresetOutput`, `EzFlex-PreviewAny` and others after switching presets in `EzFlex-ParamPresetControl`; improved where custom size presets sit in `EzFlex-FreeLatent`; fixed the unclickable controls in the Media Loader preview popup; fixed Media Loader's slow 3D model loading and preview-image generation; fixed Prompt Helper's highlight logic.
 - V1.2.1: Fixed the Node 2.0 click bugs in Prompt Helper (`EzFlex-PromptHelper`), Media Loader (`EzFlex-MediaLoader`) and Media Out (`EzFlex-MediaOut`). Prompt Helper (`EzFlex-PromptHelper`) and Node Switch Group (`NodeSwitchGroup`) gained collapsible toolbar rows. Comprehensive security hardening across the plugin.
 - V1.2.0: Security hardening across the plugin; Main Control (`MainControl`) gained an EN / 中文 language toggle.
@@ -289,5 +290,7 @@ pip install llama-cpp-python
 ```
 pip install gguf onnx
 ```
+
+> Or install all optional extras at once via pyproject: `pip install -e .[llama,metadata]`
 
 > Or install all optional extras at once with the pyproject extras: `pip install -e .[llama,metadata]`
