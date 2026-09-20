@@ -14,6 +14,7 @@ Fast Groups Muter/Bypasser：node.mode 0/2/4 由浏览器端设置），Python �
 """
 
 import base64
+import csv
 import inspect
 import json
 import os
@@ -62,7 +63,7 @@ import comfy.sd
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
 
 WEB_DIRECTORY = "./web"
 
@@ -137,6 +138,8 @@ _MEDIA_EXTS = (
 
 
 async def _preview_handler(request):
+    if not _ez_local(request):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     folder = request.query.get("type", "")
     file = request.query.get("file", "")
     if folder not in LOADER_FOLDERS or not file:
@@ -411,6 +414,8 @@ def _lora_meta_summary(type_, rel, meta):
 
 
 async def _lora_meta_list(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     out = []
     seen = set()
     for type_, folder in _META_LOADER_FOLDERS.items():
@@ -443,6 +448,8 @@ async def _lora_meta_list(req):
 
 
 async def _lora_meta_detail(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     type_ = req.query.get("type", "")
     file = req.query.get("file", "")
     folder = LOADER_FOLDERS.get(type_)
@@ -621,12 +628,16 @@ _register_preset_routes("EzFlex-MediaLoader", "/media_loader/presets")
 # FreeLatent：「新建节点默认应用的预设」。存进预设文档的 default 键（快照宽高/批次），
 # 这样即使之后删掉该预设，新建节点仍能按当时的值起步。
 async def _fl_default_get(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     doc, _ = _read_doc("EzFlex-FreeLatent")
     d = doc.get("default")
     return _web.json_response(d if isinstance(d, dict) else {})
 
 
 async def _fl_default_set(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
     except Exception:
@@ -681,6 +692,8 @@ def _mc_output_types(loaders):
 
 
 async def _mc_outputs(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         config = data.get("config", "")
@@ -2053,38 +2066,6 @@ class PreviewAnyNode:
             return None
 
     @staticmethod
-    def _video_to_webm_np(frames, fps=8):
-        """用 av 把 numpy RGB 帧编码成 WebM(data URI)。"""
-        if not frames:
-            return None
-        try:
-            import av
-            from io import BytesIO
-            buf = BytesIO()
-            rate = max(1, int(fps) if fps else 8)
-            container = av.open(buf, mode="w", format="webm")
-            stream = container.add_stream("libvpx-vp9", rate=rate)
-            stream.pix_fmt = "yuv420p"
-            stream.width = frames[0].shape[1]
-            stream.height = frames[0].shape[0]
-            for arr in frames:
-                if arr.ndim == 2:
-                    arr = np.stack([arr] * 3, axis=-1)
-                elif arr.shape[-1] == 1:
-                    arr = np.stack([arr[:, :, 0]] * 3, axis=-1)
-                if arr.shape[-1] != 3:
-                    arr = arr[..., :3]
-                avf = av.VideoFrame.from_ndarray(np.ascontiguousarray(arr), format="rgb24")
-                for p in stream.encode(avf):
-                    container.mux(p)
-            for p in stream.encode():
-                container.mux(p)
-            container.close()
-            return "data:video/webm;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
-        except Exception:
-            return None
-
-    @staticmethod
     def _image_np_to_base64(arr):
         try:
             from io import BytesIO
@@ -2100,16 +2081,6 @@ class PreviewAnyNode:
             return base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception:
             return None
-
-    @staticmethod
-    def _video_np_summary(frames, fps):
-        try:
-            if frames:
-                h, w = frames[0].shape[:2]
-                return f"{len(frames)} frames @ {fps:.0f}fps  {w}x{h}"
-        except Exception:
-            pass
-        return "Video"
 
     @staticmethod
     def _video_file_poster(src):
@@ -2172,85 +2143,6 @@ class PreviewAnyNode:
         except Exception:
             pass
         return path
-
-    @staticmethod
-    def _model_file_path(value, type_name, upstream=None):
-        try:
-            # 优先上游加载节点的 widgets_values：能拿到真正的模型/LoRA 文件名
-            # （如 LoraLoader 的 lora_name、UNETLoader 的 unet_name、CheckpointLoader 的 ckpt_name）。
-            # LoRA 加载器连了模型后，预览想显示的是 LoRA 的训练词/比重等，因此优先读 LoRA 文件。
-            if isinstance(upstream, dict):
-                node_hint = " ".join(str(upstream.get(k) or "") for k in ("type", "title", "name"))
-                is_lora_node = "lora" in node_hint.lower()
-                wv = upstream.get("widgets_values") or []
-                def _looks_like_file(w):
-                    if not isinstance(w, str):
-                        return False
-                    low = w.lower()
-                    if low.startswith("[") or low.startswith("{"):
-                        return False
-                    if low.endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".onnx", ".lora", ".zip")):
-                        return True
-                    if "/" in w or "\\" in w:
-                        return True
-                    if "." in w and " " not in w.strip() and not low.isdigit():
-                        return True
-                    return False
-                # ModelsCombo：widgets_values 里有一串 JSON，描述 combo 内 unet/clip/vae/lora 清单。
-                # MODEL 优先取 lora（读训练词/比重），否则取 unet；CLIP/VAE 取对应类型。
-                for w in wv:
-                    if isinstance(w, str) and w.strip().startswith("[") and '"file"' in w:
-                        try:
-                            entries = json.loads(w)
-                        except Exception:
-                            entries = None
-                        if isinstance(entries, list) and entries and all(isinstance(e, dict) for e in entries):
-                            pref = {"MODEL": ["lora", "unet", "diffusion_models", "checkpoints"],
-                                    "CLIP": ["clip", "text_encoders"],
-                                    "VAE": ["vae"]}.get(type_name, [])
-                            cand = None
-                            for t in pref:
-                                for e in entries:
-                                    if (e.get("type") or "").lower() == t and e.get("file"):
-                                        cand = e["file"]
-                                        break
-                                if cand:
-                                    break
-                            if cand:
-                                rp = PreviewAnyNode._resolve_model_path(cand)
-                                if rp:
-                                    return rp
-                        break
-                # 先找通用文件/路径样式的 widget；LoRA 节点再兜底任何含 lora 的字符串
-                for w in wv:
-                    if _looks_like_file(w):
-                        rp = PreviewAnyNode._resolve_model_path(w)
-                        if rp:
-                            return rp
-                if is_lora_node:
-                    for w in wv:
-                        if isinstance(w, str) and "lora" in w.lower():
-                            rp = PreviewAnyNode._resolve_model_path(w)
-                            if rp:
-                                return rp
-            # 对象兜底：从 cached_patcher_init / patcher 取路径
-            path = None
-            if type_name in ("MODEL", "CONTROL_NET", "STYLE_MODEL", "UPSCALE_MODEL", "LORA_MODEL", "GLIGEN"):
-                init = getattr(value, "cached_patcher_init", None)
-                if init:
-                    p = init[1][0]
-                    path = str(p[0] if isinstance(p, (list, tuple)) else p)
-            elif type_name in ("CLIP", "VAE"):
-                patcher = getattr(value, "patcher", None)
-                init = getattr(patcher, "cached_patcher_init", None)
-                if init:
-                    p = init[1][0]
-                    path = str(p[0] if isinstance(p, (list, tuple)) else p)
-            if path:
-                return PreviewAnyNode._resolve_model_path(path)
-        except Exception:
-            return None
-        return None
 
     @staticmethod
     def _model_type_str(value):
@@ -3460,32 +3352,6 @@ class PreviewAnyNode:
         return _pv_truncate(s, max_len)
 
     @staticmethod
-    def _format_meta(meta):
-        """把模型 __metadata__ 整理成可读摘要；嵌套 JSON 字符串尝试解析，优先展示架构/作者等关键项。"""
-        if not isinstance(meta, dict):
-            return _pv_truncate(str(meta), _PREVIEW_MAX_VALUE_LEN)[0]
-        def try_parse(v):
-            if isinstance(v, str) and v.strip().startswith(("{", "[")):
-                try:
-                    return json.loads(v)
-                except Exception:
-                    return v
-            return v
-        keys = ("modelspec.architecture", "modelspec.title", "modelspec.author", "modelspec.license",
-                "modelspec.description", "modelspec.tags", "modelspec.thumbnail", "title", "author",
-                "description", "architecture", "model_author", "model_name", "nsfw", "ss_sd_model_name",
-                "ss_resolution", "ss_sampler_name", "ss_cfg_scale", "ss_epochs", "ss_beta_1", "ss_beta_2",
-                "ss_clip_skip", "ss_negative_prompt", "ss_num_train_images", "ss_dataset_dirs")
-        parts = []
-        for k in keys:
-            if k in meta:
-                v = try_parse(meta[k])
-                parts.append(f"{k}={json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list)) else v}")
-        if not parts:
-            parts = [f"{k}={json.dumps(try_parse(v), ensure_ascii=False, default=str) if isinstance(try_parse(v), (dict, list)) else v}" for k, v in meta.items()]
-        return _pv_truncate(" | ".join(parts), _PREVIEW_MAX_VALUE_LEN)[0]
-
-    @staticmethod
     def _extract_name(value, type_name):
         try:
             if type_name == "MODEL":
@@ -3804,6 +3670,8 @@ def _ppo_disabled_value(ptype):
 
 async def _ppc_outputs(req):
     """前端在分组增删/排序后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前端口排列（校验用）。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         groups = data.get("groups", [])
@@ -3817,6 +3685,8 @@ async def _ppc_outputs(req):
 
 async def _ppo_outputs(req):
     """前端在连接变化/参数增删排序后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前参数排列（校验用）。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         params = data.get("params", [])
@@ -3837,6 +3707,8 @@ except Exception:
 
 # ===== EzFlex-PreviewAny：文件系统辅助路由（存档位置浏览 / 打开文件夹选中文件）=====
 async def _preview_any_folders(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     base = PreviewAnyNode._output_dir()
     rel = (req.query.get("path") or "").strip()
     full = _ez_inside(os.path.join(base, rel), [_ez_real(base)]) or base
@@ -3958,6 +3830,8 @@ async def _preview_any_serve_video(req):
 
 async def _preview_any_static(req):
     """serve 插件 web/ 目录（供前端本地导入 three.js 与加载器），仅白名单相对路径。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     rel = req.match_info.get("path", "")
     root = _ez_real(os.path.join(os.path.dirname(__file__), "web"))
     full = _ez_inside(os.path.join(root, rel), [root])
@@ -3968,6 +3842,8 @@ async def _preview_any_static(req):
 
 async def _preview_any_fs(req):
     """按绝对路径 serve 文件（用于 3D 模型及其外部贴图/缓冲，使相对路径能正确解析）。仅本地路径。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     from urllib.parse import unquote
     full = _ez_inside(unquote(req.match_info.get("path", "")))
     if full and os.path.isfile(full):
@@ -3990,6 +3866,8 @@ async def _preview_any_fs(req):
 
 async def _preview_any_outputs(req):
     """前端在 PreviewAny 连接数变化后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前输出数（校验用）。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         count = int(data.get("count", 0))
@@ -4023,6 +3901,7 @@ except Exception:
 _PH_MAX_CARDS = 32
 _PH_MAX_MEDIA = 16
 _PH_MAX_VISION_IMAGES = 8   # 一次优化最多随请求发几张图（防止批次/视频帧把请求撑爆）
+_PH_REF_WORDS = {"image": "图片", "video": "视频", "audio": "音频", "model": "模型"}   # 引用标记词回落（前端随卡片带 labels，自定义类型走它自己）
 # 优化调用的系统提示（api / Anthropic / llama 三处共用）：**必须要求保留引用媒体标记** ——
 # 送去优化的正文是未编译的原文（带 @图片1 这类标记），模型若把它翻译/改写/解释掉，规范编译就没得可编了。
 _PH_OPT_SYSTEM = (
@@ -4154,7 +4033,7 @@ def parse_prompt_overall(config):
 
 def _ph_compile_card(text, card):
     """自动编译只做一件事：按节点级规范的 ref 模板替换引用媒体标记
-    （@图片N/@视频N/@音频N → 该规范的写法；留空/缺键 = 原样保留）。
+    （@图片N/@视频N/@音频N/@模型N → 该规范的写法；留空/缺键 = 原样保留）。
     时间戳与镜头号**不在自动输出里生成** —— 在「提示」气泡里按输入生成，由用户手动复制。"""
     if not text:
         return text
@@ -4162,10 +4041,13 @@ def _ph_compile_card(text, card):
     if not isinstance(rule, dict):
         return text
     ref = rule.get("ref") if isinstance(rule.get("ref"), dict) else {}
-    for kind, pat in (("image", r"@图片\s*(\d+)"), ("video", r"@视频\s*(\d+)"), ("audio", r"@音频\s*(\d+)")):
-        tpl = str(ref.get(kind) or "")
-        if kind in ref and tpl.strip():   # 留空/缺键 = 不编译，标记原样保留
-            text = re.sub(pat, lambda m, t=tpl: t.replace("{n}", m.group(1)), text)
+    labels = rule.get("labels") if isinstance(rule.get("labels"), dict) else {}
+    for kind, tpl in ref.items():
+        tpl = str(tpl or "")
+        if not tpl.strip():   # 留空 = 不编译，标记原样保留
+            continue
+        word = str(labels.get(kind) or _PH_REF_WORDS.get(kind) or kind)
+        text = re.sub("@" + re.escape(word) + r"\s*(\d+)", lambda m, t=tpl: t.replace("{n}", m.group(1)), text)
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
@@ -4314,6 +4196,7 @@ def _ph_html_to_text(html):
     """把卡片 contenteditable 的 HTML 转成纯文本（供合并提示词用）。"""
     if not html:
         return ""
+    txt = re.sub(r"<b[^>]*eph-tag-x[^>]*>[^<]*</b>", " ", html)   # 标签芯片上的删除按钮，不是正文
     txt = re.sub(r"<[^>]+>", " ", html)
     txt = re.sub(r"\s+", " ", txt).strip()
     return txt
@@ -5353,6 +5236,509 @@ async def _ph_model_paths_save(req):
         return _web.json_response({"error": str(e)}, status=500)
 
 
+def _ph_media_target_file():
+    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
+    if not base:
+        return ''
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(base, 'ezflex_media_target.json')
+
+
+def _ph_media_target_load():
+    fn = _ph_media_target_file()
+    if not fn or not os.path.isfile(fn):
+        return {}
+    try:
+        with open(fn, 'r', encoding='utf-8') as fh:
+            d = json.loads(fh.read())
+        m = d.get("mediaTarget") if isinstance(d, dict) else None
+        return m if isinstance(m, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _ph_media_target_get(req):
+    """引用识别设置：全局用户设置（换节点/删节点不丢）。没有敏感路径，所以不限本机读。"""
+    return _web.json_response({"mediaTarget": _ph_media_target_load()})
+
+
+async def _ph_media_target_save(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    m = data.get("mediaTarget")
+    if not isinstance(m, dict):
+        return _web.json_response({"error": "mediaTarget must be an object"}, status=400)
+    fn = _ph_media_target_file()
+    if not fn:
+        return _web.json_response({"error": "no userdata"}, status=500)
+    try:
+        with open(fn, 'w', encoding='utf-8') as fh:
+            json.dump({"mediaTarget": m}, fh, ensure_ascii=False, indent=2)
+        return _web.json_response({"ok": True})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+def _ph_rules_file():
+    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
+    if not base:
+        return ''
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(base, 'ezflex_prompt_rules.json')
+
+
+def _ph_rules_load():
+    fn = _ph_rules_file()
+    if not fn or not os.path.isfile(fn):
+        return {}
+    try:
+        with open(fn, 'r', encoding='utf-8') as fh:
+            d = json.loads(fh.read())
+        r = d.get("rules") if isinstance(d, dict) else None
+        return r if isinstance(r, dict) else {}
+    except Exception:
+        return {}
+
+
+async def _ph_rules_get(req):
+    """引用规则设置：全局用户设置（合并分隔符 / 选中的规范 / 自定义规范 / 内置覆盖）。没有敏感路径，不限本机读。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    return _web.json_response({"rules": _ph_rules_load()})
+
+
+async def _ph_rules_save(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    r = data.get("rules")
+    if not isinstance(r, dict):
+        return _web.json_response({"error": "rules must be an object"}, status=400)
+    fn = _ph_rules_file()
+    if not fn:
+        return _web.json_response({"error": "no userdata"}, status=500)
+    try:
+        with open(fn, 'w', encoding='utf-8') as fh:
+            json.dump({"rules": r}, fh, ensure_ascii=False, indent=2)
+        return _web.json_response({"ok": True})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+def _ph_prompt_categories_file():
+    d = _ph_prompts_dir()
+    return os.path.join(os.path.dirname(d), 'ezflex_prompt_categories.json') if d else ''
+
+
+def _ph_cat_clean(items, depth=0):
+    """分类树清洗：只留 {id,name,children}，名字截断、限深限宽（防止坏文件把前端撑爆）。"""
+    out = []
+    if depth > 6 or not isinstance(items, list):
+        return out
+    for it in items[:200]:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()[:64]
+        if not name:
+            continue
+        cid = str(it.get("id") or "").strip()[:64] or ("c" + str(len(out) + 1))
+        out.append({"id": cid, "name": name, "children": _ph_cat_clean(it.get("children"), depth + 1)})
+    return out
+
+
+def _ph_categories_load():
+    fn = _ph_prompt_categories_file()
+    if not fn or not os.path.isfile(fn):
+        return []
+    try:
+        with open(fn, 'r', encoding='utf-8') as fh:
+            d = json.loads(fh.read())
+        return _ph_cat_clean(d.get("categories") if isinstance(d, dict) else None)
+    except Exception:
+        return []
+
+
+async def _ph_categories_get(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    return _web.json_response({"categories": _ph_categories_load()})
+
+
+async def _ph_categories_save(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    cats = _ph_cat_clean(data.get("categories"))
+    fn = _ph_prompt_categories_file()
+    if not fn:
+        return _web.json_response({"error": "no userdata"}, status=500)
+    try:
+        with open(fn, 'w', encoding='utf-8') as fh:
+            json.dump({"categories": cats}, fh, ensure_ascii=False, indent=2)
+        return _web.json_response({"ok": True, "categories": cats})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+def _ph_tags_file():
+    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
+    if not base:
+        return ''
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.join(base, 'ezflex_prompt_tags.json')
+
+
+def _ph_libs_clean(libs):
+    # 每个库的用户偏好：显示名 / 隐藏掉的默认标签 / 停用。CSV 文件永远不动。
+    out = {}
+    if not isinstance(libs, dict):
+        return out
+    for key, val in list(libs.items())[:200]:
+        if not isinstance(val, dict):
+            continue
+        rec = {}
+        name = str(val.get("name") or "").strip()[:64]
+        if name:
+            rec["name"] = name
+        if val.get("disabled"):
+            rec["disabled"] = True
+        hid = val.get("hidden")
+        if isinstance(hid, list):
+            rec["hidden"] = [str(x)[:96] for x in hid[:5000] if str(x).strip()]
+        grp = _ph_cat_clean(val.get("groups"))   # 库自己的分组树（用户可改，必须原样存回去）
+        if grp:
+            rec["groups"] = grp
+        pl = val.get("place")                    # 库内那份的归类：标签名 -> 分类 id
+        if isinstance(pl, dict):
+            mp = {}
+            for k2, v2 in list(pl.items())[:20000]:
+                kk = str(k2).strip()[:96]
+                vv = str(v2).strip()[:64]
+                if kk and vv:
+                    mp[kk] = vv
+            if mp:
+                rec["place"] = mp
+        fav = val.get("fav")                     # 库侧的收藏（标签名数组），和我的副本分开
+        if isinstance(fav, list):
+            rec["fav"] = [str(x)[:96] for x in fav[:20000] if str(x).strip()]
+        mt = val.get("meta")                     # 库侧那份的显示覆盖：标签名 -> {zh,color,weight}
+        if isinstance(mt, dict):
+            mm = {}
+            for k2, v2 in list(mt.items())[:20000]:
+                kk = str(k2).strip()[:96]
+                if not kk or not isinstance(v2, dict):
+                    continue
+                e = {}
+                z = str(v2.get("zh") or "").strip()[:64]
+                if z:
+                    e["zh"] = z
+                c = str(v2.get("color") or "").strip()[:32]
+                if c:
+                    e["color"] = c
+                w = v2.get("weight")
+                if isinstance(w, (int, float)) and w:
+                    e["weight"] = w
+                elif isinstance(w, str) and w.strip():
+                    e["weight"] = w.strip()[:32]
+                if e:
+                    mm[kk] = e
+            if mm:
+                rec["meta"] = mm
+        if rec:
+            out[str(key)[:64]] = rec
+    return out
+
+
+def _ph_tags_clean(items):
+    out = []
+    if not isinstance(items, list):
+        return out
+    seen = set()
+    for it in items[:10000]:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()[:64]
+        if not name:
+            continue
+        tid = str(it.get("id") or "").strip()[:64]
+        if not tid or tid in seen:
+            # 补的 id 必须确定（以前用 hash()，进程不同就变，存两次 id 就漂了）
+            base = "t" + str(len(out) + 1)
+            tid, n = base, 1
+            while tid in seen:
+                n += 1
+                tid = base + "_" + str(n)
+        seen.add(tid)
+        rec = {"id": tid, "name": name, "category": str(it.get("category") or "").strip()[:64]}
+        if isinstance(it.get("preview"), str) and it["preview"].startswith("data:image/") and len(it["preview"]) < 400000:
+            rec["preview"] = it["preview"]
+        for key, cap in (("from", 64), ("collectedFrom", 64), ("rec", 64), ("fav", 8), ("zh", 64), ("color", 32), ("mine", 8)):
+            val = str(it.get(key) or "").strip()[:cap]
+            if val:
+                rec[key] = val
+        weight = it.get("weight")
+        if isinstance(weight, (int, float)) and 0 < float(weight) <= 5:
+            rec["weight"] = round(float(weight), 2)
+        out.append(rec)
+    return out
+
+
+def _ph_tags_load():
+    fn = _ph_tags_file()
+    if not fn or not os.path.isfile(fn):
+        return {"categories": [], "tags": []}
+    try:
+        with open(fn, 'r', encoding='utf-8') as fh:
+            d = json.loads(fh.read())
+    except Exception:
+        return {"categories": [], "tags": []}
+    if not isinstance(d, dict):
+        d = {}
+    return {"categories": _ph_cat_clean(d.get("categories")), "tags": _ph_tags_clean(d.get("tags")), "libs": _ph_libs_clean(d.get("libs"))}
+
+
+async def _ph_tags_get(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    return _web.json_response(_ph_tags_load())
+
+
+async def _ph_tags_save(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    rec = {"categories": _ph_cat_clean(data.get("categories")), "tags": _ph_tags_clean(data.get("tags")), "libs": _ph_libs_clean(data.get("libs"))}
+    fn = _ph_tags_file()
+    if not fn:
+        return _web.json_response({"error": "no userdata"}, status=500)
+    try:
+        with open(fn, 'w', encoding='utf-8') as fh:
+            json.dump(rec, fh, ensure_ascii=False, indent=2)
+        return _web.json_response({"ok": True, "categories": rec["categories"], "tags": rec["tags"], "libs": rec["libs"]})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+# ===== 标签库（user_data/PromptHelperLib/*.csv：tagcomplete 格式 tag,category,count,aliases）=====
+# 下划线开头或 zh* 的 CSV 是中文词典/辅助文件，不算标签库。
+_PH_LIB_DIR = os.path.join(_USER_DIR, "PromptHelperLib")
+_PH_LIB_ROWS = {}
+
+
+def _ph_lib_files():
+    try:
+        os.makedirs(_PH_LIB_DIR, exist_ok=True)
+    except Exception:
+        pass
+    out = []
+    try:
+        names = sorted(os.listdir(_PH_LIB_DIR))
+    except OSError:
+        return out
+    for name in names:
+        if not name.lower().endswith('.csv'):
+            continue
+        stem = name[:-4]
+        if stem.startswith('_') or stem.lower().startswith('zh'):
+            continue
+        fp = os.path.join(_PH_LIB_DIR, name)
+        if os.path.isfile(fp):
+            out.append((stem, fp))
+    return out
+
+
+def _ph_lib_stat(fp):
+    """(行数, 字节数)；按 mtime 缓存，免得每次开面板都重读几 MB。"""
+    try:
+        mt = os.path.getmtime(fp)
+        size = os.path.getsize(fp)
+    except OSError:
+        return 0, 0
+    hit = _PH_LIB_ROWS.get(fp)
+    if hit and hit[0] == mt:
+        return hit[1], size
+    try:
+        with open(fp, 'rb') as fh:
+            rows = sum(chunk.count(b'\n') for chunk in iter(lambda: fh.read(1 << 20), b''))
+    except OSError:
+        return 0, size
+    _PH_LIB_ROWS[fp] = (mt, rows)
+    return rows, size
+
+
+async def _ph_libs_get(req):
+    libs = []
+    for sid, fp in _ph_lib_files():
+        rows, size = _ph_lib_stat(fp)
+        libs.append({"id": sid, "rows": rows, "size": size})
+    return _web.json_response({"libs": libs})
+
+
+async def _ph_tag_lib_get(req):
+    lib_id = (req.query.get('id') or '').strip()
+    for sid, fp in _ph_lib_files():
+        if sid == lib_id:
+            return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
+    return _web.json_response({"error": "unknown tag library"}, status=404)
+
+
+async def _ph_tag_zh_get(req):
+    fp = os.path.join(_PH_LIB_DIR, '_zh_CN.csv')
+    if not os.path.isfile(fp):
+        return _web.json_response({"error": "no zh dictionary"}, status=404)
+    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
+
+
+async def _ph_tag_kind_get(req):
+    """细分分类词表 _tag_kind.csv（tag,kind：person/clothing/expression/sex/scene/camera/object/style）。"""
+    fp = os.path.join(_PH_LIB_DIR, '_tag_kind.csv')
+    if not os.path.isfile(fp):
+        return _web.json_response({"error": "no tag kind table"}, status=404)
+    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
+
+
+async def _ph_tag_furry_get(req):
+    """兽类/物种词表：_e621_species.csv（e621 分类 5 的物种，去掉 Danbooru 已有的）+ _furry_extra.csv（可自己加）。"""
+    names = []
+    for name in ('_e621_species.csv', '_furry_extra.csv'):
+        fp = os.path.join(_PH_LIB_DIR, name)
+        if not os.path.isfile(fp):
+            continue
+        try:
+            with open(fp, 'r', encoding='utf-8-sig') as fh:
+                names.extend(ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith('#'))
+        except OSError:
+            continue
+    return _web.Response(text='\n'.join(names), content_type='text/plain', headers={"Cache-Control": "no-store"})
+
+
+def _ph_import_rows(text, name):
+    """把导入文件解析成 [(name, second)]：csV/tsv/txt 按列、json 按字段、sql 抽 VALUES。"""
+    ext = os.path.splitext(name.lower())[1]
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+    rows = []
+    if ext == '.sql':
+        for m in re.finditer(r"VALUES\s*\(([^)]*)\)", text, re.I):
+            cells = next(csv.reader([m.group(1)]), [])
+            nm = (cells[0] if cells else '').strip()
+            if nm:
+                rows.append((nm, (cells[2] if len(cells) > 2 else '').strip()))
+        return rows
+    if ext == '.json':
+        try:
+            d = json.loads(text)
+        except Exception:
+            return []
+        items = d.get('tags') if isinstance(d, dict) else d
+        if not isinstance(items, list):
+            return []
+        for it in items:
+            if isinstance(it, str):
+                rows.append((it.strip(), ''))
+            elif isinstance(it, dict):
+                nm = str(it.get('name') or it.get('tag') or it.get('text') or '').strip()
+                if nm:
+                    rows.append((nm, str(it.get('translate') or it.get('zh') or it.get('category') or it.get('cat') or '')))
+        return rows
+    first = text.split('\n')[0] if text else ''
+    sep = '\t' if (ext == '.tsv' or ('\t' in first and ',' not in first)) else ','
+    for ln in text.split('\n'):
+        if not ln.strip() or ln.lstrip().startswith('#'):
+            continue
+        cells = next(csv.reader([ln], delimiter=sep), [])
+        nm = (cells[0] if cells else '').strip()
+        if nm:
+            rows.append((nm, (cells[1] if len(cells) > 1 else '').strip()))
+    return rows
+
+
+def _ph_import_is_zh(rows):
+    """第 2 列大面积是汉字 → 当成中英对照表（并进 _zh_CN.csv），否则当标签库。"""
+    if len(rows) < 5:
+        return False
+    cjk = re.compile(u'[\u4e00-\u9fff]')
+    sample = rows[:200]
+    return sum(1 for r in sample if cjk.search(r[1] or '')) >= len(sample) * 0.6
+
+
+def _ph_import_zh(rows):
+    fp = os.path.join(_PH_LIB_DIR, '_zh_CN.csv')
+    cur = {}
+    if os.path.isfile(fp):
+        try:
+            with open(fp, 'r', encoding='utf-8-sig') as fh:
+                for r in csv.reader(fh):
+                    if len(r) >= 2 and r[0].strip() and not r[0].lstrip().startswith('#'):
+                        cur[r[0].strip()] = r[1].strip()
+        except OSError:
+            pass
+    for r in rows:
+        nm = r[0].strip()
+        if nm and r[1].strip():
+            cur[nm] = r[1].strip()
+    os.makedirs(_PH_LIB_DIR, exist_ok=True)
+    with open(fp, 'w', encoding='utf-8-sig', newline='') as fh:
+        w = csv.writer(fh)
+        w.writerow(['tag', 'zh'])
+        for nm in sorted(cur):
+            w.writerow([nm, cur[nm]])
+    return len(cur)
+
+
+async def _ph_tag_import(req):
+    """导入标签库：csv / tsv / txt / json / sql 自动识别；中英对照表并进 _zh_CN.csv。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    name = str(data.get("name") or "import").strip()[:120]
+    text = str(data.get("text") or "")
+    if len(text) > 64 * 1024 * 1024:
+        return _web.json_response({"error": "file too large"}, status=413)
+    rows = _ph_import_rows(text, name)
+    if not rows:
+        return _web.json_response({"error": "no tags found (csv / tsv / txt / json / sql)"}, status=400)
+    if _ph_import_is_zh(rows):
+        total = _ph_import_zh(rows)
+        return _web.json_response({"ok": True, "kind": "zh", "rows": total})
+    lib_id = re.sub(r'[^\w\u4e00-\u9fff.-]+', '_', os.path.splitext(name)[0]).strip('_')[:60] or "import"
+    if lib_id.startswith('_') or lib_id.lower().startswith('zh'):
+        lib_id = "lib_" + lib_id.lstrip('_')
+    fp = os.path.join(_PH_LIB_DIR, lib_id + '.csv')
+    os.makedirs(_PH_LIB_DIR, exist_ok=True)
+    with open(fp, 'w', encoding='utf-8-sig', newline='') as fh:
+        w = csv.writer(fh)
+        for nm, second in rows:
+            cat = second if re.fullmatch(r'-?\d+', second) else '0'
+            w.writerow([nm, cat, '0', ''])
+    _PH_LIB_ROWS.pop(fp, None)
+    return _web.json_response({"ok": True, "kind": "lib", "id": lib_id, "rows": len(rows)})
+
+
 def _ph_prompts_dir():
     """「卡片管理」保存的提示词卡片目录：userdata/prompts（与全局扫描路径同一个 user 目录下）。"""
     base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
@@ -5379,7 +5765,9 @@ def _ph_prompt_card_file(name):
 
 
 async def _ph_pcards_get(req):
-    """带 name = 读取一份保存的提示词卡片；不带 name = 已保存卡片清单（下拉框数据源）。"""
+    """带 name = 读取一份保存的提示词卡片/卡片组；不带 name = 已保存清单（含分类与类型）。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     name = (req.query.get("name") or "").strip()
     d = _ph_prompts_dir()
     if name:
@@ -5391,8 +5779,12 @@ async def _ph_pcards_get(req):
                 rec = json.loads(fh.read())
         except Exception as e:
             return _web.json_response({"error": str(e)}, status=500)
-        cards = rec.get("cards") if isinstance(rec, dict) else None
-        return _web.json_response({"name": name, "cards": cards if isinstance(cards, list) else []})
+        if not isinstance(rec, dict):
+            rec = {}
+        cards = rec.get("cards")
+        return _web.json_response({"name": name, "cards": cards if isinstance(cards, list) else [],
+                                   "kind": str(rec.get("kind") or "card"), "category": str(rec.get("category") or ""),
+                                   "preview": str(rec.get("preview") or "")})
     out = []
     if d and os.path.isdir(d):
         for fn in sorted(os.listdir(d)):
@@ -5403,8 +5795,12 @@ async def _ph_pcards_get(req):
                     rec = json.loads(fh.read())
             except Exception:
                 continue
-            cards = rec.get("cards") if isinstance(rec, dict) else None
-            out.append({"name": fn[:-5], "count": len(cards) if isinstance(cards, list) else 0})
+            if not isinstance(rec, dict):
+                rec = {}
+            cards = rec.get("cards")
+            out.append({"name": fn[:-5], "count": len(cards) if isinstance(cards, list) else 0,
+                        "kind": str(rec.get("kind") or "card"), "category": str(rec.get("category") or ""),
+                        "preview": str(rec.get("preview") or "")})
     return _web.json_response({"cards": out})
 
 
@@ -5418,15 +5814,41 @@ async def _ph_pcards_save(req):
         return _web.json_response({"error": "bad json"}, status=400)
     name = (data.get("name") or "").strip()
     cards = data.get("cards")
+    category = str(data.get("category") or "").strip()[:200]
+    kind_in = str(data.get("kind") or "").strip()
     fn = _ph_prompt_card_file(name)
     if not fn:
         return _web.json_response({"error": 'invalid name: must not contain \\ / : * ? " < > | , must not start with a dot, max 64 characters'}, status=400)
-    if not isinstance(cards, list) or not cards:
-        return _web.json_response({"error": "no card selected to save"}, status=400)
+    preview_in = data.get("preview")
+    if not (isinstance(preview_in, str) and preview_in.startswith("data:image/") and len(preview_in) <= 1200000):
+        preview_in = None
+    if isinstance(cards, list) and cards:
+        rec = {"name": name, "cards": cards, "kind": kind_in if kind_in in ("card", "group") else "card", "category": category}
+        if preview_in is not None:
+            rec["preview"] = preview_in
+    else:
+        # 没带卡片 = 只改分类/类型（移动已保存的卡片/卡片组）：原文件必须在
+        if not os.path.isfile(fn):
+            return _web.json_response({"error": "no card selected to save"}, status=400)
+        try:
+            with open(fn, 'r', encoding='utf-8') as fh:
+                rec = json.loads(fh.read())
+        except Exception:
+            rec = {}
+        if not isinstance(rec, dict):
+            rec = {}
+        rec["name"] = name
+        rec["category"] = category
+        if preview_in is not None:
+            rec["preview"] = preview_in
+        if kind_in in ("card", "group"):
+            rec["kind"] = kind_in
+        else:
+            rec["kind"] = str(rec.get("kind") or "card")
     try:
         with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump({"name": name, "cards": cards}, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True, "name": name, "count": len(cards)})
+            json.dump(rec, fh, ensure_ascii=False, indent=2)
+        return _web.json_response({"ok": True, "name": name, "count": len(rec.get("cards") or [])})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
 
@@ -5447,6 +5869,8 @@ async def _ph_pcards_delete(req):
 
 
 async def _ph_api_hosts_get(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     return _web.json_response({"hosts": sorted(_ph_allowed_hosts()), "registered": _ph_api_hosts_load()})
 
 
@@ -5478,6 +5902,231 @@ async def _ph_api_hosts_post(req):
     return _web.json_response({"ok": True, "hosts": sorted(_ph_allowed_hosts())})
 
 
+# ===== 生图（预览图）：按导入的 api.json 注入参数跑一次工作流，产物只回前端（不落 ComfyUI output） =====
+_GEN_CACHE = {}
+_PGEN_DEFAULT = {
+    "api": "",          # 工作流 api.json 的文本（前端导入）
+    "ckpt": "", "unet": "", "clip": "", "vae": "", "lora": "", "builtinMode": "ckpt",
+    "width": 512, "height": 512, "steps": 20, "cfg": 6,
+    "sampler": "euler", "scheduler": "simple", "batch": 1,
+    "seedMode": "random", "seed": 0,
+    "positive": "masterpiece, best quality, vibrant, very aesthetic, high contrast, highly detailed, absurdres,", "negative": "lowres, worst quality, low quality, bad anatomy, bad proportions, signature, watermark, patreon, artist name, twitter username, simple background, borders",
+    "format": "webp", "quality": 80, "size": 384,
+}
+
+
+def _ph_gen_file():
+    d = os.path.join(_USER_DIR, "PromptHelperGen")
+    return os.path.join(d, "settings.json")
+
+
+def _ph_gen_clean(data):
+    out = dict(_PGEN_DEFAULT)
+    if isinstance(data, dict):
+        for k in _PGEN_DEFAULT:
+            if k not in data:
+                continue
+            v = data[k]
+            if k in ("width", "height", "steps", "batch", "seed", "quality", "size"):
+                try:
+                    out[k] = int(v)
+                except (TypeError, ValueError):
+                    pass
+            elif k == "cfg":
+                try:
+                    out[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+            elif k in ("seedMode", "format"):
+                out[k] = str(v)[:16]
+            elif k == "api":
+                out[k] = str(v)[:2 * 1024 * 1024]
+            else:
+                out[k] = str(v)[:4096]
+    return out
+
+
+def _ph_gen_load():
+    fn = _ph_gen_file()
+    try:
+        with open(fn, "r", encoding="utf-8-sig") as fh:
+            return _ph_gen_clean(json.load(fh))
+    except Exception:
+        return dict(_PGEN_DEFAULT)
+
+
+async def _ph_gen_get(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    return _web.json_response({"ok": True, "settings": _ph_gen_load()})
+
+
+async def _ph_gen_save(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    rec = _ph_gen_clean(data.get("settings") if isinstance(data, dict) else None)
+    fn = _ph_gen_file()
+    os.makedirs(os.path.dirname(fn), exist_ok=True)
+    with open(fn, "w", encoding="utf-8") as fh:
+        json.dump(rec, fh, ensure_ascii=False, indent=2)
+    return _web.json_response({"ok": True, "settings": rec})
+
+
+def _ph_gen_patch(prompt, cfg, pos_text, neg_text, seed):
+    """按输入名通用注入：工作流里叫 width/height/steps/cfg/... 的输入一律改写。
+    正负提示词通过 KSampler 的 positive/negative 连线找到对应的 CLIPTextEncode。"""
+    repl = {
+        "width": cfg["width"], "height": cfg["height"], "batch_size": cfg["batch"],
+        "steps": cfg["steps"], "cfg": cfg["cfg"],
+        "sampler_name": cfg["sampler"], "scheduler": cfg["scheduler"],
+        "seed": seed, "noise_seed": seed,
+    }
+    if cfg.get("ckpt"):
+        repl["ckpt_name"] = cfg["ckpt"]
+    if cfg.get("clip"):
+        repl["clip_name"] = cfg["clip"]
+    if cfg.get("vae"):
+        repl["vae_name"] = cfg["vae"]
+    if cfg.get("unet"):                      # 分离式加载：UNETLoader
+        repl["unet_name"] = cfg["unet"]
+    if cfg.get("lora"):                      # LoraLoader
+        repl["lora_name"] = cfg["lora"]
+    pos_ids, neg_ids = set(), set()
+    for node in prompt.values():
+        ct = str(node.get("class_type") or "")
+        if "KSampler" not in ct:
+            continue
+        for key, sink in (("positive", pos_ids), ("negative", neg_ids)):
+            ref = node.get("inputs", {}).get(key)
+            if isinstance(ref, list) and ref and str(ref[0]) in prompt:
+                sink.add(str(ref[0]))
+    for nid, node in prompt.items():
+        ct = str(node.get("class_type") or "")
+        ins = node.get("inputs")
+        if not isinstance(ins, dict):
+            continue
+        for k in list(ins.keys()):
+            if k in repl:
+                ins[k] = repl[k]
+        if "text" in ins and isinstance(ins["text"], str):
+            if str(nid) in neg_ids:
+                ins["text"] = neg_text
+            elif str(nid) in pos_ids:
+                ins["text"] = pos_text
+        if ct == "CLIPTextEncode" and "text" in ins and isinstance(ins["text"], str):
+            low = ins["text"].lower()
+            if ("worst quality" in low or "low quality" in low) and str(nid) not in pos_ids:
+                ins["text"] = neg_text
+    return prompt
+
+
+def _ph_gen_run_one(name, cfg):
+    """跑一张：返回 (data_url, None) 或 (None, 错误信息)"""
+    try:
+        prompt = json.loads(cfg.get("api") or "")
+    except Exception:
+        return None, "api.json 不是合法 JSON（先在生图设置里导入工作流）"
+    if not isinstance(prompt, dict) or not prompt:
+        return None, "没有工作流：先在生图设置里导入 api.json"
+    if not all(isinstance(v, dict) and v.get("class_type") for v in prompt.values()):
+        return None, "不是 API 格式的工作流：要用 ComfyUI「导出(API格式)」的那份 json"
+    try:
+        import folder_paths
+        import server as _srv
+        import uuid as _uuid
+    except Exception as e:
+        return None, f"无法加载 ComfyUI 服务模块: {e}"
+    seed = cfg["seed"]
+    if cfg.get("seedMode") == "random" or not seed:
+        seed = random.randint(0, 2 ** 31 - 1)
+    pos = (cfg.get("positive") or "").strip()
+    neg = (cfg.get("negative") or "").strip()
+    pos = (pos + " " + name).strip() if pos else name
+    prompt = _ph_gen_patch(prompt, cfg, pos, neg, int(seed))
+    pid = str(_uuid.uuid4())
+    srv = _srv.PromptServer.instance
+    try:
+        # 必须和 ComfyUI /prompt 的队列项同形：(number, prompt_id, prompt, extra_data, outputs, sensitive)
+        # 少一个元素会在 prompt_worker 的 item[5] 处 IndexError，把执行线程整个弄死（之后所有任务都不再执行）
+        srv.prompt_queue.put((-1, pid, prompt, {"client_id": getattr(srv, "client_id", "")}, list(prompt.keys()), {}))
+    except Exception as e:
+        return None, f"排队失败: {e}"
+    import time as _time
+    deadline = _time.time() + 180
+    hist = None
+    while _time.time() < deadline:
+        _time.sleep(0.4)
+        try:
+            h = srv.prompt_queue.get_history(pid)
+        except Exception:
+            h = None
+        if h and pid in h:
+            hist = h[pid]
+            break
+    if not hist:
+        return None, "生成超时（180s）或工作流报错"
+    img = None
+    for out in (hist.get("outputs") or {}).values():
+        for it in (out.get("images") or []):
+            if str(it.get("filename", "")).lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                img = it
+                break
+        if img:
+            break
+    if not img:
+        return None, "工作流没有输出图片"
+    kind = img.get("type") or "output"
+    base = folder_paths.get_temp_directory() if kind == "temp" else folder_paths.get_output_directory()
+    path = os.path.join(base, img.get("subfolder") or "", img.get("filename") or "")
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB")
+        side = max(64, min(1024, int(cfg.get("size") or 384)))
+        im.thumbnail((side, side))
+        import io as _io
+        buf = _io.BytesIO()
+        fmt = "WEBP" if str(cfg.get("format") or "webp").lower() == "webp" else "PNG"
+        if fmt == "WEBP":
+            im.save(buf, format="WEBP", quality=max(40, min(95, int(cfg.get("quality") or 85))), method=4)
+            mime = "image/webp"
+        else:
+            im.save(buf, format="PNG")
+            mime = "image/png"
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return f"data:{mime};base64,{b64}", None
+    except Exception as e:
+        return None, f"读取/压缩生成图失败: {e}"
+
+
+async def _ph_gen_preview(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    names = [str(x)[:96] for x in (data.get("names") or []) if str(x).strip()][:32]
+    if not names:
+        return _web.json_response({"error": "no tags"}, status=400)
+    cfg = _ph_gen_load()
+    if isinstance(data.get("settings"), dict):
+        cfg = _ph_gen_clean({**cfg, **data["settings"]})
+    out = {}
+    err = None
+    import asyncio
+    for nm in names:
+        url, e = await asyncio.to_thread(_ph_gen_run_one, nm, cfg)
+        if url:
+            out[nm] = url
+        else:
+            err = e
+            break
+    return _web.json_response({"ok": bool(out), "previews": out, "error": err})
+
 try:
     PromptServer.instance.routes.get("/prompt_helper/custom_providers")(_ph_custom_load)
     PromptServer.instance.routes.get("/prompt_helper/api_hosts")(_ph_api_hosts_get)
@@ -5491,9 +6140,28 @@ try:
     PromptServer.instance.routes.post("/prompt_helper/scan_paths")(_ph_scan_paths_save)
     PromptServer.instance.routes.get("/prompt_helper/model_paths")(_ph_model_paths_get)
     PromptServer.instance.routes.post("/prompt_helper/model_paths")(_ph_model_paths_save)
+    PromptServer.instance.routes.get("/prompt_helper/media_target")(_ph_media_target_get)
+    PromptServer.instance.routes.post("/prompt_helper/media_target")(_ph_media_target_save)
+    PromptServer.instance.routes.get("/prompt_helper/rules")(_ph_rules_get)
+    PromptServer.instance.routes.post("/prompt_helper/rules")(_ph_rules_save)
     PromptServer.instance.routes.get("/prompt_helper/prompt_cards")(_ph_pcards_get)
     PromptServer.instance.routes.post("/prompt_helper/prompt_cards")(_ph_pcards_save)
     PromptServer.instance.routes.delete("/prompt_helper/prompt_cards")(_ph_pcards_delete)
+    PromptServer.instance.routes.get("/prompt_helper/prompt_categories")(_ph_categories_get)
+    PromptServer.instance.routes.post("/prompt_helper/prompt_categories")(_ph_categories_save)
+
+
+    PromptServer.instance.routes.get("/prompt_helper/prompt_tags")(_ph_tags_get)
+    PromptServer.instance.routes.post("/prompt_helper/prompt_tags")(_ph_tags_save)
+    PromptServer.instance.routes.get("/prompt_helper/gen_settings")(_ph_gen_get)
+    PromptServer.instance.routes.post("/prompt_helper/gen_settings")(_ph_gen_save)
+    PromptServer.instance.routes.post("/prompt_helper/gen_preview")(_ph_gen_preview)
+    PromptServer.instance.routes.get("/prompt_helper/tag_libs")(_ph_libs_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_lib")(_ph_tag_lib_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_zh")(_ph_tag_zh_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_furry")(_ph_tag_furry_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_kind")(_ph_tag_kind_get)
+    PromptServer.instance.routes.post("/prompt_helper/tag_import")(_ph_tag_import)
 except Exception:
     pass
 
@@ -5833,6 +6501,8 @@ def parse_media_cards(config):
 
 async def _ml_files(req):
     """列出 input 目录下的媒体文件（含子目录），供 MediaLoader 浏览弹窗选取。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     from urllib.parse import quote as _q
     out = []
     for root in _ph_media_input_dirs():
@@ -5861,6 +6531,8 @@ async def _ml_files(req):
 
 
 async def _ml_outputs(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         labels = data.get("labels") or []
@@ -5873,6 +6545,8 @@ async def _ml_outputs(req):
 
 
 async def _mo_outputs(req):
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
         mode = str(data.get("mode") or "split")
@@ -6365,6 +7039,8 @@ def _ml_unique_name(root, name):
 
 async def _ml_upload(req):
     """接收拖拽上传的多媒体文件，保存到 ComfyUI input 目录，返回可加入素材卡片的文件描述。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         root = _ml_media_root()
         if not root:
@@ -6426,6 +7102,8 @@ async def _ml_upload(req):
 
 async def _ml_browse(req):
     """浏览任意目录（默认 input）：返回子目录、媒体文件、父级与可用盘符。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     from urllib.parse import quote as _q
     roots = _ml_roots()
     if not roots:
@@ -6469,6 +7147,8 @@ async def _ml_browse(req):
 
 async def _ml_serve(req):
     """按路径流式返回本地文件（本地工具用途，仅只读须存在的文件）；相对路径按 input 目录解析。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     path = (req.query.get("path") or "").strip()
     abs_path = _ml_resolve(path)
     if not abs_path or not os.path.isfile(abs_path):

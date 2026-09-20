@@ -4,7 +4,7 @@
 // 单文件卡片 = 1 个输出；多文件（批量）卡片 = N 个输出。局部禁用某文件时保留端口、输出 None。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { NODE_TYPES, nodeTypeOf, findNodeById, configWidget, installResizeHandles, makeDomWidgetHitThrough, TYPE_ICONS, notifyConfigChanged, scheduleOnRedraw, pumpFrames } from "./ezflex_service.js";
+import { NODE_TYPES, nodeTypeOf, findNodeById, configWidget, installResizeHandles, makeDomWidgetHitThrough, TYPE_ICONS, notifyConfigChanged, scheduleOnRedraw, pumpFrames, pageRange } from "./ezflex_service.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 
 const NODE = NODE_TYPES.MEDIA_OUT;
@@ -397,15 +397,6 @@ function renderPanel(node, conn) {
   pr.appendChild(lbl(ezT(' per page')));
   pg.appendChild(pr);
 }
-function pageRange(cur, total) {
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
-  const set = new Set([1, total, cur - 1, cur, cur + 1]); const out = [];
-  for (let i = 1; i <= total; i++) { if (set.has(i)) out.push(i); }
-  const res = []; let last = 0;
-  out.forEach((n) => { if (last && n - last > 1) res.push('...'); res.push(n); last = n; });
-  return res;
-}
-
 function forceShell(node) {
   const p = node && node._emooRoot; if (!p || !p.isConnected) return;
   const si = (t, prop, val) => { try { t.style.setProperty(prop, val, 'important'); } catch (_) {} };

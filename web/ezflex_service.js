@@ -562,7 +562,7 @@ export function uiPrompt(msg, def) {
   return new Promise((resolve) => {
     if (!_dlg || !_dlg.parentNode) {
       _dlg = document.createElement('div');
-      _dlg.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100010;background:rgba(0,0,0,.35);';
+      _dlg.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100150;background:rgba(0,0,0,.35);';
       const box = document.createElement('div');
       box.style.cssText = 'background:#fff;border:1px solid #d0d5dd;border-radius:10px;padding:14px;box-shadow:0 10px 34px rgba(0,0,0,.2);display:flex;flex-direction:column;gap:10px;min-width:280px;max-width:380px;font-family:Inter,sans-serif;';
       const lab = document.createElement('div'); lab.style.cssText = 'font-size:12px;color:#1a1a2e;';
@@ -615,6 +615,7 @@ export function uiConfirm(msg) {
     const onCancel = () => { _confirm.style.display = 'none'; resolve(false); };
     _confirm._lab.textContent = msg;
     _confirm._ok.onclick = onOk; _confirm._cancel.onclick = onCancel;
+    _confirm.style.zIndex = '100300';   // 每次显示都设：弹窗是复用的，创建时的值改不动
     _confirm.style.display = 'flex';
   });
 }
@@ -665,6 +666,30 @@ export const TYPE_ICONS = {
   other: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h5"/><path d="M9 13h6M9 17h6"/></svg>',
   text: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h5"/><path d="M9 13h6M9 17h6"/></svg>',
 };
+
+// 翻页页码（MediaOut / PromptHelper 标签面板共用）：槽位数固定（默认 8，宽面板可以传更多），位置不随当前页抖
+// 头：1 2 3 4 5 … n-1 n ｜ 中：1 … c-1 c c+1 … n-1 n ｜ 尾：1 2 … n-4 n-3 n-2 n-1 n
+const PAGE_SLOTS = 8;
+export function pageRange(cur, total, slots) {
+  const n = Math.max(7, Math.min(21, Math.floor(slots) || PAGE_SLOTS));   // 最少 7 个：再少中间窗口就没了
+  if (total <= n) return Array.from({ length: total }, (_, i) => i + 1);
+  const headN = n - 3;                                  // 头部：1..headN + … + 末两个
+  if (cur <= headN - 2) {
+    const out = []; for (let i = 1; i <= headN; i++) out.push(i);
+    out.push('...', total - 1, total); return out;
+  }
+  const win = n - 5;                                    // 中间：1 … 窗口 … 末两个
+  if (cur >= total - 1 - (win - 2)) {                   // 尾部：1 2 … 末 (n-3) 个
+    const out = [1, 2, '...'];
+    for (let i = total - (n - 3) + 1; i <= total; i++) out.push(i);
+    return out;
+  }
+  const start = Math.max(2, Math.min(cur - 1, total - win));
+  const out = [1, '...'];
+  for (let i = start; i < start + win; i++) out.push(i);
+  out.push('...', total - 1, total);
+  return out;
+}
 
 let _apInjected = false;
 export function makeAudioPlayer(url) {

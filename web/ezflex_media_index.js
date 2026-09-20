@@ -8,21 +8,83 @@
 import { app } from "../../scripts/app.js";
 import { EZ_PERF } from "./ezflex_service.js";
 
-const MEDIA_WORDS = { image: '图片', video: '视频', audio: '音频', model: '模型' };
+const BUILTIN_WORDS = { image: '图片', video: '视频', audio: '音频', model: '模型' };
 const TAG_WORDS = { image: 'Picture', video: 'Video', audio: 'Audio' };
-function mediaTypeWord(type) { return MEDIA_WORDS[type] || '图片'; }
-function mediaLabelOf(type, n) { return '@' + mediaTypeWord(type) + n; }
+// 媒体类型显示词：内置四种用中文词；自定义类型直接用类型名（编号就是 @other1）。
+export function mediaWord(type) { return BUILTIN_WORDS[type] || String(type || '图片'); }
+function mediaLabelOf(type, n) { return '@' + mediaWord(type) + n; }
 function mediaTagOf(type, n) { const w = TAG_WORDS[type]; return w ? '<' + w + ' ' + n + '>' : ''; }
+
+// ===== 引用识别设置（设置页 · 引用识别设置）：默认值 = 原来的硬编码规则，全部按列表存在配置里 =====
+// 类型 / 端口列表逐条「包含匹配」（大小写不敏感、不拼正则）；素材来源默认全读，ignoreSources 里的节点类型不读。
+// 媒体类型 = [{ id, exts, on }]：exts 决定文件按扩展名归到哪一类，on = 参与编号（也决定引用规则里那一项是否出现/生效）。
+const KIND_EXT_DEFAULTS = {
+  image: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff'],
+  video: ['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'],
+  audio: ['mp3', 'wav', 'flac', 'ogg', 'm4a', 'opus', 'aac', 'wma'],
+  model: ['obj', 'glb', 'gltf', 'fbx', 'stl', 'ply', '3ds', 'dae', 'blend'],
+};
+const MEDIA_DEFAULTS = {
+  targetTypes: ['minimax', 'h3', 'wan', 'ltx', 'hunyuan', 'seedance', 'veo', 'kling', 'sora', 'cogvideo', 'mochi', 'qwen', 'flux', 'sd3', 'sdxl', 'audio', 'voice', 'tts', 'music', 'sound'],
+  ignoreTypes: ['save', 'preview', 'load', 'output', 'decode', 'encode', 'combine', 'merge', 'concat', 'batch', 'split', 'join', 'scale', 'resize', 'crop', 'upscale', 'interpolat', 'blend', 'composite', 'alpha', 'overlay', 'paste', 'stitch', 'grid', 'tile', 'mask', 'noise', 'quantize', 'filter', 'adjust', 'rotate', 'flip', 'blur', 'sharpen', 'repeat', 'text', 'note', 'reroute', 'primitive', 'switch', 'math', 'list'],
+  targetPorts: ['first_frame', 'last_frame', 'start_frame', 'end_frame', 'ref_image', 'ref_video', 'ref_audio', 'reference_image', 'reference_video', 'reference_audio'],
+  ignorePorts: ['mask', 'latent', 'noise', 'clip', 'cond', 'control_net', 'pose', 'depth', 'width', 'height', 'strength', 'seed', 'steps', 'cfg', 'scale', 'denoise'],
+  ignoreSources: [],
+  kinds: [{ id: 'image', on: true }, { id: 'video', on: true }, { id: 'audio', on: true }, { id: 'model', on: false }],
+  nameFirst: true,
+  relayDepth: 4,
+};
+const _asList = (v, def) => {
+  if (Array.isArray(v)) return v.map((x) => String(x == null ? '' : x).trim()).filter(Boolean);
+  if (typeof v === 'string' && v.trim()) return v.split(/[\s,;，、]+/).map((s) => s.trim()).filter(Boolean);
+  return def.slice();
+};
+function normKinds(v) {
+  const src = Array.isArray(v) ? v : (typeof v === 'string' && v.trim() ? v.split(/[\s,;，、]+/) : MEDIA_DEFAULTS.kinds);
+  const out = [];
+  (src || []).forEach((k) => {
+    if (k == null) return;
+    const obj = (typeof k === 'object') ? k : { id: k, on: true };
+    const id = String(obj.id || '').trim();
+    if (!id || out.some((x) => x.id === id)) return;
+    const def = KIND_EXT_DEFAULTS[id] || [];
+    const exts = _asList(obj.exts != null ? obj.exts : ((typeof k === 'string') ? def : null), def)
+      .map((e) => String(e).replace(/^\.+/, '').toLowerCase()).filter(Boolean);
+    out.push({ id: id, exts: exts, on: obj.on !== false });
+  });
+  return out;
+}
+function normMediaCfg(o) {
+  const c = (o && typeof o === 'object') ? o : {};
+  const raw = (c.relayDepth !== undefined && c.relayDepth !== null && c.relayDepth !== '') ? Number(c.relayDepth) : MEDIA_DEFAULTS.relayDepth;
+  return {
+    targetTypes: _asList(c.targetTypes, MEDIA_DEFAULTS.targetTypes),
+    ignoreTypes: _asList(c.ignoreTypes, MEDIA_DEFAULTS.ignoreTypes),
+    targetPorts: _asList(c.targetPorts, MEDIA_DEFAULTS.targetPorts),
+    ignorePorts: _asList(c.ignorePorts, MEDIA_DEFAULTS.ignorePorts),
+    ignoreSources: _asList(c.ignoreSources, MEDIA_DEFAULTS.ignoreSources),
+    kinds: normKinds(c.kinds),
+    nameFirst: c.nameFirst !== false,
+    relayDepth: Math.max(0, Math.min(8, isFinite(raw) ? raw : MEDIA_DEFAULTS.relayDepth)),
+  };
+}
+const _hitAny = (list, text) => { const t = String(text || '').toLowerCase(); return list.some((w) => { const s = String(w || '').toLowerCase(); return s && t.indexOf(s) >= 0; }); };
+// 素材来源：MediaLoader / MediaOut 各用专用读取器，其它节点扫 widget；ignoreSources 命中的节点类型一律不读。
+function sourceBlocked(type) { return _hitAny(_mediaCfg.ignoreSources, type); }
+let _mediaCfg = normMediaCfg(null);
+export function mediaTargetDefaults() { return normMediaCfg(null); }
+export function mediaTargetCfg() { return _mediaCfg; }
+// 设置页保存后调用：换配置 + 强制重建编号表（下一帧合并重建）。
+export function setMediaTargetCfg(o) { _mediaCfg = normMediaCfg(o); _reg.dirty = true; try { refreshIndexSoon(); } catch (_) {} }
 export function mediaKeyOf(m) { return (m && (m.path || m.url || m.name)) || ''; }
 export function mediaSizeText(b) { if (b == null || b === '') return ''; const n = Number(b); if (!isFinite(n)) return ''; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'; return (n / 1048576).toFixed(1) + ' MB'; }
 export function mediaFormatOf(m) { const s = String((m && (m.name || m.path)) || ''); const t = s.match(/\.([a-z0-9]{1,6})(?:[?#]|$)/i); return t ? t[1].toLowerCase() : ''; }
 // 媒体类型以扩展名为准（卡片里存的 type 可能是旧值/猜错的）
 export function kindOfName(name) {
-  const ext = String(name || '').split('.').pop().toLowerCase();
-  if (/^(png|jpe?g|webp|gif|bmp|tif?f)$/.test(ext)) return 'image';
-  if (/^(mp4|webm|mov|mkv|avi|m4v)$/.test(ext)) return 'video';
-  if (/^(mp3|wav|flac|ogg|m4a|opus|aac|wma)$/.test(ext)) return 'audio';
-  if (/^(obj|glb|gltf|fbx|stl|ply|3ds|dae|blend)$/.test(ext)) return 'model';
+  const m = String(name || '').match(/\.([a-z0-9]{1,6})(?:[?#]|$)/i);
+  if (!m) return '';
+  const ext = m[1].toLowerCase();
+  for (const k of _mediaCfg.kinds) { if ((k.exts || []).indexOf(ext) >= 0) return k.id; }
   return '';
 }
 
@@ -63,17 +125,19 @@ function ezMediaFilesOfNode(n, g) {
   };
   try {
     if (n && n.type === 'EzFlex-MediaLoader') {
+      if (sourceBlocked('EzFlex-MediaLoader')) return [];
       const cfg = parseCfg(n);
       (cfg.groups || []).forEach((gr) => (gr.cards || []).forEach((c) => (c.items || []).forEach((it) => (it.files || []).forEach((f) => pushMediaFile(out, f)))));
       return out;
     }
     if (n && n.type === 'EzFlex-MediaOut') {
+      if (sourceBlocked('EzFlex-MediaOut')) return [];
       const inp = (n.inputs || [])[0];
       if (!inp || inp.link == null) return [];
       const link = (g.links || {})[inp.link];
       if (!link || link.origin_id == null) return [];
       const origin = ((g._nodes || g.nodes) || []).find((x) => x && x.id === link.origin_id);
-      if (!origin || origin.type !== 'EzFlex-MediaLoader') return [];
+      if (!origin || origin.type !== 'EzFlex-MediaLoader' || sourceBlocked(origin.type)) return [];
       const slot = link.origin_slot;
       const sock = (origin.outputs || [])[slot];
       let cardId = sock && sock._ezCardId;
@@ -87,61 +151,74 @@ function ezMediaFilesOfNode(n, g) {
   } catch (_) {}
   return out;
 }
-// 上游节点某个输出槽对应的媒体文件（MediaLoader 卡片 / MediaOut 端口 / 内置加载节点 widget）
+// ===== 素材读取器注册表：节点类型 → { read(node, slot), terminal } =====
+// 以后新增自家「读素材」节点（或要特判的第三方节点）只需 registerMediaSource(type, read)，不用再改下面的 if。
+// terminal = 该节点端到端定义素材：这个端口取不到就是没有，不再顺着它的输入往上捞（MediaLoader/MediaOut 就是这种）。
+const _srcReaders = new Map();
+export function registerMediaSource(type, read, opts) { _srcReaders.set(String(type), { read: read, terminal: !(opts && opts.relay) }); }
+function readLoaderSlot(up, slot) {
+  let cfg = {}; try { const w = (up.widgets || []).find((x) => x.name === 'config'); cfg = JSON.parse((w && w.value) || '{}') || {}; } catch (_) { cfg = {}; }
+  const cards = []; (cfg.groups || []).forEach((gr) => (gr.cards || []).forEach((c) => cards.push(c)));
+  const sock = (up.outputs || [])[slot];
+  const cardId = sock && sock._ezCardId;
+  const card = cardId != null ? cards.find((c) => String(c.id) === String(cardId)) : cards[slot];
+  const out = []; if (card) (card.items || []).forEach((it) => (it.files || []).forEach((f) => pushMediaFile(out, f)));
+  return out;
+}
+function readMediaOutSlot(up, slot) {
+  const off = up._ezLocalOff || {};
+  const sock = (up.outputs || [])[slot];
+  // MediaOut 面板会把该输出端口实际承载的文件盖到 socket 上（拆分口=1 个文件，卡片/分组口=该组全部文件）。
+  const stamped = sock && sock._ezFiles;
+  if (stamped && stamped.length) { const out = []; stamped.forEach((f) => { if (!off[f.id]) pushMediaFile(out, f); }); return out; }
+  // 没盖到章（面板还没铺开 / 链接指向的槽位已失效）：只做能精确对上的兜底 —— 按 _ezMediaId 找那一个文件，
+  // 或拆分模式按槽位序号取。**绝不退回「整张卡片的文件列表」**：那会把 MediaLoader 里没接入生成节点、
+  // 或已被「关」掉的素材一起带进编号表和引用媒体（实测踩过）。
+  const all = ezMediaFilesOfNode(up, up.graph) || [];
+  const mid = sock && sock._ezMediaId;
+  if (mid != null) {
+    const hit = all.find((f, i) => String(f.id == null ? 'f' + i : f.id) === String(mid));
+    if (hit) return off[hit.id] ? [] : [hit];
+  }
+  if ((up._ezMode || 'split') === 'split') { const f = all[slot]; if (f) return off[f.id] ? [] : [f]; }
+  return [];
+}
+registerMediaSource('EzFlex-MediaLoader', readLoaderSlot);
+registerMediaSource('EzFlex-MediaOut', readMediaOutSlot);
+// 上游节点某个输出槽对应的媒体文件：注册的专用读取器优先，其余节点扫 widget（内置 / 第三方加载节点）。
 function mediaFilesOfSlot(up, slot) {
   if (!up) return [];
-  const g = up.graph; const t = String(up.type || '');
-  if (t === 'EzFlex-MediaLoader') {
-    let cfg = {}; try { const w = (up.widgets || []).find((x) => x.name === 'config'); cfg = JSON.parse((w && w.value) || '{}') || {}; } catch (_) { cfg = {}; }
-    const cards = []; (cfg.groups || []).forEach((gr) => (gr.cards || []).forEach((c) => cards.push(c)));
-    const sock = (up.outputs || [])[slot];
-    const cardId = sock && sock._ezCardId;
-    const card = cardId != null ? cards.find((c) => String(c.id) === String(cardId)) : cards[slot];
-    const out = []; if (card) (card.items || []).forEach((it) => (it.files || []).forEach((f) => pushMediaFile(out, f)));
-    return out;
-  }
-  if (t === 'EzFlex-MediaOut') {
-    const off = up._ezLocalOff || {};
-    const sock = (up.outputs || [])[slot];
-    // MediaOut 面板会把该输出端口实际承载的文件盖到 socket 上（拆分口=1 个文件，卡片/分组口=该组全部文件）。
-    const stamped = sock && sock._ezFiles;
-    if (stamped && stamped.length) { const out = []; stamped.forEach((f) => { if (!off[f.id]) pushMediaFile(out, f); }); return out; }
-    // 没盖到章（面板还没铺开 / 链接指向的槽位已失效）：只做能精确对上的兜底 —— 按 _ezMediaId 找那一个文件，
-    // 或拆分模式按槽位序号取。**绝不退回「整张卡片的文件列表」**：那会把 MediaLoader 里没接入生成节点、
-    // 或已被「关」掉的素材一起带进编号表和引用媒体（实测踩过）。
-    const all = ezMediaFilesOfNode(up, g) || [];
-    const mid = sock && sock._ezMediaId;
-    if (mid != null) {
-      const hit = all.find((f, i) => String(f.id == null ? 'f' + i : f.id) === String(mid));
-      if (hit) return off[hit.id] ? [] : [hit];
-    }
-    if ((up._ezMode || 'split') === 'split') { const f = all[slot]; if (f) return off[f.id] ? [] : [f]; }
-    return [];
-  }
-  return widgetMediaOfNode(up);
+  const t = String(up.type || '');
+  const rd = _srcReaders.get(t);
+  if (rd) { if (sourceBlocked(t)) return []; try { return rd.read(up, slot) || []; } catch (_) { return []; } }
+  return sourceBlocked(t) ? [] : widgetMediaOfNode(up);
 }
 
-// ===== 生成节点判定：有媒体输入端口、且不是加载/预览/保存/合成类节点 =====
-const GEN_TYPE_HINT = /(minimax|h3|wan|ltx|hunyuan|seedance|veo|kling|sora|cogvideo|mochi|qwen|flux|sd3|sdxl|audio|voice|tts|music|sound)/i;
-// 非生成节点（保存/预览/加载/解码/合成/图像处理 等）：即使端口叫 image1 也不算编号目标
-const NOT_TARGET = /(save|preview|load|output|decode|encode|combine|merge|concat|batch|split|join|scale|resize|crop|upscale|interpolat|blend|composite|alpha|overlay|paste|stitch|grid|tile|mask|noise|quantize|filter|adjust|rotate|flip|blur|sharpen|repeat|text|note|reroute|primitive|switch|math|list)/i;
-// 带编号/引用语义的端口名（first_frame / ref_image_1 / image_2 / video_1 / audio_3 …）
-const PORT_STRONG = /((image|img|picture|photo|frame|video|audio|sound)(_?\d+)$)|((ref|reference)_(image|video|audio))|((first|last|start|end)_frame)/i;
-const PORT_SKIP = /(mask|latent|noise|clip|cond|control_net|pose|depth|width|height|strength|seed|steps|cfg|scale|denoise)/i;
-function portMediaType(inp) {
-  // 先看端口名：H3 的 ref_video_1 声明是 io.Image（帧序列）但语义是「参考视频」，标签是 <Video 1>，
-  // 所以命名语义优先（audio 要先判，ref_video_audio_1 属于音频）。
-  const n = String((inp && inp.name) || '').toLowerCase();
+// ===== 生成节点判定：有媒体输入端口、且不是加载/预览/保存/合成类节点（类型/端口名单见上方 MEDIA_DEFAULTS）=====
+// 带编号语义的端口名：媒体词 + 数字结尾（image_1 / ref_video_2 / audio3 …）。结构化规则不放进列表。
+const PORT_NUMBERED = /(image|img|picture|photo|frame|video|audio|sound)(_?\d+)$/i;
+function nameMediaType(n) {
   if (/audio|sound|voice|music|tts/.test(n)) return 'audio';
   if (/video|movie/.test(n)) return 'video';
   if (/image|img|picture|photo|frame/.test(n)) return 'image';
   if (/model_3d|file_3d|mesh|glb/.test(n)) return 'model';
-  const t = String((inp && inp.type) || '').toUpperCase();
+  return null;
+}
+function declMediaType(t) {
+  t = String(t || '').toUpperCase();
   if (t === 'IMAGE') return 'image';
   if (t === 'VIDEO') return 'video';
   if (t === 'AUDIO') return 'audio';
   if (t === 'MODEL_3D' || t === 'FILE_3D' || t === 'MESH' || t === 'TRIMESH') return 'model';
   return null;
+}
+function portMediaType(inp) {
+  // 先看端口名：H3 的 ref_video_1 声明是 io.Image（帧序列）但语义是「参考视频」，标签是 <Video 1>，
+  // 默认命名语义优先（audio 要先判，ref_video_audio_1 属于音频）；「引用识别设置」可切成声明类型优先。
+  const byName = nameMediaType(String((inp && inp.name) || '').toLowerCase());
+  const byDecl = declMediaType(inp && inp.type);
+  const t = _mediaCfg.nameFirst ? (byName || byDecl) : (byDecl || byName);
+  return (t && _mediaCfg.kinds.some((k) => k.on && k.id === t)) ? t : null;
 }
 // 节点标识：直接用画布上看到的节点标题（重命名过的就是新名字），不用 #id。
 function nodeDisplayName(n) {
@@ -150,13 +227,15 @@ function nodeDisplayName(n) {
   return String(n.type || '');
 }
 function nodeKeyOf(n) { return String((n && n.title) || '') || nodeDisplayName(n); }
+function portIgnored(name) { return _hitAny(_mediaCfg.ignorePorts, name); }
 function isIndexTarget(n) {
   if (!n || !n.inputs || !n.inputs.length) return false;
   const type = String(n.type || '');
   if (/^EzFlex-/.test(type)) return false;
-  if (NOT_TARGET.test(type)) return false;
-  if (!GEN_TYPE_HINT.test(type) && !(n.inputs || []).some((i) => i && !PORT_SKIP.test(String(i.name || '')) && PORT_STRONG.test(String(i.name || '')))) return false;
-  return (n.inputs || []).some((i) => i && !PORT_SKIP.test(String(i.name || '')) && portMediaType(i));
+  if (_hitAny(_mediaCfg.ignoreTypes, type)) return false;
+  const strong = (n.inputs || []).some((i) => i && !portIgnored(i.name) && (PORT_NUMBERED.test(String(i.name || '')) || _hitAny(_mediaCfg.targetPorts, i.name)));
+  if (!_hitAny(_mediaCfg.targetTypes, type) && !strong) return false;
+  return (n.inputs || []).some((i) => i && !portIgnored(i.name) && portMediaType(i));
 }
 // 同一端口解析出的文件按媒体键去重：端口扇出 / MediaOut 端口复用时同一素材会被取到两次，
 // 不去重会在「引用媒体」里出现重复卡片，编号表也跟着被撑大。
@@ -174,15 +253,15 @@ function filesOnInput(node, inp) {
 // 端口上的媒体：直接找到就用；碰到中转节点（内置 Get Video Components / Reroute 等）就顺着它的输入继续往上找。
 // 视频现在按内置约定走 VIDEO 口，接生成节点的帧输入时中间会垫一个 Get Video Components，所以必须能穿透。
 function filesUpstream(node, slot, depth) {
-  if (!node || depth > 4) return [];
+  if (!node || depth > _mediaCfg.relayDepth) return [];
   let direct = [];
   try { direct = mediaFilesOfSlot(node, slot) || []; } catch (_) { direct = []; }
   if (direct.length) return direct;
   // ⚠️ EzFlex 自家的加载/输出节点是「端到端定义素材」：这个端口承载什么就是什么，端口空就是空。
   // 不许再顺着它的输入往上捞 —— 否则会捞到 MediaLoader 整张卡片，把没接入生成节点、或已被关掉的
   // 素材全带进编号表和引用媒体（用户实测：只要 MediaOut 接进了生成节点就冒全部已加载文件）。
-  const st = String(node.type || '');
-  if (st === 'EzFlex-MediaOut' || st === 'EzFlex-MediaLoader') return [];
+  const src = _srcReaders.get(String(node.type || ''));
+  if (src && src.terminal) return [];
   const g = node.graph; if (!g) return [];
   for (const inp of (node.inputs || [])) {
     if (!inp || inp.link == null) continue;
@@ -193,18 +272,26 @@ function filesUpstream(node, slot, depth) {
   }
   return [];
 }
+// 端口名 / 声明类型都认不出来时，用上游文件的扩展名归类（自定义媒体类型走这条）
+function kindFromFiles(files) {
+  for (const f of (files || [])) {
+    const t = f && f.type;
+    if (t && _mediaCfg.kinds.some((k) => k.on && k.id === t)) return t;
+  }
+  return null;
+}
 // 单个目标节点的编号端口表（按输入端口顺序，按类型各自编号）
 function scanTargetPorts(node) {
   const ports = []; const counts = {};
   (node.inputs || []).forEach((inp, slot) => {
     if (!inp || inp.link == null) return;
     const name = String(inp.name || '');
-    if (PORT_SKIP.test(name)) return;
-    const type = portMediaType(inp);
-    if (!type) return;
+    if (portIgnored(name)) return;
     let files = [];
     try { files = filesOnInput(node, inp) || []; } catch (_) { files = []; }
     if (!files.length) return;
+    const type = portMediaType(inp) || kindFromFiles(files);
+    if (!type) return;
     counts[type] = (counts[type] || 0) + 1;
     ports.push({ slot: slot, name: name, type: type, n: counts[type], label: mediaLabelOf(type, counts[type]), tag: mediaTagOf(type, counts[type]), files: files });
   });

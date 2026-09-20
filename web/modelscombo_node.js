@@ -224,7 +224,6 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   const DEVICE_OPTS = ['default', 'cuda', 'cpu', 'cuda:0', 'cuda:1'];
 
   const LABEL = { checkpoint: 'Checkpoint', unet: 'UNET', clip: 'CLIP', vae: 'VAE', lora: 'LoRA' };
-  const DOT = { checkpoint: '#4a7fa8', unet: '#3a8a6a', clip: '#b8954a', vae: '#7a5a9a', lora: '#a85a6a' };
 
   const EXTRA = {
     checkpoint: [{ key: 'weight_dtype', label: 'Weight type', type: 'select', opts: WEIGHT_OPTS }],
@@ -1168,7 +1167,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     chevRight: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 6l6 6-6 6"/></svg>',
     tree: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="3" y="3" width="6" height="4" rx="1"/><rect x="15" y="3" width="6" height="4" rx="1"/><rect x="9" y="17" width="6" height="4" rx="1"/><path d="M6 7v4a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7M12 13v4"/></svg>',
     branch: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="6" cy="4" r="2.2"/><circle cx="6" cy="20" r="2.2"/><circle cx="18" cy="7" r="2.2"/><path d="M6 6.2v11.6M6 15c0-3.2 3-3.4 5-3.9s4-1 4-3.4"/></svg>',
-    compress: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v6M12 3l-2.5 2.5M12 3l2.5 2.5M12 21v-6M12 21l-2.5-2.5M12 21l2.5-2.5"/></svg>'
+    // 折叠：左下 / 右上两个斜向箭头对指
+    compress: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19l6-6M11 13H7M11 13v4M19 5l-6 6M13 11h4M13 11v-4"/></svg>',
+    list: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h0.01M4 12h0.01M4 18h0.01M9 6h11M9 12h11M9 18h11"/></svg>'
   };
 
   const _BB_ABBR = {
@@ -1193,6 +1194,17 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     if (init.length >= 2) return init;
     const alnum = key.replace(/[^a-z0-9]/g, '');
     return (alnum || 'XXX').slice(0, 4).toUpperCase();
+  }
+
+  // 选中文件夹（含其全部子目录，带祖先链）。没选 = 全部目录。
+  function _selectedFolderPaths() {
+    const base = _bbSelFolder;
+    const set = new Set();
+    const addChain = (d) => { const parts = String(d).split('/').filter(Boolean); let acc = ''; parts.forEach((p) => { acc = acc ? acc + '/' + p : p; set.add(acc); }); };
+    const items = _bbTabType ? _bbItems.filter((x) => x.type === _bbTabType) : _bbItems;
+    items.forEach((x) => { const d = _itemDir(x); if (d && (!base || d === base || d.startsWith(base + '/'))) addChain(d); });
+    if (base) set.add(base);
+    return set;
   }
 
   function _expandAllFolders() {
@@ -1322,7 +1334,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const ov = el('div', 'mc-bb-overlay');
     const header = el('div', 'mc-bb-header');
     const title = el('div', 'mc-bb-title'); title.textContent = ezT('Model Browser');
-    const badge = el('div', 'mc-bb-badge'); badge.textContent = 'LoraManager';
+    const badge = el('div', 'mc-bb-badge'); badge.textContent = 'ModelsCombo';
     const search = el('input', 'mc-bb-search'); search.type = 'text'; search.placeholder = ezT('Search name / tags…');
     const searchField = el('select', 'mc-bb-searchfield');
     [['all',ezT('All fields')],['title',ezT('Title / name')],['author',ezT('Author')],['category',ezT('Model category')],['base',ezT('Base model')],['tags',ezT('Tags')],['trained',ezT('Trigger words')],['desc',ezT('Description')],['version',ezT('Version')],['file',ezT('File name / path')]].forEach(([v,label]) => {
@@ -1341,8 +1353,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const sideTitle = el('div', 'mc-bb-side-title'); sideTitle.textContent = ezT('Folder');
     const sidebtns = el('div', 'mc-bb-sidebtns');
     const b1 = el('button', 'mc-bb-sbtn'); b1.innerHTML = _SVG.tree; b1.title = ezT('Toggle tree / list');
-    const b2 = el('button', 'mc-bb-sbtn'); b2.innerHTML = _SVG.branch; b2.title = ezT('Recursive (include subfolders)');
-    b2.classList.add('active');
+    const b2 = el('button', 'mc-bb-sbtn'); b2.innerHTML = _SVG.branch; b2.title = ezT('Expand selected folder');
     const b3 = el('button', 'mc-bb-sbtn'); b3.innerHTML = _SVG.compress; b3.title = ezT('Collapse all');
     const b4 = el('button', 'mc-bb-sbtn mc-bb-sbtn-hide'); b4.innerHTML = _SVG.chevLeft; b4.title = ezT('Hide sidebar');
     sidebtns.appendChild(b1); sidebtns.appendChild(b2); sidebtns.appendChild(b3); sidebtns.appendChild(b4);
@@ -1358,8 +1369,17 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     close.addEventListener('click', closeLoraBrowser);
     search.addEventListener('input', () => { _bbQuery = search.value.toLowerCase(); renderLoraBrowserGrid(); });
     searchField.addEventListener('change', () => { _bbSearchField = searchField.value; renderLoraBrowserGrid(); });
-    b1.addEventListener('click', () => { _bbSidebarMode = _bbSidebarMode === 'tree' ? 'list' : 'tree'; b1.classList.toggle('active', _bbSidebarMode === 'list'); renderFolderSidebar(); });
-    b2.addEventListener('click', () => { _bbRecursive = !_bbRecursive; b2.classList.toggle('active', _bbRecursive); if (_bbRecursive) _expandAllFolders(); renderLoraBrowserGrid(); });
+    b1.addEventListener('click', () => { _bbSidebarMode = _bbSidebarMode === 'tree' ? 'list' : 'tree'; b1.innerHTML = _bbSidebarMode === 'list' ? _SVG.list : _SVG.tree; renderFolderSidebar(); });
+    // 一次性动作（不是状态）：把选中文件夹及其全部子文件夹展开；全部都展开则不动作
+    b2.addEventListener('click', () => {
+      const paths = _selectedFolderPaths();
+      if (!paths.size) { _expandAllFolders(); renderFolderSidebar(); return; }
+      let allOpen = true;
+      paths.forEach((p) => { if (!_bbExpanded.has(p)) allOpen = false; });
+      if (allOpen) return;
+      paths.forEach((p) => _bbExpanded.add(p));
+      renderFolderSidebar();
+    });
     b3.addEventListener('click', () => { _bbExpanded.clear(); renderFolderSidebar(); });
     b4.addEventListener('click', () => toggleSidebarHidden());
     _bbOverlay = ov;
