@@ -12,8 +12,13 @@ venv/
 *.log
 
 # ===== 运行期数据（插件导入时会自己 makedirs，见 __init__.py 的 _USER_DIR）=====
-# 里面是各节点的预设存档（模型组合 / 分辨率 / 参数预设…），属使用者的本地数据，不该进仓库
-user_data/
+# 预设存档（EzFlex-*.json）和生图设置（PromptHelperGen/）都是使用者的本地数据，不进仓库；
+# PromptHelperLib 的 CSV 是标签系统开箱即用的数据，必须随仓库走。
+# 只放行这一类 CSV，别改成整目录放行 —— 否则 .bak / 导入的第三方标签库也会被提交。
+user_data/*
+!user_data/PromptHelperLib/
+user_data/PromptHelperLib/*
+!user_data/PromptHelperLib/*.csv
 
 # ===== 本地备份 / 事故文件（回退用，14 MB 上下，不入库）=====
 _backups/
@@ -25,6 +30,7 @@ _backups/
 *~
 
 # ===== 本地开发资产（回归套件 + 手写研究笔记，都不进仓库）=====
+# 测试里写死了本机 ComfyUI 绝对路径，换台机器跑不了，所以不发布
 _dev_tests/
 _prompt_spec_audit.md
 提示词规范对照_官方与社区.txt

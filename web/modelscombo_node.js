@@ -131,6 +131,7 @@ const MC_CSS = `
 .mc-bb-listrow.sel{background:rgba(43,58,74,.1);color:#2b3a4a;font-weight:500;}
 .mc-bb-main{flex:1 1 auto;overflow:auto;padding:16px 18px;min-width:0;}
 .mc-bb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;}
+
 .mc-bb-empty,.mc-bb-loading{color:#8a9aa8;text-align:center;padding:48px 16px;font-size:13px;}
 .mc-bb-empty{background:#fff;border:1px dashed #dce3ec;border-radius:12px;}
 .mc-b-card{position:relative;background:#fff;border:1px solid #eef1f6;border-radius:12px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.04);transition:.15s ease;cursor:pointer;}
@@ -291,6 +292,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     w.value = json;
     if (typeof w.callback === 'function') w.callback(json);
     if (node.graph) node.graph.setDirtyCanvas(true, true);
+    // 让别的节点（PromptHelper 的实时接收卡）能感知到 LoRA 选择变了 —— 不用等运行
+    try { window.dispatchEvent(new CustomEvent('ezflex:config-changed', { detail: { node: node } })); } catch (_) {}
   }
 
   function loadFromConfig(node) {
@@ -348,6 +351,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       if (['checkpoint', 'clip'].indexOf(l.type) >= 0) want.push(['CLIP', b + '_clip']);
       if (['checkpoint', 'vae'].indexOf(l.type) >= 0) want.push(['VAE', b + '_vae']);
     });
+    if (st.loaders.some((l) => l && l.type === 'lora')) want.push(['STRING', 'trigger_words']);   // 触发词串固定排最后，不动前面的端口顺序
     let changed = false;
     // 快照旧输出：优先按「名称」复用（拖拽排序时连接跟随同名 socket）。
     // 名称变了但「类型+位置」没变（如 anima→krea2 都是 checkpoint）时按位置+类型复用该 socket（保留连接，只改名）。
@@ -1390,10 +1394,11 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
   function renderTabs() {
     const tabs = _bbOverlay._tabs; tabs.innerHTML = '';
-    const defs = [['', ezT('All')], ['checkpoint', 'Checkpoint'], ['unet', 'UNET'], ['lora', 'LoRA']];
+    const defs = [['', ezT('All')], ['checkpoint', 'Checkpoint'], ['unet', 'UNET'], ['lora', 'LoRA'], ['__loaded__', ezT('Loaded')]];
     defs.forEach(([v, label]) => {
       const b = el('button', 'mc-bb-tab' + (v === _bbTabType ? ' active' : ''));
       b.textContent = label;
+      if (v === '__loaded__') b.title = ezT('View the models / LoRAs currently loaded in this node');
       b.addEventListener('click', () => { _bbTabType = v; _bbSelFolder = ''; tabs.querySelectorAll('.mc-bb-tab').forEach((x) => x.classList.toggle('active', x === b)); renderLoraBrowserGrid(); });
       tabs.appendChild(b);
     });
@@ -1470,13 +1475,30 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     return d === folder;
   }
 
+  // 「已加载」= 一个筛选：只保留当前节点配置里已选的模型文件（按文件名匹配）
+  function _normFile(s) {
+    const t = String(s || '').replace(/\\/g, '/');
+    return t.slice(t.lastIndexOf('/') + 1).toLowerCase();
+  }
+  function _loadedFileSet() {
+    const out = new Set();
+    const node = _bbNode;
+    ((node ? stateFor(node).loaders : []) || []).forEach((l) => { if (l && l.file) out.add(_normFile(l.file)); });
+    return out;
+  }
+
   function renderLoraBrowserGrid() {
     const ov = _bbOverlay;
     if (!ov) return;
     const grid = ov._grid;
     grid.innerHTML = '';
     let items = _bbItems;
-    if (_bbTabType) items = items.filter((x) => x.type === _bbTabType);
+    if (_bbTabType === '__loaded__') {   // 已加载：按节点里选过的文件筛（正常卡片渲染）
+      const loaded = _loadedFileSet();
+      items = items.filter((x) => loaded.has(_normFile(x.file)) || loaded.has(_normFile(x.file_name)));
+    } else if (_bbTabType) {
+      items = items.filter((x) => x.type === _bbTabType);
+    }
     if (_bbQuery) {
       const q = (_bbQuery || '').trim().toLowerCase();
       const words = (v) => {
@@ -2173,18 +2195,16 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         node._mcOutEls = all.map((x) => x.el);
       }
     };
+    const hideAll = () => { all.forEach((item) => { try { item.el.style.display = 'none'; } catch (_) { /* 忽略 */ } }); };
     const update = () => {
       const rootEl = node._mcRoot;
-      if (!rootEl || !rootEl.isConnected) { return; }
-      // 节点不在当前图（子图切换/隐藏）→ 移除黑框并停止，避免残留
-      if (app && app.graph && node.graph !== app.graph) {
-        (node._mcOutEls || []).forEach((el) => { try { el.remove(); } catch (_) { /* 忽略 */ } });
-        node._mcOutEls = [];
-        return;
-      }
+      if (!rootEl || !rootEl.isConnected) { hideAll(); return; }   // 控件没挂上/被临时摘掉：先把标签收掉，别留在屏幕上
+      // 只在「当前渲染的那张图」里显示：子图（app.canvas.graph）也算当前图，别拿 app.graph 比
+      const shown = (app && app.canvas && app.canvas.graph) || (app && app.graph) || null;
+      if (shown && node.graph && node.graph !== shown) { hideAll(); return; }
       let rect = null;
-      try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
-      if (!rect || rect.width <= 0) { return; }
+      try { rect = rootEl.getBoundingClientRect(); } catch (_) { hideAll(); return; }
+      if (!rect || rect.width <= 0) { hideAll(); return; }
       // 节点被缩放/平移到视口外或缩得太小 → 隐藏黑框，避免残留在屏幕左侧
       const nodeW0 = (node.size && node.size[0]) || 1;
       const sx0 = rect.width / nodeW0;

@@ -1,18 +1,18 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。唯一交接入口：改动前先看 §5「避坑」，下一步看 §7「待办」。
-> **当前 V1.2.4**：提示词助手（Prompt Helper）大更新（标签面板平铺模式 / 层叠归类菜单 / 平铺态自动保存 / 生图修复）+ 25 条路由补本机限定 + 无用代码清理。发布相关看 §9，标签系统（规范 + 状态）看 §10。
+> **当前 V1.2.5**：标签系统随机 tag（标签面板「随机」弹窗 + 卡片「自动随机tag / 随机tag」）+ 默认标签库随包 + 删标签/批量清预览 + ModelsCombo 触发词串（LoRA 元数据；PromptHelper「实时接收卡」可编辑）+ 浏览「已加载」筛选页 + 黑色 socket 标签修复（子图不显示 / 快速移动残留）+ 总体编辑单卡折叠。发布相关看 §9，标签系统（规范 + 状态）看 §10。
 > **⚠️ 强制要求：经典模式与 Nodes 2.0（Vue）必须分开写作用域**（`.ezfx-is-vue` / `:not(.ezfx-is-vue)`）。禁止写对两种模式同时生效的行为规则；改一种前先确认另一种不受影响，两种分别回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.2.4"`（`__init__.py` / `pyproject.toml` / README） |
+| 版本 | `__version__ = "1.2.5"`（`__init__.py` / `pyproject.toml` / README） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 生效方式 | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS → **Ctrl+F5 强刷** |
-| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-14-cards134`），控制台看 `[PromptHelper] module loaded · build …` |
+| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-14-cards145`），控制台看 `[PromptHelper] module loaded · build …` |
 | 依赖 | 必装 `mutagen>=1.46.0`；可选 `llama-cpp-python` / `gguf` / `onnx` / 外部 `ffprobe`（`shutil.which` 探测）；其余 torch/numpy/Pillow/safetensors/av 由 ComfyUI 自带 |
 
 ## 1. 节点清单（11 个，category 全 `EzFlex`）
@@ -30,7 +30,8 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - 输入隐藏 `config`；输出 `MODEL/CLIP/VAE 1..N`（类 `RETURN_TYPES` 运行期/前端同步，编辑时类型化）。`MAX_PORTS_PER_TYPE = 32`。
 - `parse_config` 校验 loader 类型/extra；`load_checkpoint/load_unet/load_clip/load_vae` 与内置节点同款，device/weight_dtype/clip_type 都有白名单校验。
 - **LoRA 串联**：按 id 顺序依次 `load_lora_for_models`，`strength_model/strength_clip` 取自 `extra`；**目标 `targetId` 为空则该 LoRA 被跳过**（新增 LoRA 会自动指向第一个主加载器；把已有行切成 lora 后不会自动补，需手选目标）。
-- 「⧉ 浏览」弹窗：读 LoraManager 的 `<模型名>.metadata.json` + 同目录预览图（`/models_combo/lora_meta`、`/lora_meta_detail`、`/preview`）。
+- **触发词串输出**：配置里只要有 lora 行就多一个固定 STRING 口 `trigger_words`（**固定排最后，不动前面 model/clip/vae 的顺序与复用**）；值 = 按 LoRA 顺序把各自 LoraManager `<模型>.metadata.json` 的触发词用 ", " 拼起来（没触发词 / 没 file / 没 metadata 的跳过）。**触发词取 `_lora_trained_words()`：顶层 `trainedWords` 为空就退回 `civitai.trainedWords`（实机 LoraManager 顶层就是空的，C 站的词在 civitai 下面）**，再退回 `activation_text`。没接 lora 就不加这个口。前后端同步点：`_mc_output_types` 与前端 `updatePorts` 都按同一条件追加。
+- 「⧉ 浏览」弹窗：读 LoraManager 的 `<模型名>.metadata.json` + 同目录预览图（`/models_combo/lora_meta`、`/lora_meta_detail`、`/preview`）。标签行最右多一个**「已加载」**页：它不是另一种视图，而是**一个筛选**（`_loadedFileSet()` 按文件名匹配节点里已选的模型文件），筛出来的就是**普通模型卡**（和 LoRA 页同一套卡片）。注意它只覆盖 LoraManager 有索引的 checkpoint / unet / lora（clip/vae 不在 LoraManager 索引里，故不出现）。
 - 实例 API：`node._ezComboAPI`。
 
 ### FreeLatent（分辨率 / Latent 选择器，V3 `io.ComfyNode`）
@@ -71,7 +72,10 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - **标签提示**：标签面板「标签提示」开关（localStorage `ezflex.tagHint`）→ 四个输入处打字弹候选（英文+中文），见 §10.6。
 - **画师写法**：面板「画师写法」按钮（在「标签提示」后）按库存 `libs[库].artist`（'' / '@' / 'artist:'）→ `tpFmt` 给画师标签（CSV category=1）加前缀，只在插入/已插入框显示，搜索和卡片不变。后端 `_ph_libs_clean` 已放行 `artist`（**要重启 ComfyUI 才持久化**）。
 - **面板布局**：工具栏行 = 标签库下拉（排第一、不写字只悬停提示、变窄时**先压它**）→ 搜索（`flex:0 1 130px`，尽量留着）→ 筛选/排序/+添加标签/标签提示/引用画师；四个小图标单独一行（收起分组栏只收这行）；标题栏只有「全屏 / ✕」。
-- 标签系统语义 / 规则 / 存储：完整口径见 §10（两套空间：库侧 `place/fav/meta`，我的侧 `mine` 副本；伪行 全部/已收藏/我的标签；固定真节点「未分类」；**临时分类已删除**）。当前 PH_BUILD = 2026-09-14-cards134。
+- 标签系统语义 / 规则 / 存储：完整口径见 §10（两套空间：库侧 `place/fav/meta`，我的侧 `mine` 副本；伪行 全部/已收藏/我的标签；固定真节点「未分类」；**临时分类已删除**）。当前 PH_BUILD = 2026-09-14-cards136。
+- **总体编辑单卡折叠 / 标签批量移除预览图**：小标题行标题框后面加一颗 chevron（`.eph-all-fold`）单张收正文，状态按卡片 id 记在 `_allClosed`（重建块还原、删卡即清）；工具栏那颗仍是全局收起**小标题行**，两者靠 `.eph-all:not(.collapsed)` 隔开。标签批量栏加「移除预览图」（`tagRemoveSelPreviews`，按名字去重删记录 `preview`，二次确认）。生成预览图是**覆盖**（`t.preview = …`，非追加）；**删除标签时**预览 base64 随 `tpDropPreview` 一起清掉（清完没别的含义的空记录整个回收），其余操作不自动清，只落在 §10.9 的 `ezflex_prompt_tags.json`。
+- **随机 tag**：工具栏「排序 | 随机 | ＋新增标签」。弹窗每行 = [分类按钮（点开 = 与「移动至」同一套 `tpCatPickMenu` 右侧层叠菜单，树根 CSV 分类 / 细分大类）+ 数量（居中、无上下箭头）+ 开关 + 减号]，右上「恢复默认随机组 / ＋新增随机分类」，右下「保存随机设置 / 生成随机tag」。弹窗里改的是**草稿**，点「保存随机设置」或「生成随机tag」才写 localStorage `ezflex.randGroups`（键 `{cat,n,on}`；关闭不保存）。默认六组 = 画师(`c1`)/角色(`c4`)/人物/服饰/表情动作/场景。生成按组抽样；标签面板「生成随机tag」先清掉已插入的标签再生成（不再累加）。右键入口三处：卡片菜单（在「编辑标签」和「生成预览」之间）/ 卡片区空白 / 已插入芯片面板空白。卡片弹窗工具栏在**「合」前面**加了「自动随机tag」（绿 = 运行期每次排队按当前设置重写本卡内容、灰 = 不重写；按卡片记 `autoRand`）和「随机tag」（单点：清空本卡再生成一次）——两者都**先清空再生成**。运行期随机在 `api.queuePrompt` 包装里做（`phRandPatchPrompt`）：**既改本次提交的 prompt（执行用这一份，不动磁盘上的工作流），也写回画布上的卡片**（`card.content` 覆盖 + `syncToConfig` + `refreshUI`，打开着的卡片弹窗同步换掉），所以执行完能看到随机结果、也能接着编辑；抽不到 tag 时**不清空卡片**并在控制台 warn（提示检查随机组 / 标签库）。HTTP API 直连不经前端则保持原内容。
+- **实时接收卡**：卡片右键「实时接收文本卡（可编辑）」= 卡片 `liveIn`。接了 `card_in_i` 时**不变灰、正文可编辑**（其他卡照旧"覆盖 + 置灰"）；运行期**以卡片正文为准**（正文空才用外部输入兜底），并把收到的原文用 `ui.recv = [{id,text}]` 回传：前端在源变了时刷新卡片、源不变时**保留你在卡片里的临时编辑**（例如临时加个提升触发概率的词，不动 LoRA 本身的触发词）。**运行期三个自动优化一律不作用到实时卡**：只输出它的默认正文，不单独优化、不用优化槽，也不进整体优化的输入（整体优化结果里再把它的原文原样拼回去）。前端还会在 **ModelsCombo 配置变化 / 连线变化 / 载入**时直接按上游配置拉触发词（`phPullLiveCards`，metadata 按 file 缓存），**不用等运行**就能刷新。
 - ⚠️ `_ph_libs_clean` 必须保留 `libs[lib].groups/place/fav/meta`、`_ph_tags_clean` 必须保留 `mine`（曾漏 → 库分组树/归类每次保存被冲掉、删掉的标签刷新又回来）；`tag_store_test.py` 钉住。
 
 ### MediaLoader / MediaOut
@@ -111,6 +115,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 13. **排布节点别用 `node.pos` / `getBounding()`**：视觉顶 = `pos[1] - NODE_TITLE_HEIGHT`；`getBounding()` 在未 measure 时是脏值。
 14. 删死代码要**精确匹配 + 断言**（曾批量误删致 NameError）；静态扫描把 `_dev_tests/` 一起算。
 15. 3D 用**本地离线** three.js（`web/libs|utils|curves`），serve 走 `/preview_any/3d/{path}`。
+16. **socket 黑框标签**（5 个节点各一份 `installSocketLabels`，改要一起改）：显隐判断必须用**当前渲染的图** `app.canvas.graph`（`|| app.graph` 兜底）——用 `app.graph` 会把子图里的标签全隐藏；`_ezRoot` 未连接或 rect 无效时要 **hide 标签再 return**，不能直接 return（否则快速平移、控件被临时摘掉时标签会冻在屏幕上，看着像粘在左侧工具栏）。
 
 ## 6. 性能设计（EZ_PERF）
 
@@ -130,7 +135,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - [ ] 综合媒体端口目前只计数/引用，不参与合并文本。
 - [ ] 图生图/视频生视频、图像缩放等后续节点。
 - [ ] 提示词规范缺官方条目（素材数量/时长上限、字幕/水印约束、Kling 长度上限、负面提示词处理等）。
-- [ ] 仓库待 `git push`（V1.2.4）。
+- [ ] 仓库待 `git push`（V1.2.5）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是 `None` 语义（README 已说明）。
 
@@ -139,6 +144,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 ```powershell
 $root="<ComfyUI>"; $py="$root\.venv\Scripts\python.exe"; $d="$root\custom_nodes\Comfyui-EzFlex-Presets"; $t="$d\_dev_tests"
 $env:PYTHONIOENCODING="utf-8"
+New-Item -ItemType Directory -Force -Path "$t\_tmp" | Out-Null   # 干净检出也能跑：下面 JS 语法检查的副本放这
 & $py -c "import ast,io; ast.parse(io.open(r'$d\__init__.py',encoding='utf-8').read()); print('PY OK')"
 & $py "$t\undefined_names.py"; & $py "$t\route_audit.py"
 foreach($f in (Get-ChildItem "$d\web" -Filter *.js -Recurse)){ $tmp=Join-Path $t "_tmp\chk_$($f.BaseName).mjs"; Copy-Item $f.FullName $tmp -Force; node --check $tmp }
@@ -146,8 +152,31 @@ foreach($s in @('loader_contract_test.py','media_merge_test.py','preview_fastpat
 foreach($s in @('import_test.mjs','media_out_prune_test.mjs','media_index_test.mjs','preset_mode_test.mjs','tag_panel_test.mjs')){ node "$t\$s" }
 ```
 
-- 15 套件 + 静态扫描全绿基线；`route_security_test.py` 现 48 条（路径逃逸/根外转存/本机限/Origin null/跨站/scheme、apiKey 掩码、upload 限制、outputs 截断、重定向逐跳、出站白名单）。
-- `_dev_tests/extensions|scripts|_tmp` 为跑测试自动生成，可随时删。
+- 基线：**17 套件 + 4 个静态扫描全绿**。`_dev_tests` 不入库（见 `.gitignore`）：测试里写死了本机 ComfyUI 绝对路径，换机器跑不了。旧会话留下的 `_tmp`（一次能到 16 MB / 800 文件）与 `extensions|scripts` 全是跑测试自动生成，已清；随时可删、别提交。
+
+| 文件 | 钉住什么 |
+|---|---|
+| `loader_contract_test.py` | MediaLoader 三个加载函数与内置节点同款：图像 `[1,H,W,3]`、音频 `[1,C,T]`、视频 `VideoFromFile` |
+| `media_merge_test.py` | MediaOut 卡片/卡片组/分组：图片→批量张量、音频→拼轨、文本→合并；类型/尺寸不一致明确报错 |
+| `preview_fastpath_test.py` | PreviewAny 文件型视频/音频不重新编码 |
+| `preview_save_test.py` | PreviewAny 存档：存原图、PNG 带 workflow/prompt、格式转换也从原图转 |
+| `preview_types_test.py` | 98 条「ComfyUI 能产出的值类型」都能被 PreviewAny 接收，已知类型不许落裸 repr |
+| `prompt_helper_test.py` | 合并规则（mergeSep/空卡/card_in）+ 卡片存档往返与名称拒绝 + API 参数映射 + 媒体收集 + 规范编译 + 运行期优化矩阵 |
+| `prompt_helper_dock_test.py` | 平铺态四个浮层的记忆/恢复、尺寸版本闸、`_phOnClose` 落盘 |
+| `ui_ux_test.py` | 平铺 / 中英实时切换 / 工具条收起 / 卡片弹窗标题 / Nodes2.0 可点的静态接缝 |
+| `dynamic_types_test.py` | `_ez_sync_dynamic_types` 两条不变量：长度只增不减 + 动态槽统一 `*` |
+| `route_security_test.py` | 48 条：路径逃逸/根外转存/本机限/Origin null/跨站/scheme、apiKey 掩码、upload 限制、outputs 截断、重定向逐跳、出站白名单 |
+| `i18n_test.py` | schema 文案全英文；`ezT` 词条与 `EZ_ZH` 一一对上（现 998 用 / 1341 有）；`_i18n/*.json` 已并入 |
+| `tag_store_test.py` | 标签分类树/库分组树/记录存盘往返（含 `collectedFrom`、preview 上限、非法名称拒绝） |
+| `import_test.mjs` | 按 `/extensions/EzFlex/` 深度导入真实模块，抓漏 import / 循环依赖 / 模块级报错 |
+| `media_out_prune_test.mjs` | 运行时把「已禁用但仍连着」的输入从提交 prompt 摘掉，画布/连线/工作流不动 |
+| `media_index_test.mjs` | 媒体编号引擎：按端口类型各自从 1、命中即终止上溯、端口没盖 `_ezFiles` 不退回整卡 |
+| `preset_mode_test.mjs` | 基础预设按 config key 判定（不能用中文名比 mode） |
+| `tag_panel_test.mjs` | 分类树新建/嵌套、库分组树、切库不丢、全选按完整匹配、标签提示（单字/中文/热度门槛/懒查）、翻页栏槽位、恢复默认标签/库 |
+
+- 静态扫描：`undefined_names.py`（模块级用而未定义的私有名）、`route_audit.py`（路由注册去重/命名）、`cjk_scan.py`（JS 非注释中文 = 待翻）、`py_ui_audit.py`（`__init__.py` 用户可见中文）。
+- 数据/词典重建脚本（留在 `_dev_tests/`；平时不跑，改数据才跑）：`_gen_tag_kind_from_wiki.py`（Danbooru wiki tag_group → `PromptHelperLib/_tag_kind.csv`，40720 行 / 8 大类）、`_gen_tag_kind.py`（同表的关键词规则版，wiki 版没覆盖的沿用它的 kind）、`_gen_zh_from_danbooru.py`（中文对照 → `_zh_CN.csv`，~61823 条）、`_i18n_merge2.py` + `_i18n/*.json` + `_i18n_base.json`（确定性重建 `web/ezflex_i18n.js` 的 EZ_ZH）。
+- 标签系统的数据 `user_data/PromptHelperLib/*.csv`（12 个：8 个标签库 + `_tag_kind` / `_zh_CN` / `_e621_species` / `_furry_extra`，约 26 MB）**必须随仓库走**，否则标签面板既没库也没中文；`.gitignore` 只放行这一类 CSV。
 - ⚠️ 源文件改写别用 PowerShell `Get-Content/Set-Content`（会毁编码），用编辑器或 Python `newline=''`。验证 JS 的副本要放工作区内（`_tmp`），别用 `%TEMP%`。
 
 ## 9. 安全与发布
@@ -156,6 +185,14 @@ foreach($s in @('import_test.mjs','media_out_prune_test.mjs','media_index_test.m
 - 路径包含性：`_ez_real/_ez_roots/_ez_inside`（realpath + commonpath，覆盖 `..`/绝对/兄弟前缀/符号链接）；`/preview_any/serve_video|serve_3d|fs|3d|folders`、`/media_loader/serve|browse|save_as` 限根。
 - 本机限定 `_ez_local`：回环 remote + 回环 Host + Origin/Referer 同源 + 拒 `Origin: null` 与 `Sec-Fetch-Site: cross-site`；覆盖 `open/pick_folder/pick_skill`、各配置写入、根登记；**V1.2.4 再补 25 条**（模型预览 / lora 元数据 / `preview_any` 文件与目录 / `media_loader serve|browse|files|upload` / 各 `*/outputs` / FreeLatent 默认预设 / 用户数据 GET）。有意不限本机的只剩 `/prompt_helper/media_target`（无敏感路径）与公开标签表。
 - 出站：`_ph_check_outbound` 主机允许列表（内置厂商 + 本机登记）+ **仅 http/https** + 每跳重定向校验 + 代理也校验；`?root=` 仅本机；模型解析 `strict`（远端只认登记根）。
+
+**V1.2.5 变更**
+- 标签系统：工具栏「排序 | 随机 | ＋新增标签」加「随机」弹窗（每行 分类层叠选择 / 数量 / 开关 / 减号；右上 恢复默认随机组 / ＋新增随机分类；右下 保存随机设置 / 生成随机tag）；卡片菜单与卡片区空白、已插入芯片面板空白加「生成随机tag」；配置存 localStorage `ezflex.randGroups`（弹窗内是草稿，保存/生成才落盘）。默认六组 = 画师 `c1` / 角色 `c4` / 人物 `k:person` / 服饰 `k:clothing` / 表情动作 `k:expression` / 场景 `k:scene`。生成一律**先清空再生成**（标签面板清已插入标签；卡片单点清本卡正文），并写回当前卡片。默认标签库 CSV 随包（`user_data/PromptHelperLib`）。删标签 / 批量「移除预览图」清预览（`tpDropPreview`）。
+- 运行期随机：卡片弹窗「合」前有「自动随机tag」（绿=生效，按卡片记 `autoRand`）与「随机tag」（单点）。自动随机在 `api.queuePrompt` 包装里做：既重写本次提交的 config（`content` 覆盖 + 清优化槽 + 滑块回默认），也写回画布卡片（`syncToConfig`+`refreshUI`，弹窗开着就同步编辑器）；抽不到 tag 不清空、控制台 warn。HTTP API 直连不经前端则不变。
+- ModelsCombo 触发词：`_lora_trained_words()` 取触发词（顶层 `trainedWords` 空则退 `civitai.trainedWords`，再退 `activation_text`）；配置里有 lora 行就加**固定的末尾 STRING 口 `trigger_words`**（按 LoRA 顺序拼、跳过空的；不动前面 model/clip/vae 顺序）。浏览弹窗标签行加「已加载」页 = 按节点已选文件筛出的**普通模型卡**。
+- PromptHelper「实时接收卡」（卡片右键，记 `liveIn`）：接 `card_in` 不变灰、正文可编辑，运行期以正文为准（空才用外部输入兜底），`ui.recv` 回传、源变才刷新；**三种运行期优化一律不作用到它**（原文原样并入，不送优化输入）。前端在 ModelsCombo 配置变化 / 连线变化 / 载入时直接拉触发词（`phPullLiveCards`，按 file 缓存），不必等运行。
+- 修复：黑色 socket 标签子图不显示 + 快速平移残留 —— 5 个节点各一份 `installSocketLabels`，显隐判断改用当前渲染图 `app.canvas.graph`（`|| app.graph` 兜底），`isConnected`/rect 无效时 **hide 而非直接 return**，出图由 remove 改 hide（回来还能显示）。
+- 总体编辑：单卡折叠（小标题行 chevron，按卡片 id 记状态）。
 
 **V1.2.4 变更**
 - 后端：修 `prompt_queue.put` 队列项少一个元素（`prompt_worker` 取 `item[5]` 抛 IndexError → 执行线程退出 → 之后所有排队任务都不跑、生图永远 0/1）；删 4 个零引用静态方法（`_video_to_webm_np`/`_video_np_summary`/`_model_file_path`/`_format_meta`）。
@@ -216,7 +253,7 @@ _tagDoc.libs[libId] = { name, groups, place{名→分类id}, fav[名], meta{名:
 
 ### 10.4 收藏 / 删除
 - ★ 按卡片的 side 收藏，两侧独立。筛选/排序菜单选中项必须写 `'✓ ' + 文案`（开头打勾才会被 `cmMenu` 渲染成 `.on`）。
-- 删卡片：库侧原有 → 记 `hidden`；库侧我加的 → 去 `place`；我的副本 → `tpMineDrop`（若还有库侧元数据则留记录）。
+- 删卡片：库侧原有 → 记 `hidden`；库侧我加的 → 去 `place`；我的副本 → `tpMineDrop`（若还有库侧元数据则留记录）。删除时一律再走 `tpDropPreview` 把**预览图一起清掉**（base64 不留在 json 里；预览可重新生成）。注意 `tpMineDrop` 也被「我的分类 → 库」移动调用，那条路径**不清预览**。
 - 删分类 = 里面的 mine 副本一起删（库侧元数据记录留着）；库侧 `place` 指向它也清掉。
 
 ### 10.5 恢复默认
@@ -225,8 +262,9 @@ _tagDoc.libs[libId] = { name, groups, place{名→分类id}, fav[名], meta{名:
 
 ### 10.6 功能清单（一屏）
 - 库下拉右键：生图设置… / 导入标签库… / 重命名库 / 删除库(停用) / 恢复默认库 / 设置为默认库。
-- 工具行：树·列表 / 搜索 / 筛选(已收藏、排除 e621、排除匹配文字、排除分类) / 排序(默认、名称、数量) / +新增标签 / 批量管理 / 展开·收起·收侧栏。
+- 工具行：树·列表 / 搜索 / 筛选(已收藏、排除 e621、排除匹配文字、排除分类) / 排序(默认、名称、数量) / 随机 / +新增标签 / 批量管理 / 展开·收起·收侧栏。
 - 卡片点击=插入或取消插入；批量模式或 Ctrl/Cmd/Shift=多选；选中 `.sel`，已插入 `.on`，我的副本是**虚线框**；批量选中时**右键也跟着整批**（生成/移动/删除后带数量）。
+- 批量模式底部栏：全选 / 反选 / 移动至分组 / 生成预览图 / 移除预览图 / 删除 / 完成。
 - 卡片右键：新增标签 / 编辑标签 / 生成预览图 / 移动至 / 批量管理 / [恢复默认标签] / 删除标签。
 - 芯片（已插入区）：悬停权重面板（`()[]{}` 加层、数值只用 `()`）、单击手动编辑、长按 300ms 拖动排序、右键(保存标签 / 编辑标签，库内没有的只给保存)。
 - 标签提示 `tg*`：卡片编辑器 / 总体编辑 / 搜索框 / 已插入框打字弹候选，懒查 + 滚到底续扫，热度门槛 1字≥1000 / 2字≥100 / 3字不限。
@@ -259,8 +297,8 @@ _tagDoc.libs[libId] = { name, groups, place{名→分类id}, fav[名], meta{名:
 | 标签库（只读） | `user_data/PromptHelperLib/*.csv` | `tag,category,count,"aliases"`；Danbooru 140779 行 |
 | 细分大类 | `.../_tag_kind.csv` | `tag,kind`，40720 行；8 个顶层 person 10025 / object 9479 / clothing 8347 / sex 3617 / scene 3336 / style 2897 / expression 2514 / camera 505；**全部是 `顶层/子类`**，所以默认树里父行 = 子行之和 |
 | 中英对照 | `.../_zh_CN.csv` | `tag,zh`；已并到 ~61823 条；中文列 + 中文搜索的唯一来源 |
-| 用户数据 | `<user_directory>/ezflex_prompt_tags.json` | `{categories, tags, libs}`；CSV 永不改写 |
-| 生图设置 | `user_data/PromptHelperGen/settings.json` | 工作流 api.json 文本 + 模型/参数/固定提示词 |
+| 用户数据 | `<user_directory>/ezflex_prompt_tags.json` | `{categories, tags, libs}`；标签预览图 = `tags[].preview`（base64 data URL，单条 <400000 字符；两侧共用；删标签时随 `tpDropPreview` 清掉，其余不自动清）；CSV 永不改写 |
+| 生图设置 | `user_data/PromptHelperGen/settings.json` | 工作流 api.json 文本 + 模型/参数/固定提示词。**不入库**（模型路径是本机的）；文件缺失时用代码默认：后端 `_PGEN_DEFAULT`、前端 `openGenSettings` 字面量 + `GEN_DEF_POS/GEN_DEF_NEG`（512²、steps 20、cfg 6、euler/simple、webp/80/384 + 那对 Anime 质量正负提示词；`builtinMode` 默认 `ckpt`）。模型字段留空由用户选，ckpt 模式会自动挑第一个 checkpoint |
 
 ### 10.10 待办（标签相关）
 - 生图未实测（需要真实 api.json 跑一张）。

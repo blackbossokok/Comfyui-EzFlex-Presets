@@ -63,7 +63,7 @@ import comfy.sd
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.4"
+__version__ = "1.2.5"
 
 WEB_DIRECTORY = "./web"
 
@@ -380,9 +380,27 @@ def _civitai_summary(c):
     }
 
 
+def _lora_trained_words(meta):
+    """触发词：LoraManager 顶层 trainedWords 常为空，退回 civitai.trainedWords（C 站数据在那儿）。"""
+    if not isinstance(meta, dict):
+        return []
+    tw = meta.get("trainedWords")
+    if not (isinstance(tw, list) and tw):
+        civ = meta.get("civitai")
+        if isinstance(civ, dict) and isinstance(civ.get("trainedWords"), list):
+            tw = civ.get("trainedWords")
+    if not isinstance(tw, list):
+        tw = []
+    if not tw:
+        at = meta.get("activation_text")
+        if isinstance(at, str) and at.strip():
+            tw = [at]
+    return [str(w).strip() for w in tw if str(w or "").strip()]
+
+
 def _lora_meta_summary(type_, rel, meta):
     tags = meta.get("tags")
-    trained = meta.get("trainedWords")
+    trained = _lora_trained_words(meta)
     creator_meta = meta.get("creator")
     author = meta.get("author")
     if not author and isinstance(creator_meta, dict):
@@ -688,7 +706,31 @@ def _mc_output_types(loaders):
             out_types.append("CLIP"); out_names.append(nm + "_clip")
         if l.get("type") in ("checkpoint", "vae"):
             out_types.append("VAE"); out_names.append(nm + "_vae")
+    if any(l.get("type") == "lora" for l in (loaders or [])):
+        out_types.append("STRING"); out_names.append("trigger_words")   # 触发词串固定排最后
     return out_types, out_names
+
+
+def _mc_trigger_words(loras):
+    """按 LoRA 顺序拼触发词串（LoraManager <模型>.metadata.json 的 trainedWords）；没有触发词的跳过。"""
+    words = []
+    for lora in (loras or []):
+        rel = str(lora.get("file") or "").strip()
+        if not rel:
+            continue
+        try:
+            path = folder_paths.get_full_path("loras", rel)
+        except Exception:
+            path = None
+        if not path:
+            continue
+        try:
+            with open(os.path.splitext(path)[0] + ".metadata.json", "r", encoding="utf-8-sig") as fh:
+                meta = json.load(fh)
+        except Exception:
+            continue
+        words.extend(_lora_trained_words(meta))
+    return ", ".join(words)
 
 
 async def _mc_outputs(req):
@@ -898,6 +940,7 @@ class ModelsComboLoader:
             loras,
             key=lambda x: (x["id"] if isinstance(x["id"], (int, float)) else 0),
         )
+        applied = []
         for lora in ordered_loras:
             target = by_id.get(lora["target_id"])
             if target is None:
@@ -921,6 +964,7 @@ class ModelsComboLoader:
                 target["clip"] = new_clip
             elif clip is not None:
                 target["clip"] = clip
+            applied.append(lora)
 
         # 动态输出：按「加载器顺序」逐个产出其拥有的端口（checkpoint=model/clip/vae 相邻、unet=model、clip=clip、vae=vae，
         # lora 不占输出端口）。保证与前端 updatePorts 的顺序一致，其它节点接线时类型才对得上。
@@ -934,6 +978,10 @@ class ModelsComboLoader:
                 out_types.append("CLIP"); out_names.append(nm + "_clip"); outputs.append(entry["clip"])
             if loader["type"] in ("checkpoint", "vae") and entry["vae"] is not None:
                 out_types.append("VAE"); out_names.append(nm + "_vae"); outputs.append(entry["vae"])
+
+        if loras:   # 触发词串：按 LoRA 顺序拼（没有触发词的跳过）；没接 LoRA 就不加这个口
+            out_types.append("STRING"); out_names.append("trigger_words")
+            outputs.append(_mc_trigger_words(applied))
 
         self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
         self.__class__.RETURN_NAMES = tuple(out_names)
@@ -3952,6 +4000,7 @@ def parse_prompt_cards(config):
             "useOptimized": bool(item.get("useOptimized")),
             "ruleId": item.get("ruleId") or "",
             "mergeOff": bool(item.get("mergeOff")),          # 「合」关掉 = 不进合并输出
+            "liveIn": bool(item.get("liveIn")),              # 实时接收卡：card_in 不覆盖，卡片正文为准（可在卡片里编辑）
             "rule": item.get("rule") if isinstance(item.get("rule"), dict) else {},   # 前端 syncToConfig 解析好的规范
         })
     return cards
@@ -7524,15 +7573,29 @@ class PromptHelperNode:
 
         # 每张卡的「默认」正文（外部 card_in_N 覆盖该卡）；「合=绿」卡片的默认合并 = 总体层说的那份「默认」
         defaults = []
+        recv = []   # 「实时接收卡」本轮收到的外部文本（回传前端写进卡片，源变了就刷新）
         for i in range(count):
             raw = kwargs.get(f"card_in_{i + 1}")
-            if raw is not None and str(raw).strip() != "":
+            has_raw = raw is not None and str(raw).strip() != ""
+            own = cards[i].get("content") or _ph_html_to_text(cards[i].get("contentHTML")) or ""
+            if has_raw and cards[i].get("liveIn"):
+                # 实时接收卡：外部文本只在卡片正文为空时兜底；正文为准（用户可在卡片里临时加词）
+                recv.append({"id": cards[i].get("id"), "text": str(raw)})
+                defaults.append(own if own.strip() else str(raw))
+            elif has_raw:
                 defaults.append(str(raw))   # 已连接的外部文本输入：覆盖该卡
             else:
-                defaults.append(cards[i].get("content") or _ph_html_to_text(cards[i].get("contentHTML")) or "")
+                defaults.append(own)
         _in_merge = [i for i in range(count) if not (isinstance(cards[i], dict) and cards[i].get("mergeOff"))]
-        default_src = sep.join(defaults[i] for i in _in_merge if defaults[i].strip())
+        # 实时接收卡：运行期绝不送优化（三个自动优化开关都不作用到它），原样并入输出
+        live_idx = set(i for i in range(count) if isinstance(cards[i], dict) and cards[i].get("liveIn"))
+        opt_merge = [i for i in _in_merge if i not in live_idx]
+        live_merged = sep.join(_ph_compile_card(defaults[i], cards[i]) for i in _in_merge if i in live_idx and defaults[i].strip())
+        default_src = sep.join(defaults[i] for i in opt_merge if defaults[i].strip())
         default_merged = sep.join(_ph_compile_card(defaults[i], cards[i]) for i in _in_merge if defaults[i].strip())
+
+        def _join_live(base):
+            return sep.join([x for x in (base or "", live_merged or "") if str(x).strip()])
 
         optimize = self._ph_optimize_runner(opt, tg, _ph_gather_media(kwargs)) if auto_used else None
 
@@ -7546,19 +7609,19 @@ class PromptHelperNode:
         if auto_used:
             if has_opt:
                 if overall.get("useOptimized") or not default_src.strip():
-                    merged, overall_used = _ph_compile_card(overall["text"], rule_card), True
+                    merged, overall_used = _join_live(_ph_compile_card(overall["text"], rule_card)), True
                 else:
-                    merged = default_merged
+                    merged = default_merged      # 已含实时卡原文
             elif default_src.strip():
                 opt_text = optimize(default_src)
-                merged, overall_used = _ph_compile_card(opt_text, rule_card), True
+                merged, overall_used = _join_live(_ph_compile_card(opt_text, rule_card)), True
             else:
-                merged = ""      # 用户自己没写
+                merged = _join_live("")          # 用户自己没写；只有实时卡时也照常输出
         else:
             # 三个开关全关：同一套槽位规则，只是不做任何优化调用 ——
             # 总编辑滑块=默认 → 默认合并（合=灰不并）；=优化 → 整体优化内容（空就空，不回落）
             if overall.get("useOptimized"):
-                merged = _ph_compile_card(overall["text"], rule_card)
+                merged = _join_live(_ph_compile_card(overall["text"], rule_card))
                 overall_used = True
             else:
                 merged = default_merged
@@ -7571,12 +7634,14 @@ class PromptHelperNode:
         for i in range(count):
             card = cards[i]
             raw = kwargs.get(f"card_in_{i + 1}")
-            if raw is not None and str(raw).strip() != "":
+            if raw is not None and str(raw).strip() != "" and not card.get("liveIn"):
                 ports.append(str(raw)); continue
             d = defaults[i]
             o = str(card.get("contentOptimized") or "")
             in_merge = not card.get("mergeOff")
-            if auto_used and not in_merge:
+            if card.get("liveIn"):
+                ports.append(d)   # 实时接收卡：只输出默认正文，不优化、不用优化槽
+            elif auto_used and not in_merge:
                 if not d.strip() and not o.strip():
                     ports.append("")
                 elif not d.strip():
@@ -7610,6 +7675,8 @@ class PromptHelperNode:
                 "useOverallOptimized": [overall_used],
                 # 运行期动过的卡片：[{id, contentOptimized?, useOptimized?}]
                 "cardUpdates": [card_updates],
+                # 「实时接收卡」本轮收到的外部文本：[{id, text}]（前端据此更新卡片内容）
+                "recv": [recv],
             },
             "result": tuple([merged] + compiled),
         }

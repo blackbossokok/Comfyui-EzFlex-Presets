@@ -612,17 +612,16 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         node._flOutEls = all.map((x) => x.el);
       }
     };
+    const hideAll = () => { all.forEach((item) => { try { item.el.style.display = 'none'; } catch (_) { /* 忽略 */ } }); };
     const update = () => {
       const rootEl = node._flRoot;
-      if (!rootEl || !rootEl.isConnected) return;
-      if (app && app.graph && node.graph !== app.graph) {
-        (node._flOutEls || []).forEach((x) => { try { x.el.remove(); } catch (_) { /* 忽略 */ } });
-        node._flOutEls = [];
-        return;
-      }
+      if (!rootEl || !rootEl.isConnected) { hideAll(); return; }   // 控件没挂上/被临时摘掉：先把标签收掉，别留在屏幕上
+      // 只在「当前渲染的那张图」里显示：子图（app.canvas.graph）也算当前图，别拿 app.graph 比
+      const shown = (app && app.canvas && app.canvas.graph) || (app && app.graph) || null;
+      if (shown && node.graph && node.graph !== shown) { hideAll(); return; }
       let rect = null;
-      try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
-      if (!rect || rect.width <= 0) return;
+      try { rect = rootEl.getBoundingClientRect(); } catch (_) { hideAll(); return; }
+      if (!rect || rect.width <= 0) { hideAll(); return; }
       // 节点被缩放/平移到视口外或缩得太小 → 隐藏黑框，避免残留在屏幕左侧
       const nodeW0 = (node.size && node.size[0]) || 1;
       const sx0 = rect.width / nodeW0;

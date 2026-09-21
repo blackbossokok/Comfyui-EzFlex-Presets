@@ -36,7 +36,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-09-14-cards134';
+const PH_BUILD = '2026-09-14-cards145';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -459,6 +459,7 @@ const CSS = `
 .eph-ctitle-input:empty::before{content:attr(data-ph);color:#c4cdda;}  /* 空标题占位 */
 .eph-badge{font-size:9px;font-weight:480;color:#fff;background:#5f6b7a;padding:0 6px;border-radius:100px;line-height:15px;white-space:nowrap;flex:0 0 auto;}
 .eph-badge-opt{background:#2563eb;}
+.eph-badge-live{background:#2f9e63;}
 .eph-preview{flex:1 1 auto;min-width:0;font-size:11px;color:#8a9aa8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left;}
 .eph-card.linked{opacity:.55;background:#f3f5f9;border-color:#e2e8f0;}
 .eph-card.linked .eph-title{opacity:.5;}
@@ -694,6 +695,13 @@ const CSS = `
 .eph-all-block-hd{display:flex;align-items:center;gap:8px;font-size:11px;color:#9aa7b5;padding:6px 18px;border-radius:0;margin:0 -8px 6px;background:#f4f6fa;}
 .eph-all-block-hd .eph-merge-btn{margin-left:auto;}
 .eph-all-block-hd .eph-all-ref{margin-left:0;}
+.eph-all-fold{display:inline-flex;align-items:center;background:transparent;border:none;color:#9aa7b5;cursor:pointer;padding:0 2px;line-height:1;}
+.eph-all-fold:hover{color:#334155;}
+.eph-all-fold svg{transition:transform .15s;}
+.eph-all-block.closed .eph-all-fold svg{transform:rotate(-90deg);}
+/* 单张卡片折叠：只收正文，小标题行留着；工具栏的「收起小标题」是全局隐藏小标题行，两者互不干扰 */
+.eph-all:not(.collapsed) .eph-all-block.closed .eph-all-block-body{display:none;}
+.eph-all:not(.collapsed) .eph-all-block.closed{padding-bottom:0;}
 .eph-all.collapsed .eph-all-block-hd{display:none;}
 .eph-all-num{font-weight:700;color:#8a99ae;flex:0 0 auto;}
 .eph-all-title{flex:0 0 150px;min-width:0;width:150px;font-weight:600;color:#2b3448;cursor:text;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;line-height:22px;height:22px;padding:0 6px;border:1px solid transparent;border-radius:6px;background:transparent;outline:none;text-align:left;}
@@ -999,6 +1007,18 @@ audio.eph-mv-media::-webkit-media-controls-timeline,audio.eph-rp-media::-webkit-
 .eph-tp-row2.tp-collapsed > *{display:none;}
 .eph-tp-row2.tp-collapsed > .eph-tp-side{display:inline-flex;}
 .eph-tp-search{flex:0 1 130px;min-width:92px;}   /* 搜索框尽量留着 */
+/* 随机 tag 弹窗：每行 = 分类下拉 + 数量 + 开关 + 减号 */
+.eph-rand-list{display:flex;flex-direction:column;gap:6px;max-height:52vh;overflow:auto;padding:2px 0 6px;}
+.eph-rand-row{display:flex;align-items:center;gap:8px;}
+.eph-rand-cat{flex:1 1 auto;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.eph-rand-n{width:58px;height:26px;box-sizing:border-box;font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:8px;padding:2px 6px;outline:none;background:#fff;color:#1a1f2b;text-align:center;-moz-appearance:textfield;appearance:textfield;}
+.eph-rand-n::-webkit-outer-spin-button,.eph-rand-n::-webkit-inner-spin-button{-webkit-appearance:none;appearance:none;margin:0;}
+.eph-rand-sw{width:36px;height:18px;flex:0 0 auto;border-radius:9px;border:1px solid #dce3ec;background:#e8edf5;position:relative;cursor:pointer;padding:0;transition:background .12s;}
+.eph-rand-sw::after{content:'';position:absolute;top:1px;left:1px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.18);transition:left .12s;}
+.eph-rand-sw.on{background:#86d3a4;border-color:#5cb884;}
+.eph-rand-sw.on::after{left:19px;}
+.eph-rand-del{flex:0 0 auto;background:transparent;border:none;color:#b7c1cf;font-size:15px;line-height:1;cursor:pointer;padding:1px 5px;}
+.eph-rand-del:hover{color:#e34d4d;background:#fdecec;border-radius:6px;}
 .eph-tool-item{display:flex;align-items:center;}
 .eph-tool-item.on{background:#eef2ff;color:#3730a3;font-weight:600;}
 .eph-tool-item.on::after{content:'✓';margin-left:auto;padding-left:10px;color:#4f46e5;font-weight:600;}
@@ -1480,7 +1500,9 @@ function syncEditModalTitle(node, card) {
 }
 function buildCardRow(node, card, index) {
   const linked = !!(node._ezLinkedCards && node._ezLinkedCards[card.id]);
-  const row = el('div', 'eph-card' + (linked ? ' linked' : '')); row.dataset.id = card.id;
+  const live = !!card.liveIn;
+  // 「实时接收卡」即使接了 card_in 也不变灰（正文可编辑、以卡片内容为准）
+  const row = el('div', 'eph-card' + (linked && !live ? ' linked' : '')); row.dataset.id = card.id;
   row.title = (card.title ? card.title + ' — ' : '') + ezT('Click to edit card');
   const handle = el('span', 'eph-handle'); handle.textContent = '⠿';
   const idx = el('span', 'eph-index'); idx.textContent = String(index + 1);
@@ -1495,6 +1517,7 @@ function buildCardRow(node, card, index) {
   const prov = (card.provider || card.apiUrl) ? (card.provider || 'API') : '';
   if (prov) { badge = el('span', 'eph-badge'); badge.textContent = prov; badge.title = [card.provider, card.model, card.apiUrl].filter(Boolean).join(' · '); }
   if (badge) ctitle.appendChild(badge);
+  if (live) { const lb = el('span', 'eph-badge eph-badge-live'); lb.textContent = ezT('Live'); lb.title = ezT('Live-editable input card'); ctitle.appendChild(lb); }
   // 「优 / 默」跟随该卡滑块：在「优化提示词」页签显示优，在「默认」页签显示默
   const ob = el('span', 'eph-badge' + (card.useOptimized ? ' eph-badge-opt' : ''));
   ob.textContent = card.useOptimized ? ezT('Opt') : ezT('Def');
@@ -1527,6 +1550,7 @@ function buildCardRow(node, card, index) {
     cmMenu(e.clientX, e.clientY, [
       [ezT('Save this card'), () => saveSingleCard(node, card)],
       [ezT('Edit card'), () => openEditModal(node, card.id)],
+      [(card.liveIn ? '✓ ' : '') + ezT('Live-editable input card'), () => { card.liveIn = !card.liveIn; syncToConfig(node); refreshUI(node); }],
     ]);
   });
   if (node._ezBatch && batchSelIds(node).has(card.id)) row.classList.add('on');
@@ -1692,7 +1716,19 @@ function editModalEl() {
     const nd = _editModal && _editModal._node; const c = sameNodeCard(nd); if (!nd || !c) return;
     c.mergeOff = !c.mergeOff; syncToConfig(nd); updMerge(); refreshUI(nd);   // 同步面板卡片列表上的「合」
   });
-  toolbar.appendChild(mergeBtn);
+  // 随机 tag：自动（运行期每次排队重生成）/ 单点（立刻清空本卡再生成）—— 放在「合」前面
+  const autoRandBtn = el('button', 'eph-merge-btn'); autoRandBtn.type = 'button'; autoRandBtn.textContent = ezT('Auto random tag');
+  autoRandBtn.title = ezT('Runtime at queue: clear this card and regenerate it with random tags every time');
+  const updAutoRand = () => { const c = sameNodeCard(_editModal && _editModal._node); autoRandBtn.classList.toggle('on', !!(c && c.autoRand)); };
+  autoRandBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const nd = _editModal && _editModal._node; const c = sameNodeCard(nd); if (!nd || !c) return;
+    c.autoRand = !c.autoRand; syncToConfig(nd); updAutoRand();   // 同步面板卡片列表
+  });
+  const randOnceBtn = el('button', 'eph-btn'); randOnceBtn.type = 'button'; randOnceBtn.textContent = ezT('Random tag');
+  randOnceBtn.title = ezT('Clear this card and generate random tags once');
+  randOnceBtn.addEventListener('click', (e) => { e.stopPropagation(); saveSelection(); tpRandomToEditor(editor); });
+  toolbar.appendChild(autoRandBtn); toolbar.appendChild(randOnceBtn); toolbar.appendChild(mergeBtn);
   body.appendChild(editor);
 
   const ft = el('div', 'eph-modal-ft');
@@ -1716,7 +1752,7 @@ function editModalEl() {
     const p = openRulePop(hintBtn, nd, { ruleId: ruleDD.value });
     p._anchor = hintBtn;
   });
-  _editModal._ruleDD = ruleDD; _editModal._hintBtn = hintBtn; _editModal._updMerge = updMerge;
+  _editModal._ruleDD = ruleDD; _editModal._hintBtn = hintBtn; _editModal._updMerge = updMerge; _editModal._updAutoRand = updAutoRand;
   ft.appendChild(timeline);
   const cancelBtn = el('button', 'eph-btn eph-btn-cancel'); cancelBtn.textContent = ezT('Cancel');
   const saveBtn = el('button', 'eph-btn eph-btn-save'); saveBtn.textContent = ezT('Save');
@@ -1800,6 +1836,7 @@ function openEditModal(node, cardId) {
   }
   if (m._ruleDD) { m._ruleDD.setItems(ruleDropdownItems(node, false)); m._ruleDD.value = _normRuleId(phRulesModel(node).ruleId) || 'none'; }
   if (m._updMerge) m._updMerge();
+  if (m._updAutoRand) m._updAutoRand();
   m._indentInput.value = String(card.indent || 0);
   if (m._toolbarToggle) applyToolbarToggle(m._toolbarToggle, !!(stateFor(node).ui && stateFor(node).ui.cardToolbar));
   m.classList.add('active');
@@ -3494,7 +3531,11 @@ function segSwitch(labelText) {
   seg.appendChild(onS); seg.appendChild(offS);
   l.appendChild(cb); l.appendChild(sp); l.appendChild(seg);
   const upd = () => { onS.classList.toggle('active', cb.checked); offS.classList.toggle('active', !cb.checked); };
-  cb.addEventListener('change', upd); upd(); cb._upd = upd; l._cb = cb;
+  // 直接点 On / Off：显式改 checked 再派发 change（preventDefault 掉 label 的隐式切换，否则会二次翻转）
+  const pick = (v) => (e) => { e.preventDefault(); if (cb.checked === v) return; cb.checked = v; upd(); cb.dispatchEvent(new Event('change', { bubbles: true })); };
+  onS.addEventListener('click', pick(true));
+  offS.addEventListener('click', pick(false));
+  cb.addEventListener('change', upd); upd(); cb._upd = upd; l._upd = upd; l._cb = cb;
   return l;
 }
 function settingsEl() {
@@ -4320,7 +4361,11 @@ function saveSettings() {
     _mediaTargetGlobal = mtCfg;
     setMediaTargetCfg(mtCfg);
     // 存全局 userdata：换节点 / 删节点 / 重启都还在
-    try { fetchApi('/prompt_helper/media_target', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mediaTarget: mtCfg }) }).catch(() => {}); } catch (_) {}
+    try {
+      fetchApi('/prompt_helper/media_target', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mediaTarget: mtCfg }) })
+        .then((r) => { if (r && r.ok === false) phTip(ezT('Failed to save the media-recognition settings: ') + 'HTTP ' + r.status); })
+        .catch((e) => phTip(ezT('Failed to save the media-recognition settings: ') + (e && e.message ? e.message : e)));
+    } catch (_) {}
   }
   syncToConfig(_settingsNode);
   syncRuleUI(_settingsNode, st.rules.ruleId);   // 卡片弹窗 / 总体编辑的规范下拉跟着一致
@@ -5155,10 +5200,21 @@ async function tagDeleteSel() {
     const side = tpKeySide(key), name = tpKeyName(key);
     if (side === 'lib') { if (lib && lib.set && lib.set.has(name)) hid.add(name); else tpPlaceSet(name, ''); }   // 库原有：记隐藏（恢复默认能回来）；我加的：去掉归类
     else tpMineDrop(name);
+    tpDropPreview(name);   // 删标签连预览图一起清（预览可重新生成）
   });
   if (st) st.hidden = Array.from(hid);
   _tpSel = new Set();
   await savePromptTags(); renderTagPanel();
+}
+// 批量移除预览图：预览存在标签记录里（两侧共用），按名字去重删 preview（本来就没有的不算）
+async function tagRemoveSelPreviews() {
+  if (!_tpSel.size) return;
+  const names = new Set(Array.from(_tpSel).map((k) => tpKeyName(k)));
+  if (!(await uiConfirm(ezT('Remove previews from ') + names.size + ezT(' tags with previews?')))) return;
+  let n = 0;
+  names.forEach((nm) => { const t = tpItem(nm); if (t && t.preview) { delete t.preview; n++; } });
+  await savePromptTags(); renderTagPanel();
+  phTip(ezT('Previews removed: ') + n);
 }
 // 统一归类：目标带 side（'mine' / 'lib'）
 async function tagMoveTo(list, side, catId) {
@@ -6020,6 +6076,13 @@ function tpMineDrop(name) {   // 删掉我的标签副本；库侧的中英/颜�
   const t = tpItem(name); if (!t) return;
   t.mine = false; delete t.fav;
   if (!t.category && !t.zh && !t.color && !t.preview && !t.weight && t.collectedFrom === undefined) _tagDoc.tags = _tagDoc.tags.filter((x) => x !== t);
+}
+// 删预览图：只有「删除标签」才调（不是「移动/恢复」）——base64 是 json 体积大头，删了可重新生成；
+// 清完没别的含义就把这条空记录整个回收（不然删过的标签还会在 json 里留个只有预览的影子）。
+function tpDropPreview(name) {
+  const t = tpItem(name); if (!t || !t.preview) return;
+  delete t.preview;
+  if (!t.mine && !t.category && !t.zh && !t.color && !t.weight && t.collectedFrom === undefined) _tagDoc.tags = _tagDoc.tags.filter((x) => x !== t);
 }
 function tpPlaceOf(name) { const st = _tpLibId ? tpLibState(_tpLibId) : null; return (st && st.place && st.place[String(name)]) || ''; }
 function tpPlaceSet(name, cat) {
@@ -7723,6 +7786,7 @@ function tpCardMenu(r, x, y) {
   const items = [];
   items.push([ezT('New tag'), () => tpEditCard({ new: true, en: '', zh: '', item: null, side: 'mine' })]);
   items.push([ezT('Edit tag'), () => tpEditCard(r)]);
+  items.push([ezT('Generate random tags'), () => tpGenerateRandom()]);
   items.push([ezT('Generate preview') + n, () => genPreviews(names)]);
   items.push([ezT('Move to group') + n, () => tagMoveMenu(x, y, keys, multi ? null : r)]);
   items.push([ezT('Batch manage'), () => tagBatchToggle(true)]);
@@ -7741,7 +7805,244 @@ async function tagDeleteOne(r) {
   } else {
     tpMineDrop(r.en);
   }
+  tpDropPreview(r.en);   // 删标签连预览图一起清（预览可重新生成）
   await savePromptTags(); renderTagPanel();
+}
+// ===== 随机 tag：分组配置（localStorage）+ 从指定分类随机抽 tag 追加到「已插入」 =====
+const RAND_LS = 'ezflex.randGroups';
+// 默认六组 = 画师(c1) / 角色(c4) / 人物 / 服饰 / 表情动作 / 场景
+const RAND_DEFAULT = [
+  { cat: 'c1', n: 1, on: true },
+  { cat: 'c4', n: 1, on: true },
+  { cat: 'k:person', n: 1, on: true },
+  { cat: 'k:clothing', n: 1, on: true },
+  { cat: 'k:expression', n: 1, on: true },
+  { cat: 'k:scene', n: 1, on: true },
+];
+let _randGroups = null;
+function randGroups() {
+  if (_randGroups) return _randGroups;
+  let out = null;
+  try {
+    const s = localStorage.getItem(RAND_LS);
+    if (s) {
+      const a = JSON.parse(s);
+      if (Array.isArray(a)) out = a.filter((g) => g && g.cat).map((g) => ({ cat: String(g.cat), n: Math.max(1, Math.min(50, parseInt(g.n, 10) || 1)), on: g.on !== false }));
+    }
+  } catch (_) { out = null; }
+  _randGroups = (out && out.length) ? out : RAND_DEFAULT.map((g) => Object.assign({}, g));
+  return _randGroups;
+}
+function randSave() { try { localStorage.setItem(RAND_LS, JSON.stringify(randGroups())); } catch (_) {} }
+// 分类候选：CSV 桶 + 细分大类（含子类，缩进显示）
+function randCatItems() {
+  const out = CAT_ORDER.map(([v, l]) => ({ value: v, label: ezT(l) }));
+  KIND_ORDER.forEach((k) => { if (KIND_LABEL[k]) out.push({ value: 'k:' + k, label: ezT(KIND_LABEL[k]) }); });
+  Object.keys(KIND_LABEL).filter((k) => k.indexOf('/') > 0).sort().forEach((k) => out.push({ value: 'k:' + k, label: '\u3000' + ezT(KIND_LABEL[k] || k.split('/')[1]) }));
+  return out;
+}
+// 某个分类里能随机到的 tag 名：尊重隐藏 / 排除兽类 / 细分表 / CSV 桶
+function tpRandPool(cat, libId) {
+  const id = libId || _tpLibId;
+  const lib = id ? _tpCache.get(id) : null;
+  if (!lib) return [];
+  const hidden = new Set(tpLibHidden(id));
+  const isKind = String(cat).slice(0, 2) === 'k:';
+  const kind = isKind ? String(cat).slice(2) : '';
+  const out = [];
+  for (let i = 0; i < lib.names.length; i++) {
+    const nm = lib.names[i];
+    if (hidden.has(nm)) continue;
+    if (_tpHideFurry && tpFurry(lib.cats[i], nm)) continue;
+    if (isKind) { const k = tpKindOf(nm); if (!k || (k !== kind && k.slice(0, kind.length + 1) !== kind + '/')) continue; }
+    else { const c = 'c' + ('01345'.indexOf(lib.cats[i]) >= 0 ? lib.cats[i] : 'x'); if (c !== cat) continue; }
+    out.push(nm);
+  }
+  return out;
+}
+// 从「随机组」抽一批 tag：标签面板一次性生成 / 卡片单点 / 排队运行期随机共用
+async function tpRandPickTags() {
+  if (!Array.isArray(_tpLibs) || !_tpLibs.length) { try { await tpLoadLibs(); } catch (_) {} }
+  const groups = randGroups().filter((g) => g.on);
+  if (!groups.length) return [];
+  if (!Array.isArray(_tpLibs) || !_tpLibs.length) { console.warn('[PromptHelper] random tag: no tag library available'); return []; }
+  let libId = _tpLibId;
+  if (!libId) { try { libId = tpDefaultLib(); } catch (_) { libId = ''; } }   // 面板没开过也要能抽
+  if (!libId) return [];
+  try { if (!_tpCache.has(libId)) await tpLoadLib(libId); } catch (_) {} 
+  try { await tpLoadKind(); } catch (_) {}
+  if (!_tpCache.has(libId)) { console.warn('[PromptHelper] random tag: tag library failed to load (' + libId + ')'); return []; }
+  const picks = [];
+  groups.forEach((g) => {
+    const pool = tpRandPool(g.cat, libId).filter((nm) => picks.indexOf(nm) < 0);
+    const n = Math.max(0, Math.min(50, parseInt(g.n, 10) || 0));
+    for (let k = 0; k < n && pool.length; k++) { const j = Math.floor(Math.random() * pool.length); picks.push(pool[j]); pool.splice(j, 1); }
+  });
+  return picks;
+}
+function tpInsertTags(ed, picks) {
+  if (ed) { try { _editorRange = phEndRange(ed); } catch (_) {} }   // 落点=编辑器末尾
+  picks.forEach((nm) => { if (_tpIns.indexOf(nm) < 0) _tpIns.push(nm); if (ed) phInsertPlain(ed, tpArtistName(nm)); });
+}
+// 把编辑器改动写回它所属的卡片 / 总体编辑（随机 tag 生成后立刻落盘，不只停在 DOM 里）
+function phCommitTargetEditor(ed) {
+  if (!ed) return;
+  if (_editModal && _editModal.classList.contains('active') && ed === _editModal._editor) { try { editModalCommit(_editModal._node); } catch (_) {} return; }
+  if (_allModal && _allModal.classList.contains('active') && ed === _allModal._ed) { try { syncAllContent(_allModal._node); } catch (_) {} return; }
+}
+// 清掉当前编辑器里「已插入」的标签（先把括号/转换写法还原成裸名再删），其它正文保留
+function tpClearInserted(ed) {
+  _tpIns.slice().forEach((en) => {
+    const cfg = _tpW.get(en);
+    try { phReplaceText(ed, _tpAlt.get(en) || tpFmt(en, cfg), en); } catch (_) {}
+    try { phRemovePlain(ed, en); } catch (_) {}
+  });
+  _tpIns = []; _tpW.clear();
+}
+// 标签面板「生成随机tag」：先清除已插入的标签再生成（不然每次都在末尾累加）
+async function tpGenerateRandom() {
+  if (!randGroups().some((g) => g.on)) { phTip(ezT('No random group is enabled')); return; }
+  const picks = await tpRandPickTags();
+  if (!picks.length) { phTip(ezT('Nothing to generate (check random groups / tag library)')); return; }
+  const ed = _tagPickTarget || _phActiveEditor;
+  if (ed) tpClearInserted(ed);
+  tpInsertTags(ed, picks);
+  phCommitTargetEditor(ed);   // 写回当前随机生成所在的那张卡片
+  renderTagPanel();
+}
+// 卡片弹窗「随机tag」单点：清空这张卡正文，再按当前设置生成一次
+async function tpRandomToEditor(ed) {
+  if (!randGroups().some((g) => g.on)) { phTip(ezT('No random group is enabled')); return; }
+  const picks = await tpRandPickTags();
+  if (!picks.length) { phTip(ezT('Nothing to generate (check random groups / tag library)')); return; }
+  if (ed) { try { ed.textContent = ''; } catch (_) {} }
+  _tpIns = []; _tpW.clear();
+  tpInsertTags(ed, picks);
+  phCommitTargetEditor(ed);   // 写回当前随机生成所在的那张卡片
+  renderTagPanel();
+}
+// 运行期自动随机：排队提交时把「自动随机tag」卡片的 config 换成刚生成的随机 tag。
+// 运行期自动随机：排队提交时把「自动随机tag」卡片重写成本轮的随机 tag。
+// 既改本次提交的 prompt（执行用这一份），也写回画布上的卡片（能看到、能接着编辑）。
+// HTTP API 直接排队不经前端，仍是原内容。
+async function phRandPatchPrompt(output) {
+  if (!output || typeof output !== 'object') return;
+  for (const id of Object.keys(output)) {
+    const slot = output[id];
+    if (!slot || slot.class_type !== NODE || !slot.inputs) continue;
+    let cfg = null;
+    try { cfg = (typeof slot.inputs.config === 'string') ? JSON.parse(slot.inputs.config) : slot.inputs.config; } catch (_) { cfg = null; }
+    if (!cfg || !Array.isArray(cfg.cards)) continue;
+    const node = (app && app.graph && typeof app.graph.getNodeById === 'function') ? app.graph.getNodeById(Number(id)) : null;
+    const st = node ? stateFor(node) : null;
+    let hit = 0;
+    for (const card of cfg.cards) {
+      if (!card || !card.autoRand) continue;
+      const picks = await tpRandPickTags();
+      if (!picks.length) { console.warn('[PromptHelper] auto random tag: no tags generated (check enabled groups / tag library in the Random dialog)'); continue; }   // 抽不到就别清空卡片
+      const text = picks.map((nm) => tpArtistName(nm)).join(', ');
+      card.content = text;
+      card.contentHTML = ''; card.contentOptimized = ''; card.contentOptimizedHTML = ''; card.useOptimized = false;
+      const local = st && (st.cards || []).find((c) => c && String(c.id) === String(card.id));
+      if (local) {
+        local.content = text;
+        local.contentHTML = ''; local.contentOptimized = ''; local.contentOptimizedHTML = ''; local.useOptimized = false;
+      }
+      hit++;
+    }
+    if (!hit) continue;
+    slot.inputs.config = JSON.stringify(cfg);
+    if (node) {
+      syncToConfig(node);
+      refreshUI(node);
+      try {   // 卡片弹窗正开着这张卡 → 编辑器也换成随机内容（没在打字时才覆盖）
+        const m = _editModal;
+        if (m && m.classList.contains('active') && m._node === node && m._editor && !m._editor.contains(document.activeElement)) {
+          const card = (st.cards || []).find((c) => c && String(c.id) === String(st.editingId));
+          if (card && card.autoRand && st.currentTab !== 'optimized') { m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || ''); unwrapTagChips(m._editor); }
+        }
+      } catch (_) {}
+      try { console.log('[PromptHelper] runtime random tags: rewrote ' + hit + ' card(s)'); } catch (_) {}
+    }
+  }
+}
+function installQueueRand() {
+  if (!api || api.__ezPhRandHooked || typeof api.queuePrompt !== 'function') return;
+  api.__ezPhRandHooked = true;
+  const prev = api.queuePrompt;
+  api.queuePrompt = async function (number, prompt, extra) {
+    try { await phRandPatchPrompt(prompt && prompt.output); } catch (e) { console.warn('[PromptHelper] runtime random tag failed (submitting as-is):', e); }
+    return prev.apply(this, arguments);
+  };
+}
+installQueueRand();
+// 分类候选树：CSV 桶 + 细分大类（含子类）——交给 tpCatPickMenu，和「移动至」同一套右侧层叠菜单
+function randCatTree() {
+  const csv = { id: 'rndcsv', name: ezT('CSV category'), side: 'rand', root: true,
+    children: CAT_ORDER.map(([v, l]) => ({ id: v, name: ezT(l), cat: v, side: 'rand', children: [] })) };
+  const kinds = { id: 'rndkind', name: ezT('Tag group'), side: 'rand', root: true,
+    children: KIND_ORDER.filter((k) => KIND_LABEL[k]).map((k) => {
+      const subs = Object.keys(KIND_LABEL).filter((x) => x.indexOf('/') > 0 && x.split('/')[0] === k).sort();
+      return { id: 'k:' + k, name: ezT(KIND_LABEL[k]), cat: 'k:' + k, side: 'rand',
+        children: subs.map((x) => ({ id: 'k:' + x, name: ezT(KIND_LABEL[x] || x.split('/')[1]), cat: 'k:' + x, side: 'rand', children: [] })) };
+    }) };
+  return { roots: [csv, kinds] };
+}
+function randCatLabel(v) {
+  const it = randCatItems().find((x) => x.value === v);
+  return it ? it.label.replace(/^\u3000+/, '') : String(v || '');
+}
+let _randModal = null;
+function openRandModal() {
+  if (_randModal && _randModal.parentNode) { try { _randModal.remove(); } catch (_) {} _randModal = null; }
+  const draft = randGroups().map((g) => Object.assign({}, g));   // 弹窗里改的是草稿：点「保存随机设置 / 生成随机tag」才落盘
+  const ov = el('div', 'eph-cm active'); ov.style.zIndex = '100020';
+  const box = el('div', 'eph-cm-box'); box.style.width = '560px';
+  const hd = el('div', 'eph-cm-hd');
+  const t = el('b'); t.textContent = ezT('Random tags');
+  const rst = el('button', 'eph-btn'); rst.textContent = ezT('Restore default groups'); rst.style.marginLeft = 'auto';
+  const add = el('button', 'eph-btn'); add.textContent = ezT('+ Random category');
+  const close = el('button', 'eph-modal-close'); close.textContent = '✕';
+  hd.appendChild(t); hd.appendChild(rst); hd.appendChild(add); hd.appendChild(close);
+  const body = el('div', 'eph-cm-body');
+  const list = el('div', 'eph-rand-list');
+  body.appendChild(list);
+  const foot = el('div', 'eph-cm-foot');
+  const save = el('button', 'eph-btn'); save.textContent = ezT('Save random settings');
+  const gen = el('button', 'eph-btn eph-btn-save'); gen.textContent = ezT('Generate random tags');
+  foot.appendChild(save); foot.appendChild(gen);
+  body.appendChild(foot);
+  box.appendChild(hd); box.appendChild(body); ov.appendChild(box); document.body.appendChild(ov);
+  _randModal = ov;
+  const shut = () => { try { ov.remove(); } catch (_) {} _randModal = null; };
+  const commit = () => { _randGroups = draft; randSave(); };
+  const renderRows = () => {
+    list.innerHTML = '';
+    draft.forEach((g, idx) => {
+      const row = el('div', 'eph-rand-row');
+      // 分类选择：和「移动至分组」同一套右侧层叠菜单（tpCatPickMenu），不用下拉
+      const catBtn = el('button', 'eph-btn eph-rand-cat'); catBtn.type = 'button'; catBtn.textContent = randCatLabel(g.cat);
+      catBtn.addEventListener('click', () => {
+        const rr = catBtn.getBoundingClientRect();
+        tpCatPickMenu(rr.left, rr.bottom + 4, (it) => { g.cat = String(it.cat || ''); catBtn.textContent = randCatLabel(g.cat); }, { tree: randCatTree(), current: { side: 'rand', cat: g.cat } });
+      });
+      const nIn = el('input', 'eph-rand-n'); nIn.type = 'number'; nIn.min = '1'; nIn.max = '50'; nIn.value = String(g.n); nIn.title = ezT('Random tag count');
+      nIn.addEventListener('change', () => { g.n = Math.max(1, Math.min(50, parseInt(nIn.value, 10) || 1)); nIn.value = String(g.n); });
+      const sw = el('button', 'eph-rand-sw' + (g.on ? ' on' : '')); sw.type = 'button'; sw.title = ezT('Enable / disable this random group');
+      sw.addEventListener('click', () => { g.on = !g.on; sw.classList.toggle('on', g.on); });
+      const del = el('button', 'eph-rand-del'); del.type = 'button'; del.textContent = '－'; del.title = ezT('Delete this random group');
+      del.addEventListener('click', () => { draft.splice(idx, 1); renderRows(); });
+      row.appendChild(catBtn); row.appendChild(nIn); row.appendChild(sw); row.appendChild(del);
+      list.appendChild(row);
+    });
+  };
+  rst.addEventListener('click', () => { draft.length = 0; RAND_DEFAULT.forEach((g) => draft.push(Object.assign({}, g))); renderRows(); });
+  add.addEventListener('click', () => { draft.push({ cat: 'c1', n: 1, on: true }); renderRows(); });
+  close.addEventListener('click', shut);
+  ov.addEventListener('mousedown', (e) => { if (e.target === ov) shut(); });
+  save.addEventListener('click', () => { commit(); phTip(ezT('Random settings saved')); });
+  gen.addEventListener('click', () => { commit(); tpGenerateRandom(); shut(); });
+  renderRows();
 }
 function closeTagPicker() {
   if (_tpObs) { _tpObs.disconnect(); _tpObs = null; }
@@ -7810,6 +8111,11 @@ async function openTagPicker(targetEd, anchor) {
       ]);
     });
     const ins = el('div', 'eph-tp-ins');
+    ins.addEventListener('contextmenu', (e) => {   // 已插入芯片面板空白处：也给随机 tag 入口
+      if (e.target && e.target.closest && e.target.closest('.eph-tpi')) return;
+      e.preventDefault(); e.stopPropagation();
+      cmMenu(e.clientX, e.clientY, [[ezT('Generate random tags'), () => tpGenerateRandom()]]);
+    });
     const row = el('div', 'eph-tp-row');
     const search = el('input'); search.placeholder = ezT('Search tags');
     search.classList.add('eph-tp-search');
@@ -7821,6 +8127,8 @@ async function openTagPicker(targetEd, anchor) {
     fur.appendChild(furCb); fur.appendChild(furTx);
     const filtBtn = el('button', 'eph-btn'); filtBtn.textContent = ezT('Filter');
     const sortBtn = el('button', 'eph-btn'); sortBtn.textContent = ezT('Sort');
+    const randBtn = el('button', 'eph-btn'); randBtn.textContent = ezT('Random'); randBtn.title = ezT('Random tags');
+    randBtn.addEventListener('click', openRandModal);
     const ownAdd = el('button', 'eph-btn'); ownAdd.textContent = ezT('+ Add tag');
     ownAdd.addEventListener('click', () => tpEditCard({ new: true, en: '', zh: '', item: null }));
     // 批量管理只走右键菜单（标签卡片/分组右键），这里放「标签提示」开关：开了打字就弹候选
@@ -7905,7 +8213,7 @@ async function openTagPicker(targetEd, anchor) {
       sideBtn.title = _tpHideSide ? ezT('Show sidebar') : ezT('Hide sidebar');
     });
     sideBtn.classList.add('eph-tp-side');
-    row.appendChild(search); row.appendChild(filtBtn); row.appendChild(sortBtn); row.appendChild(ownAdd); row.appendChild(ownHint);
+    row.appendChild(search); row.appendChild(filtBtn); row.appendChild(sortBtn); row.appendChild(randBtn); row.appendChild(ownAdd); row.appendChild(ownHint);
     row.appendChild(ownArtist);             // 引用画师放最后
     row.insertBefore(libDD.el, row.firstChild);   // 标签库下拉排第一个
     const treeBtn = el('button', 'eph-cm-mini'); treeBtn.type = 'button';
@@ -7928,13 +8236,16 @@ async function openTagPicker(targetEd, anchor) {
     const tDone = el('button', 'eph-btn'); tDone.textContent = ezT('Done');
     const tGen = el('button', 'eph-btn'); tGen.textContent = ezT('Generate previews');
     tGen.addEventListener('click', () => genPreviews(Array.from(_tpSel).map((k) => tpKeyName(k))));
-    batchBar.appendChild(tAll); batchBar.appendChild(tInv); batchBar.appendChild(tMove); batchBar.appendChild(tGen); batchBar.appendChild(tDel); batchBar.appendChild(tDone);
+    const tRmPv = el('button', 'eph-btn'); tRmPv.textContent = ezT('Remove previews'); tRmPv.title = ezT('Remove the preview images of the selected tags');
+    tRmPv.addEventListener('click', () => tagRemoveSelPreviews());
+    batchBar.appendChild(tAll); batchBar.appendChild(tInv); batchBar.appendChild(tMove); batchBar.appendChild(tGen); batchBar.appendChild(tRmPv); batchBar.appendChild(tDel); batchBar.appendChild(tDone);
     const list = el('div', 'eph-tp-list');
     list.addEventListener('contextmenu', (e) => {   // 右侧卡片区空白处
       if (e.target && e.target.closest && e.target.closest('.eph-cm-tile')) return;
       e.preventDefault(); e.stopPropagation();
       cmMenu(e.clientX, e.clientY, [
         [ezT('New tag'), () => tpEditCard({ new: true, en: '', zh: '', item: null })],
+        [ezT('Generate random tags'), () => tpGenerateRandom()],
         ['-'],
         [ezT('Restore default library'), () => { tpRecoverInto(tpSeedLibTree(_tpLibId)); tpRestoreLib(); }],
       ]);
@@ -8286,6 +8597,7 @@ async function batchSaveGroup(node) {
 
 // ===== 总体编辑（Word 大纲：每条卡片=  左侧小标题行[序号/标题/时间轴/删除] + 下方内容；默认/优化滑块 + 工具栏（含 skill 插入）；点外面自动保存关闭）=====
 let _allModal = null, _allTab = 'default';
+const _allClosed = new Set();   // 总体编辑里单独折叠的卡片 id（摘要行留着、只收正文；重建块时按 id 还原）
 function runToolOn(ed, id) {
   if (!ed) return;
   const mapFH = { '，': ',', '。': '.', '！': '!', '？': '?', '：': ':', '；': ';', '“': '"', '”': '"', '‘': "'", '’': "'", '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>', '、': ',', '—': '-', '～': '~' };
@@ -8665,14 +8977,21 @@ function renderAllEditor(node) {
     finishAllEditor(node);
     return;
   }
+  const liveIds = new Set(st.cards.map((c) => String(c.id)));
+  Array.from(_allClosed).forEach((id) => { if (!liveIds.has(id)) _allClosed.delete(id); });   // 删掉的卡片别在折叠表里堆着
   st.cards.forEach((card, idx) => {
     const block = el('div', 'eph-all-block'); block.dataset.idx = String(idx); block.dataset.cardId = String(card.id);
+    if (_allClosed.has(String(card.id))) block.classList.add('closed');
     // 左侧小标题行：序号 / 标题(可编辑) / 时间轴 / 删除(-)
     const rw = el('div', 'eph-all-block-hd'); rw.contentEditable = 'false';
     const num = el('span', 'eph-all-num'); num.textContent = String(idx + 1);
     const titleEl = el('span', 'eph-all-title'); titleEl.contentEditable = 'true'; titleEl.setAttribute('data-ph', ezT('Title'));
     titleEl.textContent = card.title || '';
     titleEl.addEventListener('input', () => { card.title = titleEl.textContent.replace(/\u200b/g, ''); syncToConfig(node); syncEditModalTitle(node, card); });
+    // 单张卡片折叠（放在标题输入框后面）：只收正文，标题行留着可再点开；工具栏那颗是全局收起小标题行
+    const foldEl = el('button', 'eph-all-fold'); foldEl.type = 'button'; foldEl.title = ezT('Collapse / expand this card');
+    foldEl.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+    foldEl.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (block.classList.toggle('closed')) _allClosed.add(String(card.id)); else _allClosed.delete(String(card.id)); });
     const delEl = el('button', 'eph-all-del'); delEl.textContent = '－'; delEl.title = ezT('Delete this card');
     delEl.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); deleteCard(node, card.id); renderAllEditor(node); });
     // 每张卡片自己的「引用媒体」：插进本卡片内容里，引用状态与卡片弹窗共用（同一个 card.refTarget）
@@ -8700,7 +9019,7 @@ function renderAllEditor(node) {
     const mergeBtnH = el('button', 'eph-merge-btn'); mergeBtnH.type = 'button'; mergeBtnH.textContent = ezT('Merge'); mergeBtnH.title = ezT('Merge into the merged prompt: green = merge, gray = skip');
     mergeBtnH.classList.toggle('on', !card.mergeOff);
     mergeBtnH.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); card.mergeOff = !card.mergeOff; syncToConfig(node); mergeBtnH.classList.toggle('on', !card.mergeOff); refreshUI(node); });
-    rw.appendChild(num); rw.appendChild(titleEl); rw.appendChild(mergeBtnH); rw.appendChild(refEl); rw.appendChild(delEl);
+    rw.appendChild(num); rw.appendChild(titleEl); rw.appendChild(foldEl); rw.appendChild(mergeBtnH); rw.appendChild(refEl); rw.appendChild(delEl);
     block.appendChild(rw);
     // 下方内容（按当前页签）
         const body = el('div', 'eph-all-block-body');
@@ -8895,6 +9214,19 @@ function applyExecutedOptimized(node, ui) {
     }
     if (c.useOptimized && !local.useOptimized) { local.useOptimized = true; changed = true; }
   });
+  // 「实时接收卡」：把本轮收到的外部文本写进卡片；源没变就保留用户在卡片里的临时编辑
+  (uiList(ui.recv)).forEach((r) => {
+    if (!r || r.id == null) return;
+    const local = st.cards.find((x) => x && String(x.id) === String(r.id));
+    if (!local || !local.liveIn) return;
+    const text = String(r.text == null ? '' : r.text);
+    if (String(local.liveRecv || '') === text) return;   // 源没变 → 保留卡片里的编辑
+    local.liveRecv = text;
+    local.content = text;
+    local.contentHTML = '';
+    local.useOptimized = false;
+    changed = true;
+  });
   if (!changed) return;
   syncToConfig(node);
   refreshUI(node);
@@ -8906,7 +9238,90 @@ function applyExecutedOptimized(node, ui) {
       renderAllEditor(node);
     }
   } catch (_) {}
+  // 卡片弹窗正开着这张「实时接收卡」→ 把新收到的文本显示进编辑器（没在打字时才覆盖）
+  try {
+    const m = _editModal;
+    if (m && m.classList.contains('active') && m._node === node && m._editor && !m._editor.contains(document.activeElement)) {
+      const card = st.cards.find((c) => c && String(c.id) === String(st.editingId));
+      if (card && card.liveIn && st.currentTab !== 'optimized') { m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || ''); unwrapTagChips(m._editor); }
+    }
+  } catch (_) {}
 }
+
+// ===== 实时接收卡：不必等运行，直接按上游 ModelsCombo 的配置拉触发词（metadata 按 file 缓存） =====
+const _phLoraTw = new Map();
+function phTrainedWords(meta) {
+  if (!meta || typeof meta !== 'object') return [];
+  let tw = meta.trainedWords;
+  if (!Array.isArray(tw) || !tw.length) { const c = meta.civitai; if (c && Array.isArray(c.trainedWords)) tw = c.trainedWords; }   // C 站的词在 civitai 下面
+  if (!Array.isArray(tw)) tw = [];
+  if (!tw.length && typeof meta.activation_text === 'string') tw = [meta.activation_text];
+  return tw.map((w) => String(w == null ? '' : w).trim()).filter(Boolean);
+}
+async function phLoraWords(file) {
+  if (_phLoraTw.has(file)) return _phLoraTw.get(file);
+  let words = [];
+  try {
+    const r = await fetchApi('/models_combo/lora_meta_detail?type=lora&file=' + encodeURIComponent(file));
+    if (r && r.ok) words = phTrainedWords(await r.json());
+  } catch (_) {}
+  _phLoraTw.set(file, words);
+  return words;
+}
+function phComboLoaders(n) {
+  const cfg = readConfig(n, []);
+  return Array.isArray(cfg) ? cfg : ((cfg && Array.isArray(cfg.loaders)) ? cfg.loaders : []);
+}
+// 这张 PromptHelper 上，连着 ModelsCombo trigger_words 输出的实时卡
+function phLiveJobs(node) {
+  const st = stateFor(node);
+  const jobs = [];
+  st.cards.forEach((card) => {
+    if (!card || !card.liveIn) return;
+    const sock = (node.inputs || []).find((i) => i && String(i._ezCardId) === String(card.id));
+    if (!sock || sock.link == null) return;
+    const link = node.graph && node.graph.links && node.graph.links[sock.link];
+    if (!link) return;
+    const up = node.graph.getNodeById ? node.graph.getNodeById(link.origin_id) : null;
+    if (!up || nodeTypeOf(up) !== 'EzFlex-ModelsCombo') return;
+    const out = (up.outputs || [])[link.origin_slot];
+    if (!out || out.name !== 'trigger_words') return;
+    jobs.push({ card: card, up: up });
+  });
+  return jobs;
+}
+async function phPullLiveCards(node) {
+  const jobs = phLiveJobs(node);
+  if (!jobs.length) return;
+  let changed = false;
+  for (const j of jobs) {
+    const files = phComboLoaders(j.up).filter((l) => l && l.type === 'lora' && l.file).map((l) => l.file);
+    const words = [];
+    for (const f of files) { const w = await phLoraWords(f); w.forEach((x) => { if (words.indexOf(x) < 0) words.push(x); }); }
+    const text = words.join(', ');
+    if (String(j.card.liveRecv || '') === text) continue;   // 源没变 → 保留卡片里的编辑
+    j.card.liveRecv = text; j.card.content = text; j.card.contentHTML = ''; j.card.useOptimized = false;
+    changed = true;
+  }
+  if (!changed) return;
+  syncToConfig(node);
+  refreshUI(node);
+  try {   // 弹窗正开着这张实时卡 → 把新触发词显示进编辑器（没在打字时才覆盖）
+    const m = _editModal;
+    if (m && m.classList.contains('active') && m._node === node && m._editor && !m._editor.contains(document.activeElement)) {
+      const st2 = stateFor(node);
+      const card = st2.cards.find((c) => c && String(c.id) === String(st2.editingId));
+      if (card && card.liveIn && st2.currentTab !== 'optimized') { m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || ''); unwrapTagChips(m._editor); }
+    }
+  } catch (_) {}
+}
+// ModelsCombo 配置变了 → 连到它的 PromptHelper 实时卡跟着更新（不必等运行）
+window.addEventListener('ezflex:config-changed', (e) => {
+  const n = e && e.detail && e.detail.node;
+  if (!n || nodeTypeOf(n) !== 'EzFlex-ModelsCombo') return;
+  const g = app && app.graph;
+  ((g && (g._nodes || g.nodes)) || []).forEach((ph) => { if (nodeTypeOf(ph) === NODE) { try { phPullLiveCards(ph); } catch (_) {} } });
+});
 
 // 节点外黑框 socket 标签（仿 ModelsCombo installOutsideLabels：DOM 覆盖层逐帧对齐 socket 圆点）。
 // 输入端口标签在圆点左侧、输出在右侧，随画布缩放，socket 列表变化时重建。
@@ -8949,16 +9364,16 @@ function installSocketLabels(node) {
       node._ephOutEls = all;
     }
   };
+  const hideAll = () => { all.forEach((item) => { try { item.el.style.display = 'none'; } catch (_) {} }); };
   const update = () => {
     const rootEl = node._ezRoot;
-    if (!rootEl || !rootEl.isConnected) { return; }
-    if (app && app.graph && node.graph !== app.graph) {
-      (node._ephOutEls || []).forEach((x) => { try { x.el.style.display = 'none'; } catch (_) {} });
-      return;
-    }
+    if (!rootEl || !rootEl.isConnected) { hideAll(); return; }   // 控件没挂上/被临时摘掉：先把标签收掉，别留在屏幕上
+    // 只在「当前渲染的那张图」里显示：子图（app.canvas.graph）也算当前图，别拿 app.graph 比
+    const shown = (app && app.canvas && app.canvas.graph) || (app && app.graph) || null;
+    if (shown && node.graph && node.graph !== shown) { hideAll(); return; }
     let rect = null;
-    try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
-    if (!rect || rect.width <= 0) { return; }
+    try { rect = rootEl.getBoundingClientRect(); } catch (_) { hideAll(); return; }
+    if (!rect || rect.width <= 0) { hideAll(); return; }
     const nodeW0 = (node.size && node.size[0]) || 1;
     const sx0 = rect.width / nodeW0;
     if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.3) {
@@ -9074,10 +9489,10 @@ function hookGraphClear() {
 function hookPrototype(nt) {
   if (!nt || nt.__ezPhHooked) return; nt.__ezPhHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; console.log('[PromptHelper] hook nodeCreated #' + this.id); setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); refreshUI(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); refreshUI(this); try { phPullLiveCards(this); } catch (_) {} return r; };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;
-    try { if (this._ezPhSetup) setTimeout(() => { updatePorts(this); refreshUI(this); }, 0); } catch (_) {}
+    try { if (this._ezPhSetup) setTimeout(() => { updatePorts(this); refreshUI(this); try { phPullLiveCards(this); } catch (_) {} }, 0); } catch (_) {}
     return r;
   };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { closeEzPanelsForNode(this); } catch (_) {} try { if (this._ezPhSyncTimer) clearTimeout(this._ezPhSyncTimer); } catch (_) {} try { if (this._ephOutRaf) cancelAnimationFrame(this._ephOutRaf); } catch (_) {} try { (this._ephOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); } catch (_) {} try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPhSetup = false; return r; };

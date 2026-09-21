@@ -413,12 +413,15 @@ function installOutsideLabels(node) {
     const s = cur.map((x) => x.i + '|' + x.name).join(';');
     if (s !== sig) { sig = s; all.forEach((x) => { try { x.el.remove(); } catch (_) {} }); all = cur.map((x) => ({ el: mk(x.name), i: x.i })); node._emooOutEls = all.map((x) => x.el); }
   };
+  const hideAll = () => { all.forEach((item) => { try { item.el.style.display = 'none'; } catch (_) {} }); };
   const update = () => {
     const rootEl = node._emooRoot;
-    if (!rootEl || !rootEl.isConnected) { return; }
-    if (app && app.graph && node.graph !== app.graph) { (node._emooOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); node._emooOutEls = []; return; }
-    let rect = null; try { rect = rootEl.getBoundingClientRect(); } catch (_) { return; }
-    if (!rect || rect.width <= 0) { return; }
+    if (!rootEl || !rootEl.isConnected) { hideAll(); return; }   // 控件没挂上/被临时摘掉：先把标签收掉，别留在屏幕上
+    // 只在「当前渲染的那张图」里显示：子图（app.canvas.graph）也算当前图，别拿 app.graph 比
+    const shown = (app && app.canvas && app.canvas.graph) || (app && app.graph) || null;
+    if (shown && node.graph && node.graph !== shown) { hideAll(); return; }
+    let rect = null; try { rect = rootEl.getBoundingClientRect(); } catch (_) { hideAll(); return; }
+    if (!rect || rect.width <= 0) { hideAll(); return; }
     const nodeW0 = (node.size && node.size[0]) || 1; const sx0 = rect.width / nodeW0;
     if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.35) { all.forEach((item) => { item.el.style.display = 'none'; }); return; }
     scan();
