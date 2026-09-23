@@ -8,6 +8,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { NODE_TYPES, nodeTypeOf, configWidget, installResizeHandles, makeDomWidgetHitThrough, uiPrompt, uiConfirm, makeAudioPlayer, notifyConfigChanged, scheduleOnRedraw, pumpFrames, EZ_PERF } from "./ezflex_service.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
+import { ezThemeInit } from "./ezflex_theme.js";
 
 const NODE = NODE_TYPES.MEDIA_LOADER;
 const PRESET_API = "/media_loader/presets";
@@ -20,110 +21,111 @@ const MIN_WIDTH = 640;
 const CSS = `
 .eml-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .eml-shell .eml-root{pointer-events:auto;}
-.eml-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#1a1f2b;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
+.eml-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .eml-root *{box-sizing:border-box;user-select:none;-webkit-user-select:none;}
 .eml-top{display:flex;align-items:center;gap:8px;flex-wrap:nowrap;min-width:0;flex-shrink:0;} /* 顶部工具栏单行不换行（到「加载输出」为止） */
-.eml-preset{appearance:none;-webkit-appearance:none;min-width:140px;height:32px;padding:4px 32px 4px 14px;border:1px solid #dce3ec;border-radius:999px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 14px center;font-size:12px;color:#1a1f2b;cursor:pointer;flex:0 0 auto;outline:none;box-shadow:none;}
-.eml-preset:focus,.eml-preset:active,.eml-preset:hover{border-color:#2b3a4a;outline:none;box-shadow:none;background-color:#fff;}
-.eml-preset-btn{appearance:none;-webkit-appearance:none;min-width:150px;height:32px;padding:4px 32px 4px 14px;border:1px solid #dce3ec;border-radius:999px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 14px center;font-size:12px;color:#1a1f2b;cursor:pointer;outline:none;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;}
-.eml-preset-btn:focus,.eml-preset-btn:hover{border-color:#2b3a4a;background-color:#fff;}
-.eml-preset-menu{display:none;position:absolute;top:36px;left:0;z-index:1200;min-width:160px;background:#fff;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.14);padding:4px;max-height:260px;overflow:auto;}
+.eml-preset{appearance:none;-webkit-appearance:none;min-width:140px;height:32px;padding:4px 32px 4px 14px;border:1px solid var(--ez-border);border-radius:999px;background:var(--ez-surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 14px center;font-size:12px;color:var(--ez-fg);cursor:pointer;flex:0 0 auto;outline:none;box-shadow:none;}
+.eml-preset:focus,.eml-preset:active,.eml-preset:hover{border-color:var(--ez-strong);outline:none;box-shadow:none;background-color:var(--ez-bg);}
+.eml-preset-btn{appearance:none;-webkit-appearance:none;min-width:150px;height:32px;padding:4px 32px 4px 14px;border:1px solid var(--ez-border);border-radius:999px;background:var(--ez-surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 14px center;font-size:12px;color:var(--ez-fg);cursor:pointer;outline:none;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:inherit;}
+.eml-preset-btn:focus,.eml-preset-btn:hover{border-color:var(--ez-strong);background-color:var(--ez-bg);}
+.eml-preset-menu{display:none;position:absolute;top:36px;left:0;z-index:1200;min-width:160px;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.14);padding:4px;max-height:260px;overflow:auto;}
 .eml-preset-menu.open{display:block;}
-.eml-preset-item{padding:6px 12px;font-size:12px;color:#1a1f2b;border-radius:8px;cursor:pointer;white-space:nowrap;font-family:inherit;}
-.eml-preset-item:hover{background:#f3f5f9;}
-.eml-preset-item.active{background:rgba(43,58,74,.08);font-weight:600;color:#2b3a4a;}
-.eml-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
-.eml-btn:hover{background:#edf2fa;border-color:#bcc9db;}
-.eml-btn.primary{background:#2b3a4a;border-color:#2b3a4a;color:#fff;}
-.eml-btn.danger{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
-.eml-tabs{display:flex;align-items:center;gap:4px;overflow-x:auto;padding-bottom:4px;border-bottom:1px solid #eef1f6;flex-shrink:0;min-height:28px;}
-.eml-tab{padding:4px 12px;font-size:12px;border-radius:8px 8px 0 0;border:1px solid transparent;border-bottom:none;color:#5f6b7a;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px;background:transparent;transition:.12s;}
-.eml-tab.active{background:#fff;color:#1a1f2b;border-color:#eef1f6;font-weight:600;}
+.eml-preset-item{padding:6px 12px;font-size:12px;color:var(--ez-fg);border-radius:8px;cursor:pointer;white-space:nowrap;font-family:inherit;}
+.eml-preset-item:hover{background:var(--ez-surface-3);}
+.eml-preset-item.active{background:rgba(43,58,74,.08);font-weight:600;color:var(--ez-fg-2);}
+.eml-btn{background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:var(--ez-fg);font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
+.eml-btn:hover{background:var(--ez-surface-3);border-color:var(--ez-border-strong);}
+.eml-btn.primary{background:var(--ez-strong);border-color:var(--ez-strong);color:var(--ez-on-strong);}
+.eml-btn.danger{background:var(--ez-bad-bg);border-color:var(--ez-bad-border);color:var(--ez-bad-fg);}
+.eml-tabs{display:flex;align-items:center;gap:4px;overflow-x:auto;padding-bottom:4px;border-bottom:1px solid var(--ez-border-2);flex-shrink:0;min-height:28px;}
+.eml-tab{padding:4px 12px;font-size:12px;border-radius:8px 8px 0 0;border:1px solid transparent;border-bottom:none;color:var(--ez-fg-3);cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:4px;background:transparent;transition:.12s;}
+.eml-tab.active{background:var(--ez-bg);color:var(--ez-fg);border-color:var(--ez-border-2);font-weight:600;}
 .eml-tab .tname{outline:none;font:inherit;background:transparent;border:none;color:inherit;min-width:26px;padding:0 2px;}
-.eml-tab .tclose{font-size:12px;color:#94a3b8;cursor:pointer;line-height:1;}
-.eml-tab .tclose:hover{color:#c0392b;}
-.eml-addtab{background:transparent;border:1px dashed #dce3ec;border-radius:8px;padding:3px 12px;font-size:12px;color:#6b7a8e;cursor:pointer;white-space:nowrap;}
+.eml-tab .tclose{font-size:12px;color:var(--ez-fg-muted);cursor:pointer;line-height:1;}
+.eml-tab .tclose:hover{color:var(--ez-bad-fg);}
+.eml-addtab{background:transparent;border:1px dashed var(--ez-border);border-radius:8px;padding:3px 12px;font-size:12px;color:var(--ez-fg-3);cursor:pointer;white-space:nowrap;}
 .eml-cards{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:12px;}
-.eml-card{background:#fff;border:1px solid #eef1f6;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.03);padding:9px 12px 12px;transition:.15s;}
+.eml-card{background:var(--ez-bg);border:1px solid var(--ez-border-2);border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.03);padding:9px 12px 12px;transition:.15s;}
 .eml-card:hover{box-shadow:0 4px 14px rgba(0,0,0,.06);}
 .eml-card.dragging{opacity:.4;}
-.eml-card-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px dashed #eef1f6;touch-action:none;}
-.eml-grip{flex:0 0 auto;width:16px;color:#6b7a8e;cursor:grab;font-size:13px;text-align:center;user-select:none;-webkit-user-select:none;transition:.12s;}
-.eml-grip:hover{color:#1a1f2b;}
+.eml-card-head{display:flex;align-items:center;gap:8px;margin-bottom:8px;padding-bottom:6px;border-bottom:1px dashed var(--ez-border-2);touch-action:none;}
+.eml-grip{flex:0 0 auto;width:16px;color:var(--ez-fg-3);cursor:grab;font-size:13px;text-align:center;user-select:none;-webkit-user-select:none;transition:.12s;}
+.eml-grip:hover{color:var(--ez-fg);}
 .eml-grip:active{cursor:grabbing;}
-.eml-card.mgr{outline:2px dashed #6b7a8e;outline-offset:-2px;}
-.eml-card.mgr .ctitle{color:#94a3b8;}
+.eml-card.mgr{outline:2px dashed var(--ez-border-strong);outline-offset:-2px;}
+.eml-card.mgr .ctitle{color:var(--ez-fg-muted);}
 .eml-card.mgr-sel{background:rgba(59,130,246,.22);box-shadow:0 0 0 3px rgba(59,130,246,.72);}
 .eml-media.mgr-sel{border-color:rgba(59,130,246,.95);box-shadow:0 0 0 3px rgba(59,130,246,.9);background:rgba(59,130,246,.2);}
-.eml-media.mgr-sel .info{border-top:1px solid rgba(59,130,246,.7);background:rgba(255,255,255,.72);}
+.eml-media.mgr-sel .info{border-top:1px solid rgba(59,130,246,.7);background:var(--ez-surface);}
 .eml-media.drop-target{box-shadow:0 0 0 3px rgba(34,197,94,.72);background:rgba(34,197,94,.16);}
 .eml-media.dragging{opacity:.5;}
-.eml-tab.mgr-sel{background:rgba(59,130,246,.2);border-color:rgba(59,130,246,.7);color:#1d4ed8;}
-.eml-managerbar{display:flex;align-items:center;gap:6px;padding:6px 10px;background:#f3f5f9;border:1px solid #dce3ec;border-radius:9px;font-size:12px;color:#1a1f2b;flex-shrink:0;position:sticky;top:0;z-index:8;flex-wrap:wrap;}
+.eml-tab.mgr-sel{background:rgba(59,130,246,.2);border-color:rgba(59,130,246,.7);color:var(--ez-info-fg);}
+.eml-managerbar{display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--ez-surface-3);border:1px solid var(--ez-border);border-radius:9px;font-size:12px;color:var(--ez-fg);flex-shrink:0;position:sticky;top:0;z-index:8;flex-wrap:wrap;}
 .eml-bb-item.sel{background:rgba(59,130,246,.16);border-color:rgba(59,130,246,.65);box-shadow:0 0 0 2px rgba(59,130,246,.5);}
-.eml-bbtrow{display:flex;align-items:center;gap:4px;padding:6px 10px;cursor:pointer;border-left:3px solid transparent;font-size:12px;color:#1a1f2b;white-space:nowrap;}
-.eml-bbtrow:hover{background:#f3f5f9;}
-.eml-bbtrow.sel{background:rgba(43,58,74,.1);border-left-color:#2b3a4a;color:#2b3a4a;font-weight:500;}
-.eml-bbtwist{width:16px;height:16px;display:flex;align-items:center;justify-content:center;transition:transform .2s;color:#8a9aa8;font-size:10px;flex-shrink:0;}
+.eml-bbtrow{display:flex;align-items:center;gap:4px;padding:6px 10px;cursor:pointer;border-left:3px solid transparent;font-size:12px;color:var(--ez-fg);white-space:nowrap;}
+.eml-bbtrow:hover{background:var(--ez-surface-3);}
+.eml-bbtrow.sel{background:rgba(43,58,74,.1);border-left-color:var(--ez-strong);color:var(--ez-fg-2);font-weight:500;}
+.eml-bbtwist{width:16px;height:16px;display:flex;align-items:center;justify-content:center;transition:transform .2s;color:var(--ez-fg-muted);font-size:10px;flex-shrink:0;}
 .eml-bbtwist.expanded{transform:rotate(90deg);}
 .eml-bbtwist.leaf{opacity:0;pointer-events:none;}
-.eml-bbficon{color:#8a9aa8;font-size:12px;flex-shrink:0;display:flex;align-items:center;}
-.eml-bbtrow.sel .eml-bbficon{color:#2b3a4a;}
+.eml-bbficon{color:var(--ez-fg-muted);font-size:12px;flex-shrink:0;display:flex;align-items:center;}
+.eml-bbtrow.sel .eml-bbficon{color:var(--ez-fg-2);}
 .eml-bbfname{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;}
-.eml-card-head .ctitle{font-size:14px;font-weight:600;color:#1a1f2b;flex:1 1 auto;min-width:60px;outline:none;border:none;background:transparent;padding:2px 6px;border-radius:5px;cursor:default;}
-.eml-card-head .ctitle.editing{cursor:text;background:#fff;box-shadow:0 0 0 2px #dce3ec;}
-.eml-card-head .cdel{border:none;background:transparent;color:#6b7a8e;font-size:12px;cursor:pointer;padding:2px 6px;border-radius:5px;}
-.eml-card-head .cdel:hover{background:#fdecec;color:#c0392b;}
+.eml-card-head .ctitle{font-size:14px;font-weight:600;color:var(--ez-fg);flex:1 1 auto;min-width:60px;outline:none;border:none;background:transparent;padding:2px 6px;border-radius:5px;cursor:default;}
+.eml-card-head .ctitle.editing{cursor:text;background:var(--ez-bg);box-shadow:0 0 0 2px var(--ez-border);}
+.eml-card-head .cdel{border:none;background:transparent;color:var(--ez-fg-3);font-size:12px;cursor:pointer;padding:2px 6px;border-radius:5px;}
+.eml-card-head .cdel:hover{background:var(--ez-bad-bg);color:var(--ez-bad-fg);}
 .eml-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;min-height:80px;position:relative;border-radius:8px;}
 @media (max-width:920px){.eml-grid{grid-template-columns:repeat(3,1fr);}}
 @media (max-width:640px){.eml-grid{grid-template-columns:repeat(2,1fr);}}
-.eml-media{background:#fbfcfe;border:1px solid #eef1f6;border-radius:9px;overflow:hidden;display:flex;flex-direction:column;min-height:192px;position:relative;cursor:pointer;transition:.15s;}
-.eml-media:hover{border-color:#d0d5dd;box-shadow:0 4px 12px rgba(0,0,0,.06);}
+.eml-media{background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:9px;overflow:hidden;display:flex;flex-direction:column;min-height:192px;position:relative;cursor:pointer;transition:.15s;}
+.eml-media:hover{border-color:var(--ez-border);box-shadow:0 4px 12px rgba(0,0,0,.06);}
 .eml-media.mgr-sel:hover{border-color:rgba(59,130,246,.95);box-shadow:0 0 0 3px rgba(59,130,246,.9);background:rgba(59,130,246,.2);}
-.eml-media .pv{width:100%;background:#eef1f6;display:flex;align-items:center;justify-content:center;position:relative;aspect-ratio:16/9;overflow:hidden;flex-shrink:0;}
-.eml-media .pv img{width:100%;height:100%;object-fit:contain;background:#eef1f6;object-position:center;display:block;}
-.eml-media .pv video{width:100%;height:100%;object-fit:contain;background:#eef1f6;object-position:center;}
-.eml-media .pv audio{width:100%;height:44px;background:#e2e8f0;border-radius:0;}
-.eml-media .pv .ph{font-size:28px;color:#94a3b8;opacity:.6;}
-.eml-media .type-badge{position:absolute;top:5px;left:5px;background:rgba(255,255,255,.86);border-radius:30px;padding:1px 8px;font-size:10px;font-weight:600;color:#1a1f2b;box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid #eef1f6;pointer-events:none;z-index:3;}
-.eml-media .rm{position:absolute;top:3px;right:3px;background:rgba(255,255,255,.88);border:none;border-radius:50%;width:20px;height:20px;font-size:11px;line-height:20px;text-align:center;color:#94a3b8;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.1);z-index:6;display:flex;align-items:center;justify-content:center;padding:0;opacity:0;transition:.12s;}
+.eml-media .pv{width:100%;background:var(--ez-surface-3);display:flex;align-items:center;justify-content:center;position:relative;aspect-ratio:16/9;overflow:hidden;flex-shrink:0;}
+.eml-media .pv img{width:100%;height:100%;object-fit:contain;background:var(--ez-surface-3);object-position:center;display:block;}
+.eml-media .pv video{width:100%;height:100%;object-fit:contain;background:var(--ez-surface-3);object-position:center;}
+.eml-media .pv audio{width:100%;height:44px;background:var(--ez-surface-4);border-radius:0;}
+.eml-media .pv .ph{font-size:28px;color:var(--ez-fg-muted);opacity:.6;}
+.eml-media .type-badge{position:absolute;top:5px;left:5px;background:var(--ez-surface);border-radius:30px;padding:1px 8px;font-size:10px;font-weight:600;color:var(--ez-fg);box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid var(--ez-border-2);pointer-events:none;z-index:3;}
+.eml-media .rm{position:absolute;top:3px;right:3px;background:var(--ez-surface);border:none;border-radius:50%;width:20px;height:20px;font-size:11px;line-height:20px;text-align:center;color:var(--ez-fg-muted);cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.1);z-index:6;display:flex;align-items:center;justify-content:center;padding:0;opacity:0;transition:.12s;}
 .eml-media:hover .rm{opacity:1;}
-.eml-media .rm:hover{background:#fdecec;color:#c0392b;}
-.eml-media .stack-badge{position:absolute;bottom:5px;right:5px;background:rgba(0,0,0,.72);color:#fff;font-size:10px;padding:1px 8px;border-radius:20px;pointer-events:none;z-index:5;}
-.eml-media .info{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:2px;padding:5px 8px 6px;background:rgba(255,255,255,.62);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,.5);opacity:0;transform:translateY(4px);transition:.15s;pointer-events:none;z-index:5;}
+.eml-media .rm:hover{background:var(--ez-bad-bg);color:var(--ez-bad-fg);}
+.eml-media .stack-badge{position:absolute;bottom:5px;right:5px;background:var(--ez-strong);color:var(--ez-on-strong);font-size:10px;padding:1px 8px;border-radius:20px;pointer-events:none;z-index:5;}
+.eml-media .info{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:2px;padding:5px 8px 6px;background:var(--ez-surface);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,.5);opacity:0;transform:translateY(4px);transition:.15s;pointer-events:none;z-index:5;}
 .eml-media:hover .info{opacity:1;transform:none;}
 .eml-media.playing .info{opacity:0;transform:translateY(4px);pointer-events:none;}
 .eml-media.playing:hover .info{opacity:0;}
-.eml-media .eml-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,.55);color:#fff;border:none;border-radius:50%;width:44px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:6;font-size:16px;padding:0;opacity:0;pointer-events:none;transition:.15s;font-family:inherit;}
+.eml-media .eml-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--ez-strong);color:var(--ez-on-strong);border:none;border-radius:50%;width:44px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:6;font-size:16px;padding:0;opacity:0;pointer-events:none;transition:.15s;font-family:inherit;}
 .eml-media:hover .eml-play{opacity:1;pointer-events:auto;}
 .eml-media.playing .eml-play{opacity:0;pointer-events:none;}
-.eml-media audio,.eml-pvmain audio{background:#fff !important;border-radius:8px;color-scheme:light;}
-.eml-media audio::-webkit-media-controls-panel,.eml-pvmain audio::-webkit-media-controls-panel,.eml-media audio::-webkit-media-controls-enclosure,.eml-pvmain audio::-webkit-media-controls-enclosure{background:#fff !important;border-radius:8px;}
-.eml-media audio::-webkit-media-controls-timeline,.eml-pvmain audio::-webkit-media-controls-timeline{background:#fff;border-radius:4px;}
-.eml-media .info .fname{font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#1a1f2b;}
+.eml-media audio,.eml-pvmain audio{background:var(--ez-bg) !important;border-radius:8px;color-scheme:light;}
+.eml-media audio::-webkit-media-controls-panel,.eml-pvmain audio::-webkit-media-controls-panel,.eml-media audio::-webkit-media-controls-enclosure,.eml-pvmain audio::-webkit-media-controls-enclosure{background:var(--ez-bg) !important;border-radius:8px;}
+.eml-media audio::-webkit-media-controls-timeline,.eml-pvmain audio::-webkit-media-controls-timeline{background:var(--ez-bg);border-radius:4px;}
+.eml-media .info .fname{font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ez-fg);}
 .eml-root input[type=number]{-moz-appearance:textfield;appearance:textfield;}
 .eml-root input[type=number]::-webkit-inner-spin-button,.eml-root input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
-.eml-media .info .fmeta{font-size:10px;color:#64748b;display:flex;justify-content:space-between;}
-.eml-media .info .fmeta .suffix{background:rgba(255,255,255,.7);padding:0 6px;border-radius:4px;border:1px solid rgba(255,255,255,.6);}
-.eml-empty{background:#fbfcfe;border:2px dashed #d1d5db;border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:230px;cursor:pointer;transition:.15s;color:#94a3b8;gap:4px;}
-.eml-empty:hover{border-color:#94a3b8;background:#f3f5f9;}
+.eml-media .info .fmeta{font-size:10px;color:var(--ez-fg-3);display:flex;justify-content:space-between;}
+.eml-media .info .fmeta .suffix{background:var(--ez-surface);padding:0 6px;border-radius:4px;border:1px solid rgba(255,255,255,.6);}
+.eml-empty{background:var(--ez-surface);border:2px dashed var(--ez-border);border-radius:9px;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:230px;cursor:pointer;transition:.15s;color:var(--ez-fg-muted);gap:4px;}
+.eml-empty:hover{border-color:var(--ez-border-strong);background:var(--ez-surface-3);}
 .eml-empty .big{font-size:28px;font-weight:300;line-height:1;}
-.eml-addbar{margin-top:8px;padding:8px 0;border-top:1px solid #eef1f6;text-align:center;cursor:pointer;color:#6b7a8e;font-size:13px;opacity:.6;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0;}
-.eml-addbar:hover{opacity:1;background:#f3f5f9;}
-.eml-socket-label{position:fixed;z-index:20;pointer-events:none;background:rgba(26,36,48,0.5);color:#e8e8f0;font-size:9px;line-height:1;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,.18);white-space:nowrap;user-select:none;display:inline-flex;align-items:center;}
+.eml-addbar{margin-top:8px;padding:8px 0;border-top:1px solid var(--ez-border-2);text-align:center;cursor:pointer;color:var(--ez-fg-3);font-size:13px;opacity:.6;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0;}
+.eml-addbar:hover{opacity:1;background:var(--ez-surface-3);}
+.eml-socket-label{position:fixed;z-index:20;pointer-events:none;background:rgba(12,16,24,.4);color:#eef1f6;font-size:9px;line-height:1;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,.18);white-space:nowrap;user-select:none;display:inline-flex;align-items:center;}
 .eml-socket-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-right:5px;border:1px solid rgba(255,255,255,.3);}
 `;
 
 let _styleInjected = false;
 let _widgetSeq = 0;
-function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
+function injectStyle() {
+  ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 function nextWidgetType() { _widgetSeq += 1; return 'eml-config__' + _widgetSeq.toString(36); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 function genId() { return 'id' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
 function uiToast(msg) {
   const t = el('div');
-  t.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1e293b;color:#fff;padding:8px 20px;border-radius:30px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.2);z-index:10000;opacity:0;transition:opacity .3s;pointer-events:none;';
+  t.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--ez-strong);color:var(--ez-on-strong);padding:8px 20px;border-radius:30px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.2);z-index:10000;opacity:0;transition:opacity .3s;pointer-events:none;';
   t.textContent = msg; document.body.appendChild(t);
   requestAnimationFrame(() => { t.style.opacity = '1'; });
   setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 2000);
@@ -187,7 +189,7 @@ function render(node) {
   // 顶部预设
   const top = panel.querySelector('.eml-top'); top.innerHTML = '';
   const presetWrap = el('div'); presetWrap.style.cssText = 'position:relative;display:inline-flex;align-items:center;flex:0 0 auto;';
-  const presetSel = el('select', 'eml-preset'); presetSel._node = node; presetSel.style.cssText = 'position:absolute;opacity:0;pointer-events:none;width:0;height:0;left:0;top:0;';
+  const presetSel = el('select', 'eml-preset'); presetSel._node = node; presetSel.style.cssText = 'display:none;';   // 只是 option 的载体，不能接收点击（否则会弹出系统原生下拉）
   const presetBtn = el('button', 'eml-preset-btn', { type: 'button' }); presetBtn.textContent = 'default';
   const presetMenu = el('div', 'eml-preset-menu');
   presetWrap.appendChild(presetSel); presetWrap.appendChild(presetBtn); presetWrap.appendChild(presetMenu);
@@ -199,14 +201,14 @@ function render(node) {
   const saveBtn = el('button', 'eml-btn primary', { type: 'button' }); saveBtn.textContent = ezT('Save preset');
   const delBtn = el('button', 'eml-btn danger', { type: 'button' }); delBtn.textContent = ezT('Delete preset');
   top.appendChild(saveBtn); top.appendChild(delBtn);
-  const gcLabel = el('span'); gcLabel.textContent = ezT('Columns'); gcLabel.style.cssText = 'font-size:11px;color:#5f6b7a;';
+  const gcLabel = el('span'); gcLabel.textContent = ezT('Columns'); gcLabel.style.cssText = 'font-size:11px;color:var(--ez-fg-3);';
   const gcInput = el('input'); gcInput.type = 'number'; gcInput.min = '1'; gcInput.step = '1'; gcInput.value = String(st.gridCols || 3); gcInput.title = ezT('Cards per row');
-  gcInput.style.cssText = 'width:48px;height:30px;padding:4px 6px;font-size:12px;border:1px solid #dce3ec;border-radius:8px;text-align:center;background:#fff;';
+  gcInput.style.cssText = 'width:48px;height:30px;padding:4px 6px;font-size:12px;border:1px solid var(--ez-border);border-radius:8px;text-align:center;background:var(--ez-bg);';
   gcInput.addEventListener('change', () => { const v = Math.max(1, parseInt(gcInput.value, 10) || 3); st.gridCols = v; gcInput.value = String(v); syncToConfig(node); render(node); });
   top.appendChild(gcLabel); top.appendChild(gcInput);
-  const rhLabel = el('span'); rhLabel.textContent = ezT('Row height'); rhLabel.style.cssText = 'font-size:11px;color:#5f6b7a;';
+  const rhLabel = el('span'); rhLabel.textContent = ezT('Row height'); rhLabel.style.cssText = 'font-size:11px;color:var(--ez-fg-3);';
   const rhInput = el('input'); rhInput.type = 'number'; rhInput.min = '0'; rhInput.step = '1'; rhInput.value = String(st.gridRowH || 1); rhInput.title = ezT('Card height multiplier: 0 = fit 16:9; >= 1 = default height (192px) × value');
-  rhInput.style.cssText = 'width:48px;height:30px;padding:4px 6px;font-size:12px;border:1px solid #dce3ec;border-radius:8px;text-align:center;background:#fff;';
+  rhInput.style.cssText = 'width:48px;height:30px;padding:4px 6px;font-size:12px;border:1px solid var(--ez-border);border-radius:8px;text-align:center;background:var(--ez-bg);';
   rhInput.addEventListener('change', () => { const v = Math.max(0, parseInt(rhInput.value, 10) || 1); st.gridRowH = v; rhInput.value = String(v); syncToConfig(node); render(node); });
   top.appendChild(rhLabel); top.appendChild(rhInput);
   const outBtn = el('button', 'eml-btn', { type: 'button' }); outBtn.textContent = ezT('Load output'); outBtn.title = ezT('Add an EzFlex-MediaOut node after the current card group'); outBtn.addEventListener('click', () => addMediaOut(node)); top.appendChild(outBtn);
@@ -328,7 +330,7 @@ function buildMediaCard(node, g, card, item) {
   m.appendChild(pv);
   const info = el('div', 'info');
   const row1 = el('div'); row1.style.cssText = 'display:flex;align-items:center;gap:6px;';
-  const tb = el('span'); tb.textContent = typeShort(first.type); tb.style.cssText = 'flex:0 0 auto;background:rgba(255,255,255,.7);border:1px solid rgba(255,255,255,.6);color:#1a1f2b;border-radius:30px;padding:0 8px;font-size:10px;font-weight:600;line-height:18px;'; row1.appendChild(tb);
+  const tb = el('span'); tb.textContent = typeShort(first.type); tb.style.cssText = 'flex:0 0 auto;background:var(--ez-surface);border:1px solid rgba(255,255,255,.6);color:var(--ez-fg);border-radius:30px;padding:0 8px;font-size:10px;font-weight:600;line-height:18px;'; row1.appendChild(tb);
   const fn = el('div', 'fname'); fn.textContent = first.name || ''; fn.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'; row1.appendChild(fn);
   info.appendChild(row1);
   const meta = el('div', 'fmeta'); const sz = el('span'); sz.textContent = formatSize(first.size); meta.appendChild(sz);
@@ -390,9 +392,9 @@ async function uploadAndAddFiles(files, node, g, card) {
 // ===== 右键菜单（三级：单个卡片 / 素材卡片组 / 分组）=====
 function buildMenu(e, items) {
   const menu = el('div');
-  menu.style.cssText = 'position:fixed;z-index:10000;background:#fff;border:1px solid #dce3ec;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.16);padding:4px;min-width:180px;';
+  menu.style.cssText = 'position:fixed;z-index:10000;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.16);padding:4px;min-width:180px;';
   items.forEach((it) => {
-    const b = el('button'); b.textContent = it.label; b.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:none;padding:6px 12px;font-size:12px;color:#1a1f2b;cursor:pointer;border-radius:6px;font-family:inherit;';
+    const b = el('button'); b.textContent = it.label; b.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:none;padding:6px 12px;font-size:12px;color:var(--ez-fg);cursor:pointer;border-radius:6px;font-family:inherit;';
     b.addEventListener('click', () => { menu.remove(); it.fn(); });
     menu.appendChild(b);
   });
@@ -565,7 +567,7 @@ function startCardDrag(e, node, g, card) {
   document.body.appendChild(ghost); cardDiv.classList.add('dragging');
   const offsetY = e.clientY - rect.top;
   const container = root.querySelector('.eml-cards');
-  const line = el('div'); line.style.cssText = 'height:5px;background:#2b3a4a;border-radius:2px;flex:0 0 5px;opacity:0;pointer-events:none;';
+  const line = el('div'); line.style.cssText = 'height:5px;background:var(--ez-strong);border-radius:2px;flex:0 0 5px;opacity:0;pointer-events:none;';
   let curIdx = g.cards.findIndex((c) => c.id === card.id);
   const onMove = (ev) => {
     ghost.style.top = (ev.clientY - offsetY) + 'px';
@@ -658,7 +660,7 @@ function beginGroupDrag(e, node, gi, tab) {
   const ghost = tab.cloneNode(true);
   ghost.style.cssText = 'position:fixed;z-index:99999;pointer-events:none;opacity:.9;width:' + rect.width + 'px;left:' + rect.left + 'px;top:' + rect.top + 'px;box-shadow:0 10px 28px rgba(0,0,0,.2);';
   document.body.appendChild(ghost); tab.classList.add('dragging');
-  const line = el('div'); line.style.cssText = 'width:3px;align-self:stretch;background:#2b3a4a;border-radius:2px;opacity:0;flex:0 0 3px;';
+  const line = el('div'); line.style.cssText = 'width:3px;align-self:stretch;background:var(--ez-strong);border-radius:2px;opacity:0;flex:0 0 3px;';
   tabsBar.appendChild(line);
   let cur = gi;
   let _raf = 0, _lastEv = null;
@@ -702,7 +704,7 @@ async function loadPresetsInto(sel) {
       dd.btn.textContent = cur;
       dd.menu.innerHTML = '';
       const opts = [...sel.options];
-      if (!opts.length) { const e = el('div', 'eml-preset-item'); e.textContent = ezT('(No presets)'); e.style.cssText = 'padding:6px 12px;font-size:12px;color:#94a3b8;'; dd.menu.appendChild(e); }
+      if (!opts.length) { const e = el('div', 'eml-preset-item'); e.textContent = ezT('(No presets)'); e.style.cssText = 'padding:6px 12px;font-size:12px;color:var(--ez-fg-muted);'; dd.menu.appendChild(e); }
       opts.forEach((o) => { const it = el('div', 'eml-preset-item' + (o.value === cur ? ' active' : '')); it.textContent = o.value; it.dataset.v = o.value; dd.menu.appendChild(it); });
     }
   } catch (_) {}
@@ -755,21 +757,21 @@ async function fetchBrowse(path) {
 }
 function openBrowse(node, g, card) {
   const ov = el('div');
-  ov.style.cssText = 'position:fixed;inset:0;z-index:9998;background:#f5f6f8;color:#1a1f2b;font-family:Inter,sans-serif;display:flex;flex-direction:column;';
-  ov.innerHTML = '<div class="eml-toolbar" style="display:flex;align-items:center;gap:6px;padding:10px 18px 10px 46px;background:#fff;border-bottom:1px solid #e6e9ef;flex-shrink:0;flex-wrap:wrap;position:relative;"><b style="font-size:15px;white-space:nowrap;">' + ezT('Media browser') + '</b>' +
-    '<button class="eml-navb" title="' + ezT('Back') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">←</button>' +
-    '<button class="eml-navf" title="' + ezT('Forward') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">→</button>' +
-    '<button class="eml-navup" title="' + ezT('Parent directory') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↑</button>' +
-    '<button class="eml-navr" title="' + ezT('Refresh') + '" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;width:28px;height:28px;color:#4d5b6d;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↻</button>' +
-    '<input class="eml-bbsearch" placeholder="' + ezT('Search this folder…') + '" style="flex:1 1 auto;max-width:360px;min-width:120px;padding:6px 10px;font-size:12px;border:1px solid #dce3ec;border-radius:7px;background:#fff;outline:none;font-family:inherit;">' +
-    '<input class="eml-path" placeholder="' + ezT('Enter a path…') + '" title="' + ezT('Type a drive/path and press Enter to go') + '" style="flex:0 1 auto;max-width:260px;min-width:130px;background:#fff;border:1px solid #dce3ec;border-radius:7px;padding:6px 10px;font-size:12px;outline:none;font-family:inherit;" />' +
-    '<button class="eml-bbclose" style="position:absolute;top:8px;right:14px;width:28px;height:28px;border-radius:50%;border:1px solid rgba(220,38,38,.32);background:rgba(220,38,38,.1);color:#dc2626;font-size:15px;cursor:pointer;">✕</button></div>' +
-    '<div style="flex:1;display:flex;min-height:0;"><div class="eml-bbtree" style="width:240px;flex-shrink:0;background:#fff;border-right:1px solid #e6e9ef;overflow:auto;padding:6px 0;"></div><div style="flex:1;display:flex;flex-direction:column;min-width:0;"><div class="eml-panebar" style="display:flex;align-items:center;gap:6px;padding:6px 14px;background:#fff;border-bottom:1px solid #eef1f6;flex-shrink:0;flex-wrap:wrap;"><span class="eml-viewbar" style="display:flex;gap:2px;background:#f1f4fa;border-radius:8px;padding:2px;border:1px solid #e2e8f0;"><button data-v="list" title="' + ezT('List') + '">☰</button><button data-v="big" title="' + ezT('Large icons') + '">▦</button><button data-v="small" title="' + ezT('Small icons') + '">▤</button><button data-v="detail" title="' + ezT('Detail view') + '">≡</button></span>' +
-    '<button class="eml-selall" title="' + ezT('Select all') + '" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Select all') + '</button>' +
-    '<button class="eml-selinv" title="' + ezT('Invert') + '" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Invert') + '</button>' +
-    '<button class="eml-selclr" title="' + ezT('Deselect') + '" style="background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Clear') + '</button>' +
-    '<span class="eml-bbcount" style="font-size:12px;color:#6b7a8e;">' + ezT('Selected ') + 0 + ezT(' item(s)') + '</span></div><div class="eml-bblist" style="flex:1;overflow:auto;padding:12px 18px;"></div></div></div>' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 18px;background:#fff;border-top:1px solid #e6e9ef;flex-shrink:0;"><span style="font-size:11px;color:#94a3b8;">' + ezT('Drag files here to upload / drag files onto cards') + '</span><button class="eml-bbadd" style="background:#2b3a4a;border:1px solid #2b3a4a;color:#fff;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;">' + ezT('Add to card group') + '</button></div>';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:9998;background:var(--ez-surface-2);color:var(--ez-fg);font-family:Inter,sans-serif;display:flex;flex-direction:column;';
+  ov.innerHTML = '<div class="eml-toolbar" style="display:flex;align-items:center;gap:6px;padding:10px 18px 10px 46px;background:var(--ez-bg);border-bottom:1px solid var(--ez-border);flex-shrink:0;flex-wrap:wrap;position:relative;"><b style="font-size:15px;white-space:nowrap;">' + ezT('Media browser') + '</b>' +
+    '<button class="eml-navb" title="' + ezT('Back') + '" style="background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;width:28px;height:28px;color:var(--ez-fg-2);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">←</button>' +
+    '<button class="eml-navf" title="' + ezT('Forward') + '" style="background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;width:28px;height:28px;color:var(--ez-fg-2);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">→</button>' +
+    '<button class="eml-navup" title="' + ezT('Parent directory') + '" style="background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;width:28px;height:28px;color:var(--ez-fg-2);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↑</button>' +
+    '<button class="eml-navr" title="' + ezT('Refresh') + '" style="background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;width:28px;height:28px;color:var(--ez-fg-2);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1;flex:0 0 auto;">↻</button>' +
+    '<input class="eml-bbsearch" placeholder="' + ezT('Search this folder…') + '" style="flex:1 1 auto;max-width:360px;min-width:120px;padding:6px 10px;font-size:12px;border:1px solid var(--ez-border);border-radius:7px;background:var(--ez-bg);outline:none;font-family:inherit;">' +
+    '<input class="eml-path" placeholder="' + ezT('Enter a path…') + '" title="' + ezT('Type a drive/path and press Enter to go') + '" style="flex:0 1 auto;max-width:260px;min-width:130px;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:7px;padding:6px 10px;font-size:12px;outline:none;font-family:inherit;" />' +
+    '<button class="eml-bbclose" style="position:absolute;top:8px;right:14px;width:28px;height:28px;border-radius:50%;border:1px solid rgba(220,38,38,.32);background:rgba(220,38,38,.1);color:var(--ez-bad-fg);font-size:15px;cursor:pointer;">✕</button></div>' +
+    '<div style="flex:1;display:flex;min-height:0;"><div class="eml-bbtree" style="width:240px;flex-shrink:0;background:var(--ez-bg);border-right:1px solid var(--ez-border);overflow:auto;padding:6px 0;"></div><div style="flex:1;display:flex;flex-direction:column;min-width:0;"><div class="eml-panebar" style="display:flex;align-items:center;gap:6px;padding:6px 14px;background:var(--ez-bg);border-bottom:1px solid var(--ez-border-2);flex-shrink:0;flex-wrap:wrap;"><span class="eml-viewbar" style="display:flex;gap:2px;background:var(--ez-surface-3);border-radius:8px;padding:2px;border:1px solid var(--ez-border);"><button data-v="list" title="' + ezT('List') + '">☰</button><button data-v="big" title="' + ezT('Large icons') + '">▦</button><button data-v="small" title="' + ezT('Small icons') + '">▤</button><button data-v="detail" title="' + ezT('Detail view') + '">≡</button></span>' +
+    '<button class="eml-selall" title="' + ezT('Select all') + '" style="background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Select all') + '</button>' +
+    '<button class="eml-selinv" title="' + ezT('Invert') + '" style="background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Invert') + '</button>' +
+    '<button class="eml-selclr" title="' + ezT('Deselect') + '" style="background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer;">' + ezT('Clear') + '</button>' +
+    '<span class="eml-bbcount" style="font-size:12px;color:var(--ez-fg-3);">' + ezT('Selected ') + 0 + ezT(' item(s)') + '</span></div><div class="eml-bblist" style="flex:1;overflow:auto;padding:12px 18px;"></div></div></div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 18px;background:var(--ez-bg);border-top:1px solid var(--ez-border);flex-shrink:0;"><span style="font-size:11px;color:var(--ez-fg-muted);">' + ezT('Drag files here to upload / drag files onto cards') + '</span><button class="eml-bbadd" style="background:var(--ez-strong);border:1px solid var(--ez-strong);color:var(--ez-on-strong);border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;">' + ezT('Add to card group') + '</button></div>';
   document.body.appendChild(ov);
   // 「＋根」：把输入框/当前目录登记为「可浏览根目录」（后端只允许本机登记；浏览器只能在根目录内导航）
   try {
@@ -778,7 +780,7 @@ function openBrowse(node, g, card) {
       const rb = el('button', 'eml-addroot'); rb.style.flex = '0 0 auto';
       rb.textContent = ezT('Save root');
       rb.title = ezT('Add the folder in the field above as a browsable root and enter it (local only). To limit unauthorized reads, the browser can only navigate inside roots.');
-      rb.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:6px 10px;font-size:12px;color:#4d5b6d;cursor:pointer;white-space:nowrap;';
+      rb.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:7px;padding:6px 10px;font-size:12px;color:var(--ez-fg-2);cursor:pointer;white-space:nowrap;';
       rb.addEventListener('click', async () => {
         const v = (pb.value || '').trim() || cur;
         if (!v) { uiToast(ezT('Enter a folder in the path field first')); return; }
@@ -792,13 +794,13 @@ function openBrowse(node, g, card) {
       const rs = el('select', 'eml-roots');
       const rph = el('option'); rph.value = ''; rph.textContent = ezT('— Root —'); rs.appendChild(rph);
       rs.title = ezT('Browsable roots: remote/web sessions can only see inside roots; locally you can use "Add as root" on the right to add other folders');
-      rs.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:7px;padding:5px 8px;font-size:12px;color:#4d5b6d;max-width:230px;min-width:130px;flex:0 0 auto;';
+      rs.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:7px;padding:5px 8px;font-size:12px;color:var(--ez-fg-2);max-width:230px;min-width:130px;flex:0 0 auto;';
       rs.addEventListener('change', () => { pinnedRoot = rs.value; syncDelBtn(); if (rs.value) navigate(rs.value, false); });
       const host = pb.parentNode || ov.querySelector('.eml-toolbar') || ov;
       const rx = el('button', 'eml-rmroot'); rx.style.flex = '0 0 auto';
       rx.textContent = ezT('Delete root');
       rx.title = ezT('Delete the root selected in the dropdown (built-in roots are always available)');
-      rx.style.cssText = 'background:#fff;border:1px solid #dce3ec;border-radius:7px;padding:6px 10px;font-size:12px;color:#b3352f;cursor:pointer;white-space:nowrap;';
+      rx.style.cssText = 'background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:7px;padding:6px 10px;font-size:12px;color:var(--ez-bad-fg);cursor:pointer;white-space:nowrap;';
       rx.addEventListener('click', async () => {
         const v = (rs.value || '').trim() || (pb.value || '').trim() || cur;
         if (!v) return;
@@ -854,7 +856,7 @@ function openBrowse(node, g, card) {
     rx.disabled = !on;
     rx.style.opacity = on ? '' : '.45';
     rx.style.cursor = on ? 'pointer' : 'default';
-    rx.style.color = on ? '#b3352f' : '#8a94a3';
+    rx.style.color = on ? 'var(--ez-bad-fg)' : 'var(--ez-fg-muted)';
   };
   const refreshRoots = async (pick) => {
     try { const r = await fetch('/media_loader/roots'); const d = await r.json(); applyRoots(d.roots || [], pick || '', d.mine || []); } catch (_) {}
@@ -892,7 +894,7 @@ function openBrowse(node, g, card) {
     home.addEventListener('click', () => navigate(''));
     tree.appendChild(home);
     const dirs = treeCache[cur] || curData.dirs || [];
-    if (!dirs.length) { const e = el('div'); e.textContent = ezT('(No subfolders)'); e.style.cssText = 'padding:8px 12px;font-size:11px;color:#94a3b8;'; tree.appendChild(e); }
+    if (!dirs.length) { const e = el('div'); e.textContent = ezT('(No subfolders)'); e.style.cssText = 'padding:8px 12px;font-size:11px;color:var(--ez-fg-muted);'; tree.appendChild(e); }
     const mkNode = (d, depth) => {
       const row = el('div', 'eml-bbtrow' + (selFolder === d.path ? ' sel' : '')); row.style.paddingLeft = (10 + depth * 26) + 'px';
       const twist = el('div', 'eml-bbtwist' + (treeExpanded[d.path] ? ' expanded' : '')); twist.innerHTML = _chevSVG;
@@ -920,8 +922,8 @@ function openBrowse(node, g, card) {
   };
   const mkAddBtn = (f) => {
     const b = el('button'); b.type = 'button';
-    b.style.cssText = 'position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:rgba(255,255,255,.55);color:#1a1f2b;font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;font-family:inherit;padding:0;';
-    const refresh = () => { const on = cardHasFile(f); b.textContent = on ? '−' : '+'; b.title = on ? ezT('Remove from card group') : ezT('Add to card group'); b.style.background = on ? 'rgba(74,106,90,.85)' : 'rgba(255,255,255,.55)'; b.style.color = on ? '#fff' : '#1a1f2b'; };
+    b.style.cssText = 'position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:var(--ez-surface);color:var(--ez-fg);font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;font-family:inherit;padding:0;';
+    const refresh = () => { const on = cardHasFile(f); b.textContent = on ? '−' : '+'; b.title = on ? ezT('Remove from card group') : ezT('Add to card group'); b.style.background = on ? 'rgba(74,106,90,.85)' : 'rgba(255,255,255,.55)'; b.style.color = on ? 'var(--ez-on-strong)' : 'var(--ez-fg)'; };
     refresh();
     b.addEventListener('mouseenter', () => { b.style.transform = 'scale(1.05)'; });
     b.addEventListener('mouseleave', () => { b.style.transform = ''; });
@@ -932,7 +934,7 @@ function openBrowse(node, g, card) {
     const q = (search.value || '').toLowerCase();
     let listF = (paneFiles || []).filter((f) => !q || (f.name || '').toLowerCase().indexOf(q) >= 0);
     list.innerHTML = '';
-    if (!listF.length) { const e = el('div'); e.textContent = ezT('No media files found'); e.style.cssText = 'color:#8a9aa8;text-align:center;padding:40px 12px;font-size:13px;'; list.appendChild(e); return; }
+    if (!listF.length) { const e = el('div'); e.textContent = ezT('No media files found'); e.style.cssText = 'color:var(--ez-fg-muted);text-align:center;padding:40px 12px;font-size:13px;'; list.appendChild(e); return; }
     const toggleSel = (i, ev) => {
       const f = listF[i]; const p = f.path || f.name;
       if (ev.shiftKey && lastAnchor >= 0) {
@@ -947,14 +949,14 @@ function openBrowse(node, g, card) {
       const row = el('div'); row.classList.add('eml-bb-item'); row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:12px;position:relative;'; row.dataset.path = f.path || f.name;
       const ic = el('span'); ic.textContent = icon(f.type); row.appendChild(ic);
       const nm = el('span'); nm.textContent = f.name; nm.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'; row.appendChild(nm);
-      const sv = el('span'); sv.textContent = typeShort(f.type); sv.style.cssText = 'color:#6b7a8e;font-size:10px;background:#f3f5f9;padding:0 8px;border-radius:30px;'; row.appendChild(sv);
+      const sv = el('span'); sv.textContent = typeShort(f.type); sv.style.cssText = 'color:var(--ez-fg-3);font-size:10px;background:var(--ez-surface-3);padding:0 8px;border-radius:30px;'; row.appendChild(sv);
       row.appendChild(mkAddBtn(f));
       row.addEventListener('click', (e) => toggleSel(listF.indexOf(f), e));
       return row;
     };
     const renderTile = (f) => {
-      const tile = el('div'); tile.classList.add('eml-bb-item'); tile.style.cssText = 'cursor:pointer;border:1px solid #eef1f6;border-radius:9px;overflow:hidden;background:#fff;align-self:start;position:relative;'; tile.dataset.path = f.path || f.name;
-      const pv = el('div'); pv.style.cssText = 'height:88px;max-height:88px;min-height:88px;background:#eef1f6;display:flex;align-items:center;justify-content:center;font-size:30px;color:#94a3b8;overflow:hidden;';
+      const tile = el('div'); tile.classList.add('eml-bb-item'); tile.style.cssText = 'cursor:pointer;border:1px solid var(--ez-border-2);border-radius:9px;overflow:hidden;background:var(--ez-bg);align-self:start;position:relative;'; tile.dataset.path = f.path || f.name;
+      const pv = el('div'); pv.style.cssText = 'height:88px;max-height:88px;min-height:88px;background:var(--ez-surface-3);display:flex;align-items:center;justify-content:center;font-size:30px;color:var(--ez-fg-muted);overflow:hidden;';
       if (isAbsImg(f)) { const im = el('img'); im.src = fileUrl(f); im.style.cssText = 'display:block;max-width:100%;max-height:100%;width:100%;height:100%;object-fit:contain;'; pv.appendChild(im); } else pv.textContent = icon(f.type);
       const nm = el('div'); nm.textContent = f.name; nm.style.cssText = 'font-size:10px;padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
       tile.appendChild(pv); tile.appendChild(nm); tile.appendChild(mkAddBtn(f));
@@ -963,10 +965,10 @@ function openBrowse(node, g, card) {
     };
     if (view === 'big') { list.style.display = 'grid'; list.style.gridTemplateColumns = 'repeat(5,1fr)'; list.style.gridAutoRows = '112px'; list.style.gridAutoFlow = 'row'; list.style.gap = '10px'; list.style.alignItems = 'start'; listF.forEach((f) => list.appendChild(renderTile(f))); }
     else if (view === 'small') { list.style.display = 'grid'; list.style.gridTemplateColumns = 'repeat(8,1fr)'; list.style.gridAutoRows = '96px'; list.style.gridAutoFlow = 'row'; list.style.gap = '6px'; list.style.alignItems = 'start'; listF.forEach((f) => list.appendChild(renderTile(f))); }
-    else if (view === 'detail') { list.style.display = 'flex'; list.style.flexDirection = 'column'; list.style.gap = '2px'; listF.forEach((f) => { const row = renderRow(f); const sz = el('span'); sz.textContent = formatSize(f.size); sz.style.cssText = 'color:#6b7a8e;font-size:10px;min-width:64px;'; row.appendChild(sz); const mt = el('span'); mt.textContent = f.mtime || ''; mt.style.cssText = 'color:#94a3b8;font-size:10px;min-width:120px;'; row.appendChild(mt); list.appendChild(row); }); }
+    else if (view === 'detail') { list.style.display = 'flex'; list.style.flexDirection = 'column'; list.style.gap = '2px'; listF.forEach((f) => { const row = renderRow(f); const sz = el('span'); sz.textContent = formatSize(f.size); sz.style.cssText = 'color:var(--ez-fg-3);font-size:10px;min-width:64px;'; row.appendChild(sz); const mt = el('span'); mt.textContent = f.mtime || ''; mt.style.cssText = 'color:var(--ez-fg-muted);font-size:10px;min-width:120px;'; row.appendChild(mt); list.appendChild(row); }); }
     else { list.style.display = 'flex'; list.style.flexDirection = 'column'; list.style.gap = '2px'; listF.forEach((f) => list.appendChild(renderRow(f))); }
   };
-  try { drawTree(); drawPane(); } catch (err) { try { list.innerHTML = ''; const e = el('div'); e.textContent = ezT('Failed to render browser: ') + (err && err.message || err); e.style.cssText = 'color:#c0392b;text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
+  try { drawTree(); drawPane(); } catch (err) { try { list.innerHTML = ''; const e = el('div'); e.textContent = ezT('Failed to render browser: ') + (err && err.message || err); e.style.cssText = 'color:var(--ez-bad-fg);text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
   ov.querySelector('.eml-navb').addEventListener('click', () => { if (histIdx > 0) { histIdx--; navigate(hist[histIdx], false); } });
   ov.querySelector('.eml-navf').addEventListener('click', () => { if (histIdx < hist.length - 1) { histIdx++; navigate(hist[histIdx], false); } });
   ov.querySelector('.eml-navup').addEventListener('click', () => {
@@ -975,7 +977,7 @@ function openBrowse(node, g, card) {
   });
   ov.querySelector('.eml-navr').addEventListener('click', () => { navigate(cur, false); });
   ov.querySelector('.eml-path').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); const v = (e.target.value || '').trim(); if (v) navigate(v); } });
-  ov.querySelectorAll('.eml-viewbar button').forEach((b) => { b.style.cssText = 'background:transparent;border:none;padding:2px 8px;font-size:12px;color:#4d5b6d;cursor:pointer;border-radius:6px;'; if (b.dataset.v === view) b.style.background = '#fff'; b.addEventListener('click', () => { view = b.dataset.v; ov.querySelectorAll('.eml-viewbar button').forEach((x) => x.style.background = 'transparent'); b.style.background = '#fff'; drawPane(); }); });
+  ov.querySelectorAll('.eml-viewbar button').forEach((b) => { b.style.cssText = 'background:transparent;border:none;padding:2px 8px;font-size:12px;color:var(--ez-fg-2);cursor:pointer;border-radius:6px;'; if (b.dataset.v === view) b.style.background = 'var(--ez-bg)'; b.addEventListener('click', () => { view = b.dataset.v; ov.querySelectorAll('.eml-viewbar button').forEach((x) => x.style.background = 'transparent'); b.style.background = 'var(--ez-bg)'; drawPane(); }); });
   ov.querySelector('.eml-selall').addEventListener('click', () => { selected = new Set(paneFiles.map((f) => f.path || f.name)); lastAnchor = paneFiles.length - 1; refreshSel(); });
   ov.querySelector('.eml-selinv').addEventListener('click', () => { const all = new Set(paneFiles.map((f) => f.path || f.name)); const inv = new Set(); all.forEach((p) => { if (!selected.has(p)) inv.add(p); }); selected = inv; lastAnchor = -1; refreshSel(); });
   ov.querySelector('.eml-selclr').addEventListener('click', () => { selected = new Set(); lastAnchor = -1; refreshSel(); });
@@ -994,7 +996,7 @@ function openBrowse(node, g, card) {
     card.items.push({ id: genId(), files: picked.map((f) => fileEntryOf(f)) });
     syncToConfig(node); render(node); closeBrowse(); uiToast(ezT('Added ') + picked.length + ezT(' media files'));
   });
-  try { navigate(''); } catch (err) { try { const e = el('div'); e.textContent = ezT('Failed to load browser: ') + (err && err.message || err); e.style.cssText = 'color:#c0392b;text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
+  try { navigate(''); } catch (err) { try { const e = el('div'); e.textContent = ezT('Failed to load browser: ') + (err && err.message || err); e.style.cssText = 'color:var(--ez-bad-fg);text-align:center;padding:20px;font-size:13px;'; list.appendChild(e); } catch (_) {} }
 }
 
 // ===== 预览模态框 =====
@@ -1005,13 +1007,13 @@ function openPreview(node, item, card) {
   const ov = el('div');
   const stopPv = () => { try { ov.querySelectorAll('audio,video').forEach((a) => { try { a.pause(); } catch (_) {} }); } catch (_) {} };
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.6);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:2000;';
-  const box = el('div'); box.style.cssText = 'background:#fff;border-radius:12px;width:92vw;max-width:920px;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.2);overflow:hidden;';
-  box.innerHTML = '<div class="eml-pvhd" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid #eef1f6;flex-shrink:0;"><span class="eml-pvtt" style="font-size:15px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><span class="eml-pvmode" style="display:flex;gap:6px;"></span><button class="eml-pvx" style="background:none;border:none;font-size:20px;cursor:pointer;color:#94a3b8;">✕</button></div>' +
-    '<div class="eml-pvbody" style="flex:1;padding:14px 20px;overflow:auto;display:flex;flex-direction:column;gap:10px;min-height:280px;"><div class="eml-pvmain" style="position:relative;width:100%;max-height:52vh;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:#fff;"></div><div class="eml-pvstripwrap" style="display:flex;align-items:center;gap:6px;flex-shrink:0;"><button class="eml-stripL">‹</button><div class="eml-pvstrip" style="flex:1;display:flex;gap:6px;overflow-x:auto;padding:6px 0;border-top:1px solid #eef1f6;"></div><button class="eml-stripR">›</button></div></div>' +
-    '<div class="eml-pvfoot" style="padding:10px 20px;border-top:1px solid #eef1f6;font-size:12px;color:#6b7a8e;display:flex;justify-content:space-between;"></div>';
+  const box = el('div'); box.style.cssText = 'background:var(--ez-bg);border-radius:12px;width:92vw;max-width:920px;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.2);overflow:hidden;';
+  box.innerHTML = '<div class="eml-pvhd" style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--ez-border-2);flex-shrink:0;"><span class="eml-pvtt" style="font-size:15px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span><span class="eml-pvmode" style="display:flex;gap:6px;"></span><button class="eml-pvx" style="background:none;border:none;font-size:20px;cursor:pointer;color:var(--ez-fg-muted);">✕</button></div>' +
+    '<div class="eml-pvbody" style="flex:1;padding:14px 20px;overflow:auto;display:flex;flex-direction:column;gap:10px;min-height:280px;"><div class="eml-pvmain" style="position:relative;width:100%;max-height:52vh;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:var(--ez-bg);"></div><div class="eml-pvstripwrap" style="display:flex;align-items:center;gap:6px;flex-shrink:0;"><button class="eml-stripL">‹</button><div class="eml-pvstrip" style="flex:1;display:flex;gap:6px;overflow-x:auto;padding:6px 0;border-top:1px solid var(--ez-border-2);"></div><button class="eml-stripR">›</button></div></div>' +
+    '<div class="eml-pvfoot" style="padding:10px 20px;border-top:1px solid var(--ez-border-2);font-size:12px;color:var(--ez-fg-3);display:flex;justify-content:space-between;"></div>';
   ov.appendChild(box); document.body.appendChild(ov);
   const tt = box.querySelector('.eml-pvtt'), mode = box.querySelector('.eml-pvmode'), main = box.querySelector('.eml-pvmain'), strip = box.querySelector('.eml-pvstrip'), foot = box.querySelector('.eml-pvfoot'), stripL = box.querySelector('.eml-stripL'), stripR = box.querySelector('.eml-stripR');
-  stripL.style.cssText = stripR.style.cssText = 'background:none;border:none;font-size:22px;color:#94a3b8;cursor:pointer;padding:2px;line-height:1;flex:0 0 auto;';
+  stripL.style.cssText = stripR.style.cssText = 'background:none;border:none;font-size:22px;color:var(--ez-fg-muted);cursor:pointer;padding:2px;line-height:1;flex:0 0 auto;';
   let idx = 0; let batch = false; let selSet = new Set();
   // 左右翻页箭头：容器整高但 **不吃点击**（pointer-events:none），只有中间那个圆形手柄可点。
   // 以前是 48px 宽、整高的可点条 —— 正好压在视频原生控制条左边的播放三角上，点三角当然没反应。
@@ -1020,7 +1022,7 @@ function openPreview(node, item, card) {
     a.style.cssText = 'position:absolute;top:0;bottom:0;' + (side === 'L' ? 'left:0' : 'right:0') + ';width:48px;display:flex;align-items:center;justify-content:center;opacity:0;transition:.15s;z-index:5;pointer-events:none;';
     const hit = el('span');
     hit.innerHTML = side === 'L' ? '‹' : '›';
-    hit.style.cssText = 'width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:30px;line-height:1;color:#3a4a5e;background:rgba(255,255,255,.88);box-shadow:0 2px 12px rgba(0,0,0,.18);cursor:pointer;pointer-events:auto;user-select:none;';
+    hit.style.cssText = 'width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:30px;line-height:1;color:var(--ez-fg-2);background:var(--ez-surface);box-shadow:0 2px 12px rgba(0,0,0,.18);cursor:pointer;pointer-events:auto;user-select:none;';
     a.appendChild(hit); a._hit = hit;
     main.appendChild(a);
     return a;
@@ -1035,8 +1037,8 @@ function openPreview(node, item, card) {
   const openLoc = (f) => { try { fetch('/media_loader/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path }) }); } catch (_) {} };
   const openSave = async (f) => { if (!f) return; try { const d = await fetch('/media_loader/pick_folder', { method: 'POST' }); const j = await d.json(); if (!j.ok || !j.path) { uiToast(j.error || ezT('No folder selected')); return; } const r = await fetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path, dest: j.path }) }); const res = await r.json(); uiToast(res.ok ? (ezT('Saved as ') + res.dest) : (ezT('Save failed: ') + (res.error || ''))); } catch (_) { uiToast(ezT('Save failed')); } };
   const buildMenu = (e, f, i) => {
-    const menu = el('div'); menu.style.cssText = 'position:fixed;z-index:10000;background:#fff;border:1px solid #dce3ec;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.16);padding:4px;min-width:170px;';
-    const mk = (label, fn) => { const b = el('button'); b.textContent = label; b.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:none;padding:6px 12px;font-size:12px;color:#1a1f2b;cursor:pointer;border-radius:6px;font-family:inherit;'; b.addEventListener('click', () => { menu.remove(); fn(); }); menu.appendChild(b); };
+    const menu = el('div'); menu.style.cssText = 'position:fixed;z-index:10000;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.16);padding:4px;min-width:170px;';
+    const mk = (label, fn) => { const b = el('button'); b.textContent = label; b.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:none;padding:6px 12px;font-size:12px;color:var(--ez-fg);cursor:pointer;border-radius:6px;font-family:inherit;'; b.addEventListener('click', () => { menu.remove(); fn(); }); menu.appendChild(b); };
     const fi = i != null ? i : idx;
     mk(ezT('Split'), () => { const ff = files[fi]; if (!ff) return; if (files.length <= 1) { uiToast(ezT('Only one file; nothing to split')); return; } const splits = [{ id: genId(), files: [ff] }]; files.splice(fi, 1); const i0 = card.items.indexOf(item); if (i0 >= 0) card.items.splice(i0 + 1, 0, ...splits); if (!files.length) card.items = card.items.filter((it) => it !== item); syncToConfig(node); render(node); ov.remove(); });
     mk(ezT('Batch split'), () => { batch = true; selSet = new Set(); renderMode(); draw(); });
@@ -1049,7 +1051,7 @@ function openPreview(node, item, card) {
   };
   const renderMode = () => {
     mode.innerHTML = '';
-    const mkBtn = (label, cls, fn) => { const b = el('button'); b.textContent = label; b.className = cls || ''; b.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:8px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;'; b.addEventListener('click', fn); mode.appendChild(b); };
+    const mkBtn = (label, cls, fn) => { const b = el('button'); b.textContent = label; b.className = cls || ''; b.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;'; b.addEventListener('click', fn); mode.appendChild(b); };
     if (!batch) { mkBtn(ezT('Batch split'), 'eml-btn', () => { batch = true; selSet = new Set(); renderMode(); draw(); }); }
     else {
       mkBtn(ezT('Run split'), 'eml-btn', () => doBatchSplit());
@@ -1080,11 +1082,11 @@ function openPreview(node, item, card) {
     const d = files[idx]; if (!d) return;
     const t = d.type || 'other';
     const mk = () => {
-      if (t === 'image') { const m = el('img'); m.src = d.url; m.style.cssText = 'max-width:100%;max-height:52vh;object-fit:contain;background:#fff;'; return m; }
-      if (t === 'video') { const m = el('video'); m.src = d.url; m.controls = true; m.style.cssText = 'max-width:100%;max-height:52vh;background:#fff;'; return m; }
+      if (t === 'image') { const m = el('img'); m.src = d.url; m.style.cssText = 'max-width:100%;max-height:52vh;object-fit:contain;background:var(--ez-bg);'; return m; }
+      if (t === 'video') { const m = el('video'); m.src = d.url; m.controls = true; m.style.cssText = 'max-width:100%;max-height:52vh;background:var(--ez-bg);'; return m; }
       if (t === 'audio') { const m = makeAudioPlayer(d.url); m.style.cssText = 'width:100%;max-width:100%;'; return m; }
-      if (t === 'model_3d') { const m = el('div'); m.textContent = ezT('🧊 3D model preview'); m.style.cssText = 'font-size:54px;color:#9099a5;'; return m; }
-      const m = el('div'); m.style.cssText = 'width:100%;min-height:120px;max-height:52vh;overflow:auto;background:#fff;border-radius:8px;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:#1a1f2b;'; m.textContent = ezT('Loading…');
+      if (t === 'model_3d') { const m = el('div'); m.textContent = ezT('🧊 3D model preview'); m.style.cssText = 'font-size:54px;color:var(--ez-fg-muted);'; return m; }
+      const m = el('div'); m.style.cssText = 'width:100%;min-height:120px;max-height:52vh;overflow:auto;background:var(--ez-bg);border-radius:8px;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--ez-fg);'; m.textContent = ezT('Loading…');
       fetch(fileUrl(d)).then((r) => { if (!r.ok) throw new Error('bad'); return r.text(); }).then((txt) => { if (m.isConnected) m.textContent = (txt || ezT('(empty file)')).slice(0, 60000); }).catch(() => { if (m.isConnected) m.textContent = ezT('Cannot preview content'); });
       return m;
     };
@@ -1102,9 +1104,9 @@ function openPreview(node, item, card) {
     strip.innerHTML = '';
     files.forEach((x, i) => {
       const sel = batch && selSet.has(i);
-      const th = el('div'); th.style.cssText = 'position:relative;width:56px;height:56px;border-radius:6px;overflow:hidden;cursor:pointer;border:2px solid ' + (sel ? '#34a853' : (i === idx ? '#2b3a4a' : 'transparent')) + ';background:#f1f5f9;display:flex;align-items:center;justify-content:center;font-size:18px;color:#94a3b8;flex-shrink:0;';
+      const th = el('div'); th.style.cssText = 'position:relative;width:56px;height:56px;border-radius:6px;overflow:hidden;cursor:pointer;border:2px solid ' + (sel ? 'var(--ez-ok)' : (i === idx ? 'var(--ez-strong)' : 'transparent')) + ';background:var(--ez-surface-3);display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--ez-fg-muted);flex-shrink:0;';
       if (x.type === 'image') { const im = el('img'); im.src = x.url; im.style.cssText = 'width:100%;height:100%;object-fit:cover;'; th.appendChild(im); } else th.textContent = ({ image: '🖼', video: '🎬', audio: '🎵', model_3d: '🧊' })[x.type] || '📄';
-      const del = el('button'); del.textContent = '✕'; del.title = ezT('Delete from this card group'); del.style.cssText = 'position:absolute;top:0;right:0;width:16px;height:16px;line-height:16px;font-size:10px;background:rgba(0,0,0,.62);color:#fff;border:none;border-radius:0 5px 0 9px;cursor:pointer;padding:0;';
+      const del = el('button'); del.textContent = '✕'; del.title = ezT('Delete from this card group'); del.style.cssText = 'position:absolute;top:0;right:0;width:16px;height:16px;line-height:16px;font-size:10px;background:var(--ez-strong);color:var(--ez-on-strong);border:none;border-radius:0 5px 0 9px;cursor:pointer;padding:0;';
       del.addEventListener('click', (e) => { e.stopPropagation(); files.splice(i, 1); if (!files.length) { card.items = card.items.filter((it) => it.id !== item.id); syncToConfig(node); render(node); ov.remove(); } else syncToConfig(node); draw(); });
       th.appendChild(del);
       th.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); buildMenu(e, x, i); });
@@ -1136,26 +1138,26 @@ function open3d(node, item, card) {
   const f = (item.files || [])[0]; if (!f) return;
   const url = f.url || ('/media_loader/serve?path=' + encodeURIComponent(f.path || ''));
   const ov = el('div'); ov.style.cssText = 'position:fixed;inset:0;background:rgba(10,14,20,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;z-index:9999;';
-  const box = el('div'); box.style.cssText = 'background:#fff;border-radius:14px;padding:12px;width:95%;max-width:1040px;height:86vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 30px 90px rgba(0,0,0,.4);overflow:hidden;';
+  const box = el('div'); box.style.cssText = 'background:var(--ez-bg);border-radius:14px;padding:12px;width:95%;max-width:1040px;height:86vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 30px 90px rgba(0,0,0,.4);overflow:hidden;';
   const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;flex:0 0 auto;';
-  const t = el('b'); t.style.cssText = 'font-size:14px;color:#0f141f;'; t.textContent = f.name || ezT('3D model'); hd.appendChild(t);
-  const close = el('button'); close.textContent = '✕'; close.title = ezT('Close'); close.style.cssText = 'background:#f1f5f9;border:1px solid #dce3ec;border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:#64748b;'; hd.appendChild(close);
+  const t = el('b'); t.style.cssText = 'font-size:14px;color:var(--ez-fg);'; t.textContent = f.name || ezT('3D model'); hd.appendChild(t);
+  const close = el('button'); close.textContent = '✕'; close.title = ezT('Close'); close.style.cssText = 'background:var(--ez-surface-3);border:1px solid var(--ez-border);border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:var(--ez-fg-3);'; hd.appendChild(close);
   const bodyWrap = el('div'); bodyWrap.style.cssText = 'flex:1 1 auto;min-height:0;display:flex;gap:10px;';
-  const body = el('div'); body.style.cssText = 'flex:1 1 auto;position:relative;border-radius:12px;overflow:hidden;background:#f7f9fd;border:1px solid #e6edf7;';
+  const body = el('div'); body.style.cssText = 'flex:1 1 auto;position:relative;border-radius:12px;overflow:hidden;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);';
   const canvas = el('canvas'); canvas.tabIndex = 0; canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;outline:none;touch-action:none;cursor:grab;';
   body.appendChild(canvas);
-  const panel = el('div'); panel.style.cssText = 'width:170px;flex:0 0 170px;display:flex;flex-direction:column;gap:8px;background:#f8fafc;border:1px solid #e6edf7;border-radius:12px;padding:10px;overflow:auto;font-size:12px;color:#334155;';
-  panel.innerHTML = '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">' + ezT('Display') + '</div>' +
+  const panel = el('div'); panel.style.cssText = 'width:170px;flex:0 0 170px;display:flex;flex-direction:column;gap:8px;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:12px;padding:10px;overflow:auto;font-size:12px;color:var(--ez-fg-2);';
+  panel.innerHTML = '<div class="pvlbl" style="font-size:11px;font-weight:600;color:var(--ez-fg-3);">' + ezT('Display') + '</div>' +
     '<label style="display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" class="pvwf"> ' + ezT('Wireframe') + '</label>' +
-    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">' + ezT('Material') + '</div><select class="pvmat" style="width:100%;font-size:12px;padding:5px 8px;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;">' +
+    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:var(--ez-fg-3);">' + ezT('Material') + '</div><select class="pvmat" style="width:100%;font-size:12px;padding:5px 8px;border:1px solid var(--ez-border);border-radius:8px;background:var(--ez-bg);cursor:pointer;">' +
     '<option value="original">' + ezT('Original') + '</option><option value="clay">' + ezT('Clay') + '</option><option value="glass">' + ezT('Glass') + '</option><option value="plastic">' + ezT('Plastic') + '</option><option value="metal">' + ezT('Metal') + '</option><option value="wire">' + ezT('Wireframe') + '</option></select>' +
-    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:#64748b;">' + ezT('Background color') + '</div><input type="color" class="pvbg" value="#f7f9fd" style="width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;">' +
-    '<button class="pvreset" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:#334155;">' + ezT('Reset view') + '</button>' +
-    '<button class="pvshot" style="background:#2b3a4a;border:1px solid #2b3a4a;color:#fff;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;">' + ezT('Generate preview image') + '</button>' +
-    '<button class="pvfs" style="background:#fff;border:1px solid #dce3ec;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:#334155;">' + ezT('Fullscreen') + '</button>';
+    '<div class="pvlbl" style="font-size:11px;font-weight:600;color:var(--ez-fg-3);">' + ezT('Background color') + '</div><input type="color" class="pvbg" value="#f7f9fd" style="width:100%;height:26px;border:1px solid var(--ez-border);border-radius:8px;padding:2px;background:var(--ez-bg);cursor:pointer;">' +
+    '<button class="pvreset" style="background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:var(--ez-fg-2);">' + ezT('Reset view') + '</button>' +
+    '<button class="pvshot" style="background:var(--ez-strong);border:1px solid var(--ez-strong);color:var(--ez-on-strong);border-radius:8px;padding:6px;font-size:12px;cursor:pointer;">' + ezT('Generate preview image') + '</button>' +
+    '<button class="pvfs" style="background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:var(--ez-fg-2);">' + ezT('Fullscreen') + '</button>';
   bodyWrap.appendChild(body); bodyWrap.appendChild(panel);
-  const status = el('div'); status.style.cssText = 'font-size:12px;color:#64748b;text-align:center;min-height:16px;'; status.textContent = ezT('Loading 3D model…');
-  const tip = el('div'); tip.style.cssText = 'font-size:11px;color:#94a3b8;'; tip.textContent = ezT('Left drag = orbit · wheel = zoom · Shift/right drag = pan');
+  const status = el('div'); status.style.cssText = 'font-size:12px;color:var(--ez-fg-3);text-align:center;min-height:16px;'; status.textContent = ezT('Loading 3D model…');
+  const tip = el('div'); tip.style.cssText = 'font-size:11px;color:var(--ez-fg-muted);'; tip.textContent = ezT('Left drag = orbit · wheel = zoom · Shift/right drag = pan');
   box.appendChild(hd); box.appendChild(bodyWrap); box.appendChild(status); box.appendChild(tip);
   ov.appendChild(box); document.body.appendChild(ov);
   let cleanup = () => {};

@@ -21,7 +21,6 @@ import os
 import random
 import re
 import struct
-import zlib
 
 import numpy as np
 import torch
@@ -63,7 +62,7 @@ import comfy.sd
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.5"
+__version__ = "1.2.6"
 
 WEB_DIRECTORY = "./web"
 
@@ -88,7 +87,7 @@ try:
                    "ezflex_service.js", "node_switch_group.js", "node_switch_master.js",
                    "main_control.js", "param_preset_control.js", "param_preset_output.js",
                    "preview_any.js", "prompt_helper.js",
-                   "media_loader.js", "media_out.js"):
+                   "media_loader.js", "media_out.js", "ezflex_theme.js"):
         _routes.get("/extensions/Comfyui-EzFlex-Presets/" + _fname)(_serve_no_store(_fname))
 except Exception:
     pass
@@ -501,6 +500,43 @@ try:
     os.makedirs(_USER_DIR, exist_ok=True)
 except Exception:
     pass
+
+
+# ===== ComfyUI user 目录下的 EzFlex 子目录：ezflex_*.json 与提示词卡片都收在 user/EzFlex/ =====
+def _ezflex_user_base():
+    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
+    return base or ''
+
+
+def _ezflex_user_dir(sub=''):
+    base = _ezflex_user_base()
+    if not base:
+        return ''
+    d = os.path.join(base, 'EzFlex', sub) if sub else os.path.join(base, 'EzFlex')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+
+def _ezflex_user_file(name):
+    """user/EzFlex/<name>；以前散落在 user/ 下的同名文件首次访问时自动挪进来（数据不丢）。"""
+    d = _ezflex_user_dir()
+    if not d:
+        return ''
+    dst = os.path.join(d, name)
+    old = os.path.join(_ezflex_user_base(), name)
+    if not os.path.isfile(dst) and os.path.isfile(old):
+        try:
+            os.replace(old, dst)
+        except Exception:
+            try:
+                import shutil
+                shutil.copy2(old, dst)
+            except Exception:
+                pass
+    return dst
 
 
 def _preset_file(node_name):
@@ -3798,10 +3834,7 @@ async def _preview_any_open(req):
 
 
 def _pv_save_roots_file():
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    if not base:
-        return ''
-    return os.path.join(base, 'ezflex_save_roots.json')
+    return _ezflex_user_file('ezflex_save_roots.json')
 
 
 def _pv_save_roots():
@@ -4980,7 +5013,7 @@ _PH_BUILTIN_HOSTS = (
 
 def _ph_api_hosts_file():
     try:
-        return os.path.join(os.path.dirname(_ph_userdata_file()), "ezflex_api_hosts.json")
+        return _ezflex_user_file("ezflex_api_hosts.json")
     except Exception:
         return ""
 
@@ -5039,13 +5072,9 @@ def _ph_check_outbound(url):
 
 def _ph_userdata_file():
     try:
-        import folder_paths as fp
-        base = getattr(fp, 'user_directory', None) or os.path.join(os.path.dirname(getattr(fp, 'models_dir', '')), 'user')
-        if base:
-            return os.path.join(base, 'ezflex_custom_providers.json')
+        return _ezflex_user_file('ezflex_custom_providers.json')
     except Exception:
-        pass
-    return ''
+        return ''
 
 
 async def _ph_custom_load(req):
@@ -5176,14 +5205,7 @@ async def _ph_scan_roots_info(req):
 
 
 def _ph_scan_paths_file():
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    if not base:
-        return ''
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(base, 'ezflex_scan_paths.json')
+    return _ezflex_user_file('ezflex_scan_paths.json')
 
 
 def _ph_scan_paths_load():
@@ -5231,14 +5253,7 @@ async def _ph_scan_paths_save(req):
 
 
 def _ph_model_paths_file():
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    if not base:
-        return ''
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(base, 'ezflex_model_paths.json')
+    return _ezflex_user_file('ezflex_model_paths.json')
 
 
 def _ph_model_paths_load():
@@ -5286,14 +5301,7 @@ async def _ph_model_paths_save(req):
 
 
 def _ph_media_target_file():
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    if not base:
-        return ''
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(base, 'ezflex_media_target.json')
+    return _ezflex_user_file('ezflex_media_target.json')
 
 
 def _ph_media_target_load():
@@ -5336,14 +5344,7 @@ async def _ph_media_target_save(req):
 
 
 def _ph_rules_file():
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    if not base:
-        return ''
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(base, 'ezflex_prompt_rules.json')
+    return _ezflex_user_file('ezflex_prompt_rules.json')
 
 
 def _ph_rules_load():
@@ -5388,8 +5389,7 @@ async def _ph_rules_save(req):
 
 
 def _ph_prompt_categories_file():
-    d = _ph_prompts_dir()
-    return os.path.join(os.path.dirname(d), 'ezflex_prompt_categories.json') if d else ''
+    return _ezflex_user_file('ezflex_prompt_categories.json')
 
 
 def _ph_cat_clean(items, depth=0):
@@ -5446,14 +5446,7 @@ async def _ph_categories_save(req):
 
 
 def _ph_tags_file():
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    if not base:
-        return ''
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        pass
-    return os.path.join(base, 'ezflex_prompt_tags.json')
+    return _ezflex_user_file('ezflex_prompt_tags.json')
 
 
 def _ph_libs_clean(libs):
@@ -5789,20 +5782,30 @@ async def _ph_tag_import(req):
 
 
 def _ph_prompts_dir():
-    """「卡片管理」保存的提示词卡片目录：userdata/prompts（与全局扫描路径同一个 user 目录下）。"""
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    if not base:
-        return ''
-    d = os.path.join(base, 'prompts')
-    try:
-        os.makedirs(d, exist_ok=True)
-    except Exception:
-        pass
+    """「卡片管理」保存的提示词卡片目录：user/EzFlex/prompts（旧的 user/prompts 首次访问自动搬进来）。"""
+    d = _ezflex_user_dir('prompts')
+    base = _ezflex_user_base()
+    if not d or not base:
+        return d
+    old = os.path.join(base, 'prompts')
+    if os.path.isdir(old) and os.path.realpath(old) != os.path.realpath(d):
+        try:
+            for f in os.listdir(old):
+                src, dst = os.path.join(old, f), os.path.join(d, f)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    try:
+                        os.replace(src, dst)
+                    except Exception:
+                        pass
+            if not os.listdir(old):
+                os.rmdir(old)
+        except Exception:
+            pass
     return d
 
 
 def _ph_prompt_card_file(name):
-    """名称 → userdata/prompts/<名称>.json；含路径分隔符/通配符/隐藏名一律拒绝，并确认仍落在该目录内。"""
+    """名称 → user/EzFlex/prompts/<名称>.json；含路径分隔符/通配符/隐藏名一律拒绝，并确认仍落在该目录内。"""
     d = _ph_prompts_dir()
     name = str(name or "").strip()
     if not d or not name or len(name) > 64 or name.startswith('.') or any(c in name for c in '\\/:*?"<>|'):
@@ -6927,7 +6930,7 @@ def _ml_media_root():
 
 def _ml_roots_file():
     try:
-        return os.path.join(os.path.dirname(_ph_userdata_file()), "ezflex_media_roots.json")
+        return _ezflex_user_file("ezflex_media_roots.json")
     except Exception:
         return ""
 
@@ -6978,9 +6981,9 @@ def _ml_seed_roots():
     except Exception:
         pass
     try:
-        ud = getattr(folder_paths, "user_directory", None)
-        if ud:
-            dirs.append(ud)
+        ez_dir = _ezflex_user_dir()
+        if ez_dir:
+            dirs.append(ez_dir)
     except Exception:
         pass
     for d in dirs:

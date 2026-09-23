@@ -4,6 +4,7 @@
 // 当前总预设名存 config；命名总预设存服务器 user_data 预设库（按节点名共享）。
 import { app } from "../../scripts/app.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
+import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
@@ -18,28 +19,29 @@ const API = "/nodeswitch_master/presets";
 const CSS = `
 .ezm-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .ezm-shell .ezm-root{pointer-events:auto;}
-.ezm-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
+.ezm-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .ezm-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
 .ezm-hd{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
-.ezm-hd select{appearance:none;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;border:1px solid #dce3ec;border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:#1a1f2b;font-family:inherit;cursor:pointer;min-width:110px;height:30px;line-height:1;flex:1 1 auto;}
-.ezm-hd select:focus{border-color:#8fa7c5;outline:none;}
-.ezm-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
-.ezm-btn:hover{background:#edf2fa;border-color:#bcc9db;}
-.ezm-btn.success{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;}
-.ezm-btn.success:hover{background:#d1fae5;}
-.ezm-btn.danger{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
-.ezm-btn.danger:hover{background:#fee2e2;}
+.ezm-hd select{appearance:none;background:var(--ez-surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;border:1px solid var(--ez-border);border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:var(--ez-fg);font-family:inherit;cursor:pointer;min-width:110px;height:30px;line-height:1;flex:1 1 auto;}
+.ezm-hd select:focus{border-color:var(--ez-border-strong);outline:none;}
+.ezm-btn{background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:var(--ez-fg);font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
+.ezm-btn:hover{background:var(--ez-surface-3);border-color:var(--ez-border-strong);}
+.ezm-btn.success{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);}
+.ezm-btn.success:hover{background:var(--ez-ok-bg);}
+.ezm-btn.danger{background:var(--ez-bad-bg);border-color:var(--ez-bad-border);color:var(--ez-bad-fg);}
+.ezm-btn.danger:hover{background:var(--ez-bad-bg);}
 .ezm-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezm-row{display:flex;gap:8px;align-items:center;padding:5px 8px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;flex-wrap:wrap;}
-.ezm-row .gname{font-size:12px;font-weight:480;flex:1 1 90px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1a1f2b;}
-.ezm-row select{appearance:none;font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:9px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 8px center;color:#1a1f2b;outline:none;padding:4px 24px 4px 10px;flex:1 1 100px;min-width:90px;max-width:170px;height:28px;line-height:1;}
-.ezm-row select:focus{border-color:#8fa7c5;}
-.ezm-tag{font-size:10px;padding:1px 10px;border-radius:100px;background:#eef2f7;color:#3d4a5c;white-space:nowrap;}
-.ezm-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
+.ezm-row{display:flex;gap:8px;align-items:center;padding:5px 8px;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:10px;flex-wrap:wrap;}
+.ezm-row .gname{font-size:12px;font-weight:480;flex:1 1 90px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ez-fg);}
+.ezm-row select{appearance:none;font-family:inherit;font-size:12px;border:1px solid var(--ez-border);border-radius:9px;background:var(--ez-surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 8px center;color:var(--ez-fg);outline:none;padding:4px 24px 4px 10px;flex:1 1 100px;min-width:90px;max-width:170px;height:28px;line-height:1;}
+.ezm-row select:focus{border-color:var(--ez-border-strong);}
+.ezm-tag{font-size:10px;padding:1px 10px;border-radius:100px;background:var(--ez-surface-3);color:var(--ez-fg-2);white-space:nowrap;}
+.ezm-empty{color:var(--ez-fg-muted);font-size:12px;text-align:center;padding:14px;}
 `;
 
 let _styleInjected = false;
-function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
+function injectStyle() {
+  ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 
 // ===== 节点状态（config 只存当前总预设名；行与映射来自画布发现 + 预设库）=====
@@ -128,7 +130,7 @@ function statusOf(groupNode) {
     return { label: ezT('Mixed'), cls: '' };
   } catch (_) { return { label: ezT('Mixed'), cls: '' }; }
 }
-const TAG_CSS = { on: 'background:#ecfdf3;color:#065f46;', off: 'background:#fef2f2;color:#991b1b;', bypass: 'background:#fffbeb;color:#92400e;' };
+const TAG_CSS = { on: 'background:var(--ez-ok-bg);color:var(--ez-ok-fg);', off: 'background:var(--ez-bad-bg);color:var(--ez-bad-fg);', bypass: 'background:var(--ez-warn-bg);color:var(--ez-warn-fg);' };
 
 function buildRoot(node) {
   injectStyle();

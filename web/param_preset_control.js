@@ -6,6 +6,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
+import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig,
@@ -90,62 +91,63 @@ function parseParamValue(raw, type) {
 const CSS = `
 .ezpc-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .ezpc-shell .ezpc-root{pointer-events:auto;}
-.ezpc-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
+.ezpc-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .ezpc-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
 .ezpc-hd{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;min-width:0;} /* 工具条单行不换行 */
-.ezpc-hd select,.ezpc-row input,.ezpc-row select{appearance:none;background:#f7f9fd;border:1px solid #dce3ec;border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:#1a1f2b;font-family:inherit;outline:none;height:30px;line-height:1;}
+.ezpc-hd select,.ezpc-row input,.ezpc-row select{appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:var(--ez-fg);font-family:inherit;outline:none;height:30px;line-height:1;}
 .ezpc-hd select{flex:1 1 0;min-width:0;} /* 基准 0：宽度只按剩余空间分配，不跟随预设名变长；不换行时靠它让位 */
 .ezpc-hd input{flex:1 1 90px;min-width:80px;}
-.ezpc-hd select:focus,.ezpc-row input:focus{border-color:#8fa7c5;}
-.ezpc-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
-.ezpc-btn:hover{background:#edf2fa;border-color:#bcc9db;}
-.ezpc-btn.success{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;}
-.ezpc-btn.success:hover{background:#d1fae5;}
-.ezpc-btn.danger{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
-.ezpc-btn.danger:hover{background:#fee2e2;}
-.ezpc-btn.warn{background:#fffbeb;border-color:#fcd34d;color:#92400e;}
-.ezpc-btn.warn:hover{background:#fef3c7;}
+.ezpc-hd select:focus,.ezpc-row input:focus{border-color:var(--ez-border-strong);}
+.ezpc-btn{background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:var(--ez-fg);font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
+.ezpc-btn:hover{background:var(--ez-surface-3);border-color:var(--ez-border-strong);}
+.ezpc-btn.success{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);}
+.ezpc-btn.success:hover{background:var(--ez-ok-bg);}
+.ezpc-btn.danger{background:var(--ez-bad-bg);border-color:var(--ez-bad-border);color:var(--ez-bad-fg);}
+.ezpc-btn.danger:hover{background:var(--ez-bad-bg);}
+.ezpc-btn.warn{background:var(--ez-warn-bg);border-color:var(--ez-warn-border);color:var(--ez-warn-fg);}
+.ezpc-btn.warn:hover{background:var(--ez-warn-bg);}
 .ezpc-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezpc-gitem{display:flex;align-items:center;gap:8px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;padding:6px 8px;flex-wrap:nowrap;min-width:0;} /* 单行不换行：名称过长时省略号截断 */
+.ezpc-gitem{display:flex;align-items:center;gap:8px;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:10px;padding:6px 8px;flex-wrap:nowrap;min-width:0;} /* 单行不换行：名称过长时省略号截断 */
 .ezpc-gitem.dragging{opacity:.4;}
-.ezpc-handle{cursor:grab;color:#8a99ae;font-size:14px;line-height:1;padding:0 2px;}
-.ezpc-handle:hover{color:#1a1a2e;}
-.ezpc-gname{font-size:12px;font-weight:500;flex:1 1 80px;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:#1a1f2b;}
-.ezpc-gcnt{font-size:10px;color:#5f6b7a;background:#eef2f7;padding:0 10px;border-radius:100px;line-height:20px;white-space:nowrap;flex:0 0 auto;} /* 「N 个参数」不许被压成两行 */
-.ezpc-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
-.ezpc-ph{height:0;border-top:3px solid #2b3a4a;border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
+.ezpc-handle{cursor:grab;color:var(--ez-fg-muted);font-size:14px;line-height:1;padding:0 2px;}
+.ezpc-handle:hover{color:var(--ez-fg);}
+.ezpc-gname{font-size:12px;font-weight:500;flex:1 1 80px;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;color:var(--ez-fg);}
+.ezpc-gcnt{font-size:10px;color:var(--ez-fg-3);background:var(--ez-surface-3);padding:0 10px;border-radius:100px;line-height:20px;white-space:nowrap;flex:0 0 auto;} /* 「N 个参数」不许被压成两行 */
+.ezpc-empty{color:var(--ez-fg-muted);font-size:12px;text-align:center;padding:14px;}
+.ezpc-ph{height:0;border-top:3px solid var(--ez-strong);border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
 .ezpc-ph.hidden{display:none;}
 .ezpc-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:9999;background:rgba(0,0,0,.35);}
 .ezpc-modal.active{display:flex;}
-.ezpc-modal-box{background:#fff;border-radius:16px;padding:16px 18px;width:92%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:12px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;}
-.ezpc-modal-hd{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:10px;}
-.ezpc-modal-hd b{font-size:14px;color:#0f141f;}
+.ezpc-modal-box{background:var(--ez-bg);border-radius:16px;padding:16px 18px;width:92%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:12px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;}
+.ezpc-modal-hd{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:10px;}
+.ezpc-modal-hd b{font-size:14px;color:var(--ez-fg);}
 .ezpc-modal-body{overflow-y:auto;display:flex;flex-direction:column;gap:10px;flex:1;}
-.ezpc-gname-input{width:100%;padding:7px 11px;border:1px solid #dce3ec;border-radius:10px;font-size:13px;font-family:inherit;outline:none;color:#1a1f2b;background:#f7f9fd;transition:border .15s;}
-.ezpc-gname-input:focus{border-color:#8fa7c5;background:#fff;}
+.ezpc-gname-input{width:100%;padding:7px 11px;border:1px solid var(--ez-border);border-radius:10px;font-size:13px;font-family:inherit;outline:none;color:var(--ez-fg);background:var(--ez-surface-2);transition:border .15s;}
+.ezpc-gname-input:focus{border-color:var(--ez-border-strong);background:var(--ez-bg);}
 .ezpc-params{display:flex;flex-direction:column;gap:6px;}
-.ezpc-pitem{display:flex;align-items:center;gap:6px;background:#f9fbfd;border:1px solid #f0f4fc;border-radius:9px;padding:5px 8px;flex-wrap:wrap;}
-.ezpc-pitem input,.ezpc-pitem select,.ezpc-pitem textarea{font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:8px;background:#fff;color:#1a1f2b;outline:none;padding:4px 8px;box-sizing:border-box;}
-.ezpc-pitem input:focus,.ezpc-pitem select:focus,.ezpc-pitem textarea:focus{border-color:#8fa7c5;}
-.ezpc-pitem input.invalid,.ezpc-pitem textarea.invalid{border-color:#ef4444;box-shadow:0 0 0 2px rgba(239,68,68,.18);}
+.ezpc-pitem{display:flex;align-items:center;gap:6px;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:9px;padding:5px 8px;flex-wrap:wrap;}
+.ezpc-pitem input,.ezpc-pitem select,.ezpc-pitem textarea{font-family:inherit;font-size:12px;border:1px solid var(--ez-border);border-radius:8px;background:var(--ez-bg);color:var(--ez-fg);outline:none;padding:4px 8px;box-sizing:border-box;}
+.ezpc-pitem input:focus,.ezpc-pitem select:focus,.ezpc-pitem textarea:focus{border-color:var(--ez-border-strong);}
+.ezpc-pitem input.invalid,.ezpc-pitem textarea.invalid{border-color:var(--ez-bad-border);box-shadow:0 0 0 2px rgba(239,68,68,.18);}
 .ezpc-pname{flex:1 1 70px;min-width:60px;}
 .ezpc-ptype{width:96px;}
-.ezpc-enable{width:22px;height:22px;border-radius:50%;border:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;color:#fff;transition:filter .12s;flex:0 0 auto;padding:0;}
-.ezpc-enable.on{background:#17a34a;}
-.ezpc-enable.off{background:#e34d4d;}
+.ezpc-enable{width:22px;height:22px;border-radius:50%;border:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;color:var(--ez-on-strong);transition:filter .12s;flex:0 0 auto;padding:0;}
+.ezpc-enable.on{background:var(--ez-ok);}
+.ezpc-enable.off{background:var(--ez-bad);}
 .ezpc-enable:hover{filter:brightness(1.1);}
-.ezpc-gsel{appearance:none;-webkit-appearance:none;background-color:#f7f9fd;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='6' viewBox='0 0 12 6'><path d='M1 1l5 4 5-4' fill='none' stroke='%235f6b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");background-repeat:no-repeat;background-position:right 6px center;border:1px solid #dce3ec;border-radius:8px;padding:3px 22px 3px 8px;font-size:11px;font-weight:450;color:#1f2937;font-family:inherit;outline:none;height:24px;line-height:1;max-width:150px;flex:0 1 120px;min-width:64px;} /* 固定 120px：选项文字（参数名）再长也不撑宽 */
+.ezpc-gsel{appearance:none;-webkit-appearance:none;background-color:var(--ez-surface-2);background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='6' viewBox='0 0 12 6'><path d='M1 1l5 4 5-4' fill='none' stroke='%235f6b7a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");background-repeat:no-repeat;background-position:right 6px center;border:1px solid var(--ez-border);border-radius:8px;padding:3px 22px 3px 8px;font-size:11px;font-weight:450;color:var(--ez-fg);font-family:inherit;outline:none;height:24px;line-height:1;max-width:150px;flex:0 1 120px;min-width:64px;} /* 固定 120px：选项文字（参数名）再长也不撑宽 */
 .ezpc-pvalue{flex:1 1 70px;min-width:60px;min-height:28px;max-height:120px;resize:both;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.4;}
 .ezpc-pvalue::-webkit-resizer{background:transparent;}
 .ezpc-pvalue::-webkit-scrollbar{width:8px;height:8px;}
-.ezpc-pvalue::-webkit-scrollbar-thumb{background:#c9d3e0;border-radius:6px;}
-.ezpc-modal-ft{display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #f0f4fc;padding-top:10px;}
+.ezpc-pvalue::-webkit-scrollbar-thumb{background:var(--ez-surface-4);border-radius:6px;}
+.ezpc-modal-ft{display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--ez-border-2);padding-top:10px;}
 .ezpc-modal-box input,.ezpc-modal-box select,.ezpc-modal-box textarea{user-select:text;-webkit-user-select:text;pointer-events:auto;}
 .ezpc-modal input,.ezpc-modal select{pointer-events:auto;}
 `;
 
 let _styleInjected = false;
-function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
+function injectStyle() {
+  ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 function genId() { return 'x_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7); }
 function deepClone(o) { try { return JSON.parse(JSON.stringify(o)); } catch (_) { return Array.isArray(o) ? [] : {}; } }
@@ -293,7 +295,7 @@ function modalEl() {
   const addParamBtn = el('button', 'ezpc-btn success'); addParamBtn.textContent = ezT('+ Add parameter');
   body.appendChild(nameInput);
   const paramsHd = el('div'); paramsHd.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
-  const paramsLbl = el('span'); paramsLbl.textContent = ezT('Parameters'); paramsLbl.style.cssText = 'font-size:12px;font-weight:500;color:#1a1a2e;';
+  const paramsLbl = el('span'); paramsLbl.textContent = ezT('Parameters'); paramsLbl.style.cssText = 'font-size:12px;font-weight:500;color:var(--ez-fg);';
   paramsHd.appendChild(paramsLbl); paramsHd.appendChild(addParamBtn);
   body.appendChild(paramsHd); body.appendChild(params);
   const ft = el('div', 'ezpc-modal-ft');
@@ -435,7 +437,7 @@ function attachDnD(container, itemSel, handleSel, onDrop) {
         const idx = items.indexOf(item);
         const rect = item.getBoundingClientRect();
         const clone = item.cloneNode(true);
-        clone.style.cssText = `position:fixed;pointer-events:none;width:${rect.width}px;opacity:.85;z-index:99999;border:2px solid #2b3a4a;border-radius:6px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.12);top:${rect.top}px;left:${rect.left}px;transition:none;`;
+        clone.style.cssText = `position:fixed;pointer-events:none;width:${rect.width}px;opacity:.85;z-index:99999;border:2px solid var(--ez-strong);border-radius:6px;background:var(--ez-bg);box-shadow:0 8px 24px rgba(0,0,0,.12);top:${rect.top}px;left:${rect.left}px;transition:none;`;
         document.body.appendChild(clone);
         const st = { idx, clone, moved: false, targetIdx: idx };
         item.classList.add('dragging');
@@ -566,7 +568,7 @@ function updatePorts(node, noRedraw) {
     sock.hideName = true;
     sock.hidden = false;
     // 输出端口圆点：输出多个生效参数=红，仅输出一个=灰
-    const dot = groupOutCount(grpById[String(w.id)]) > 1 ? '#d94848' : '#98a3b3';
+    const dot = groupOutCount(grpById[String(w.id)]) > 1 ? 'var(--ez-bad)' : 'var(--ez-fg-muted)';
     if (sock.color_on !== dot) { sock.color_on = dot; sock.color_off = dot; sock.color = dot; dotChanged = true; }
     seq.push(sock);
   });

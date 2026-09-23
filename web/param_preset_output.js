@@ -7,6 +7,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
+import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, nodeTypeOf, findNodeById, installResizeHandles, makeDomWidgetHitThrough,
 } from "./ezflex_service.js";
@@ -18,31 +19,32 @@ const TYPE_MAP = { int: 'INT', float: 'FLOAT', string: 'STRING', bool: 'BOOLEAN'
 const CSS = `
 .ezo-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .ezo-shell .ezo-root{pointer-events:auto;}
-.ezo-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
+.ezo-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .ezo-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
 .ezo-hd{display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;}
-.ezo-title{font-weight:550;font-size:13px;color:#0f141f;}
-.ezo-status{font-size:10px;color:#8a99ae;white-space:nowrap;}
-.ezo-status.on{color:#065f46;font-weight:500;}
+.ezo-title{font-weight:550;font-size:13px;color:var(--ez-fg);}
+.ezo-status{font-size:10px;color:var(--ez-fg-muted);white-space:nowrap;}
+.ezo-status.on{color:var(--ez-ok-fg);font-weight:500;}
 .ezo-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezo-row{display:flex;align-items:center;gap:8px;background:#fbfcfe;border:1px solid #f0f4fc;border-radius:10px;padding:5px 8px;flex-wrap:nowrap;min-width:0;} /* 单行不换行：名称过长时省略号截断 */
-.ezo-name{font-size:12px;font-weight:480;flex:1 1 80px;min-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1a1f2b;}
-.ezo-type{font-size:10px;color:#5f6b7a;background:#eef2f7;padding:0 10px;border-radius:100px;line-height:20px;white-space:nowrap;flex:0 0 auto;}
-.ezo-type-bad{color:#d94848;background:#fdecec;}
-.ezo-value{font-size:11px;color:#1a1f2b;font-family:monospace;min-width:40px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.ezo-value-long{cursor:pointer;text-decoration:underline dotted #9aa7b5;}
+.ezo-row{display:flex;align-items:center;gap:8px;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:10px;padding:5px 8px;flex-wrap:nowrap;min-width:0;} /* 单行不换行：名称过长时省略号截断 */
+.ezo-name{font-size:12px;font-weight:480;flex:1 1 80px;min-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ez-fg);}
+.ezo-type{font-size:10px;color:var(--ez-fg-3);background:var(--ez-surface-3);padding:0 10px;border-radius:100px;line-height:20px;white-space:nowrap;flex:0 0 auto;}
+.ezo-type-bad{color:var(--ez-bad-fg);background:var(--ez-bad-bg);}
+.ezo-value{font-size:11px;color:var(--ez-fg);font-family:monospace;min-width:40px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ezo-value-long{cursor:pointer;text-decoration:underline dotted var(--ez-fg-muted);}
 .ezo-row.ezo-off{opacity:.55;}
 .ezo-vprev{position:fixed;z-index:9998;}
-.ezo-toggle{display:flex;background:#f1f4fa;border-radius:8px;padding:2px;border:1px solid #e2e8f0;flex:0 0 auto;}
-.ezo-toggle button{background:transparent;border:none;padding:2px 10px;font-size:11px;font-weight:470;color:#4d5b6d;font-family:inherit;cursor:pointer;border-radius:6px;transition:all .1s;height:24px;line-height:1;}
-.ezo-toggle button.active{background:#fff;color:#0f141f;box-shadow:0 1px 4px rgba(0,0,0,.06);font-weight:510;}
-.ezo-toggle button.on.active{background:#ecfdf3;color:#065f46;border:1px solid #a7f0c6;}
-.ezo-toggle button.off.active{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;}
-.ezo-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
+.ezo-toggle{display:flex;background:var(--ez-surface-3);border-radius:8px;padding:2px;border:1px solid var(--ez-border);flex:0 0 auto;}
+.ezo-toggle button{background:transparent;border:none;padding:2px 10px;font-size:11px;font-weight:470;color:var(--ez-fg-2);font-family:inherit;cursor:pointer;border-radius:6px;transition:all .1s;height:24px;line-height:1;}
+.ezo-toggle button.active{background:var(--ez-bg);color:var(--ez-fg);box-shadow:0 1px 4px rgba(0,0,0,.06);font-weight:510;}
+.ezo-toggle button.on.active{background:var(--ez-ok-bg);color:var(--ez-ok-fg);border:1px solid var(--ez-ok-border);}
+.ezo-toggle button.off.active{background:var(--ez-bad-bg);color:var(--ez-bad-fg);border:1px solid var(--ez-bad-border);}
+.ezo-empty{color:var(--ez-fg-muted);font-size:12px;text-align:center;padding:14px;}
 `;
 
 let _styleInjected = false;
-function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
+function injectStyle() {
+  ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 
 // 长值预览弹层（点缩略值展开，只读文本框可滚动/复制）
 let _vprev = null;
@@ -57,13 +59,13 @@ function openValuePreview(anchor, text) {
   if (_vprev) closeValuePreview();
   const rect = anchor.getBoundingClientRect();
   _vprev = el('div');
-  _vprev.style.cssText = 'position:fixed;z-index:9998;background:#fff;border-radius:12px;border:1px solid #eef2f8;box-shadow:0 12px 40px rgba(0,0,0,.14);padding:10px 12px;width:340px;max-width:min(340px,92vw);font-family:Inter,sans-serif;box-sizing:border-box;';
-  const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:6px;margin-bottom:6px;';
-  const tt = el('b'); tt.textContent = ezT('Value preview'); tt.style.cssText = 'font-size:12px;color:#0f141f;';
-  const close = el('button'); close.textContent = '✕'; close.style.cssText = 'background:transparent;border:none;font-size:12px;color:#8a99ae;cursor:pointer;padding:0 4px;';
+  _vprev.style.cssText = 'position:fixed;z-index:9998;background:var(--ez-bg);border-radius:12px;border:1px solid var(--ez-border-2);box-shadow:0 12px 40px rgba(0,0,0,.14);padding:10px 12px;width:340px;max-width:min(340px,92vw);font-family:Inter,sans-serif;box-sizing:border-box;';
+  const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:6px;margin-bottom:6px;';
+  const tt = el('b'); tt.textContent = ezT('Value preview'); tt.style.cssText = 'font-size:12px;color:var(--ez-fg);';
+  const close = el('button'); close.textContent = '✕'; close.style.cssText = 'background:transparent;border:none;font-size:12px;color:var(--ez-fg-muted);cursor:pointer;padding:0 4px;';
   hd.appendChild(tt); hd.appendChild(close);
   const ta = el('textarea'); ta.readOnly = true; ta.spellcheck = false; ta.value = text;
-  ta.style.cssText = 'width:100%;max-height:200px;min-height:64px;padding:6px 8px;border:1px solid #dce3ec;border-radius:9px;font:11px/1.5 monospace;color:#1a1f2b;background:#fbfcfe;resize:none;overflow:auto;box-sizing:border-box;outline:none;';
+  ta.style.cssText = 'width:100%;max-height:200px;min-height:64px;padding:6px 8px;border:1px solid var(--ez-border);border-radius:9px;font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-surface);resize:none;overflow:auto;box-sizing:border-box;outline:none;';
   _vprev.appendChild(hd); _vprev.appendChild(ta);
   _vprev.style.left = Math.min(rect.left, window.innerWidth - 356) + 'px';
   _vprev.style.top = (rect.bottom + 6) + 'px';
@@ -105,28 +107,28 @@ function openValueTree(anchor, type, text) {
   if (data == null || typeof data !== 'object') { openValuePreview(anchor, text); return; }
   const overlay = el('div', 'ezo-tree');
   overlay.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);';
-  const box = el('div'); box.style.cssText = 'background:#fff;border-radius:16px;padding:14px 16px;width:92%;max-width:600px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
-  const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
+  const box = el('div'); box.style.cssText = 'background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:92%;max-width:600px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
+  const hd = el('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const t = el('b'); t.textContent = type + ' ' + ezT('details');
-  const close = el('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = el('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(t); hd.appendChild(close);
-  const list = el('div'); list.style.cssText = 'display:flex;flex-direction:column;overflow:auto;max-height:60vh;border:1px solid #e6edf7;border-radius:9px;padding:6px;';
+  const list = el('div'); list.style.cssText = 'display:flex;flex-direction:column;overflow:auto;max-height:60vh;border:1px solid var(--ez-border-2);border-radius:9px;padding:6px;';
   box.appendChild(hd); box.appendChild(list); overlay.appendChild(box); document.body.appendChild(overlay);
   const render = (value, key, depth) => {
     const wrap = el('div'); const row = el('div');
-    row.style.cssText = 'display:flex;gap:6px;align-items:center;font:11px/1.5 monospace;border-bottom:1px solid #f0f4fc;padding:3px 6px;padding-left:' + (4 + depth * 16) + 'px;cursor:default;';
+    row.style.cssText = 'display:flex;gap:6px;align-items:center;font:11px/1.5 monospace;border-bottom:1px solid var(--ez-border-2);padding:3px 6px;padding-left:' + (4 + depth * 16) + 'px;cursor:default;';
     if (value && typeof value === 'object') {
-      const toggle = el('span'); toggle.textContent = '▸'; toggle.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:#5f6b7a;flex:0 0 auto;';
+      const toggle = el('span'); toggle.textContent = '▸'; toggle.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:var(--ez-fg-3);flex:0 0 auto;';
       const kk = el('span'); kk.textContent = String(key) + (Array.isArray(value) ? ' [' + value.length + ']' : ' {' + Object.keys(value).length + '}');
-      kk.style.cssText = 'flex:0 0 45%;color:#5f6b7a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
+      kk.style.cssText = 'flex:0 0 45%;color:var(--ez-fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
       row.appendChild(toggle); row.appendChild(kk);
       const children = el('div'); children.style.display = 'none';
       const fn = (e) => { e.stopPropagation(); const open = toggle.textContent === '▸'; toggle.textContent = open ? '▾' : '▸'; children.style.display = open ? 'block' : 'none'; if (open && !children.childElementCount) { const l = Array.isArray(value) ? value.map((v, i) => [i, v]) : Object.entries(value); l.forEach(([k, v]) => children.appendChild(render(v, k, depth + 1))); } };
       toggle.addEventListener('click', fn); row.addEventListener('click', fn);
       wrap.appendChild(row); wrap.appendChild(children);
     } else {
-      const kk = el('span'); kk.textContent = String(key); kk.style.cssText = 'flex:0 0 45%;color:#5f6b7a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
-      const vv = el('span'); vv.textContent = String(value); vv.style.cssText = 'flex:1 1 auto;color:#1a1f2b;word-break:break-all;white-space:pre-wrap;';
+      const kk = el('span'); kk.textContent = String(key); kk.style.cssText = 'flex:0 0 45%;color:var(--ez-fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
+      const vv = el('span'); vv.textContent = String(value); vv.style.cssText = 'flex:1 1 auto;color:var(--ez-fg);word-break:break-all;white-space:pre-wrap;';
       row.appendChild(kk); row.appendChild(vv); wrap.appendChild(row);
     }
     return wrap;

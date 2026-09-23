@@ -11,6 +11,7 @@ import {
   loadPresets, savePreset, deletePreset, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
   EZ_PERF, scheduleOnRedraw,
 } from "./ezflex_service.js";
+import { ezThemeList, ezTheme, ezThemeSet, ezThemeInit, onThemeChange } from "./ezflex_theme.js";
 
 const NODE = NODE_TYPES.MAIN;
 const API = "/main_control/presets";
@@ -125,33 +126,36 @@ function addAllScaffold(node) {
 const CSS = `
 .ezc-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .ezc-shell .ezc-root{pointer-events:auto;}
-.ezc-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
+.ezc-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;transition:background-color .16s ease,color .16s ease;}
 .ezc-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
 .ezc-hd{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;}
-.ezc-hd select{appearance:none;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;border:1px solid #dce3ec;border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:#1a1f2b;font-family:inherit;cursor:pointer;min-width:110px;height:30px;line-height:1;flex:1 1 auto;}
+.ezc-hd select{appearance:none;background:var(--ez-surface-2) var(--ez-arrow) no-repeat right 10px center;border:1px solid var(--ez-border);border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:var(--ez-fg);font-family:inherit;cursor:pointer;min-width:110px;height:30px;line-height:1;flex:1 1 auto;}
 .ezc-hd select.ezc-hd-load{flex:0 1 160px;min-width:120px;}
-.ezc-hd select:focus{border-color:#8fa7c5;outline:none;}
-.ezc-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
-.ezc-btn:hover{background:#edf2fa;border-color:#bcc9db;}
-.ezc-btn.success{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;}
-.ezc-btn.success:hover{background:#d1fae5;}
-.ezc-btn.danger{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
-.ezc-btn.danger:hover{background:#fee2e2;}
+.ezc-hd select.ezc-hd-theme{flex:0 0 auto;min-width:0;padding-right:24px;}
+.ezc-hd select:focus{border-color:var(--ez-accent);outline:none;}
+.ezc-btn{background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:var(--ez-fg-2);font-family:inherit;cursor:pointer;transition:background-color .12s,border-color .12s,color .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
+.ezc-btn:hover{background:var(--ez-surface-3);border-color:var(--ez-border-strong);}
+.ezc-btn.success{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);}
+.ezc-btn.success:hover{filter:brightness(1.06);}
+.ezc-btn.danger{background:var(--ez-bad-bg);border-color:var(--ez-bad-border);color:var(--ez-bad-fg);}
+.ezc-btn.danger:hover{filter:brightness(1.06);}
 .ezc-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezc-row{display:flex;gap:8px;align-items:center;padding:5px 8px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;flex-wrap:wrap;}
-.ezc-row .gname{font-size:12px;font-weight:480;flex:1 1 90px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#1a1f2b;}
-.ezc-row select{appearance:none;font-family:inherit;font-size:12px;border:1px solid #dce3ec;border-radius:9px;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 8px center;color:#1a1f2b;outline:none;padding:4px 24px 4px 10px;flex:1 1 100px;min-width:90px;max-width:170px;height:28px;line-height:1;}
-.ezc-row select:focus{border-color:#8fa7c5;}
-.ezc-handle{flex:0 0 auto;width:16px;color:#b8c0cc;cursor:grab;font-size:13px;text-align:center;user-select:none;}
-.ezc-handle:hover{color:#5f6b7a;}
-.ezc-ph{height:0;border-top:3px solid #2b3a4a;border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
+.ezc-row{display:flex;gap:8px;align-items:center;padding:5px 8px;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:10px;flex-wrap:wrap;}
+.ezc-row .gname{font-size:12px;font-weight:480;flex:1 1 90px;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ez-fg);}
+.ezc-row select{appearance:none;font-family:inherit;font-size:12px;border:1px solid var(--ez-border);border-radius:9px;background:var(--ez-surface-2) var(--ez-arrow) no-repeat right 8px center;color:var(--ez-fg);outline:none;padding:4px 24px 4px 10px;flex:1 1 100px;min-width:90px;max-width:170px;height:28px;line-height:1;}
+.ezc-row select:focus{border-color:var(--ez-accent);}
+.ezc-handle{flex:0 0 auto;width:16px;color:var(--ez-fg-muted);cursor:grab;font-size:13px;text-align:center;user-select:none;}
+.ezc-handle:hover{color:var(--ez-fg-3);}
+.ezc-ph{height:0;border-top:3px solid var(--ez-strong);border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
 .ezc-ph.hidden{display:none;}
 .ezc-row.dragging{opacity:.6;}
-.ezc-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
+.ezc-clone{position:fixed;pointer-events:none;z-index:99999;opacity:.9;background:var(--ez-surface);border:1px solid var(--ez-accent);box-shadow:0 10px 28px rgba(0,0,0,.22);}
+.ezc-empty{color:var(--ez-fg-muted);font-size:12px;text-align:center;padding:14px;}
+
 `;
 
 let _styleInjected = false;
-function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
+function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); ezThemeInit(); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 
 // ===== 节点状态 =====
@@ -248,6 +252,12 @@ function buildRoot(node) {
   // 语言切换：默认跟随 ComfyUI 语言，这里可手动覆盖（存 localStorage，全部面板共用）
   const langBtn = el('button', 'ezc-btn');
   langBtn.title = ezT('UI language (follows ComfyUI language by default; manual override is remembered on this machine)');
+  // 主题切换：颜色变量见 CSS 里的 :root[data-ez-theme=...]，同样存 localStorage
+  const themeSel = el('select', 'ezc-hd-theme');
+  ezThemeList().forEach((t) => { const o = el('option'); o.value = t.id; o.textContent = ezT(t.label); themeSel.appendChild(o); });
+  themeSel.value = ezTheme();
+  themeSel.addEventListener('change', () => ezThemeSet(themeSel.value));
+  onThemeChange(() => { themeSel.value = ezTheme(); });
   const applyLang = () => {
     masterSel.title = ezT('Master preset');
     saveBtn.textContent = ezT('Save');
@@ -256,11 +266,13 @@ function buildRoot(node) {
     placeholder.textContent = ezT('— Load node —');
     loadAllBtn.textContent = ezT('Load all');
     langBtn.textContent = ezLocale() === 'zh' ? 'EN' : '中文';
+    themeSel.title = ezT('Theme');
+    ezThemeList().forEach((t, i) => { const o = themeSel.options[i]; if (o) o.textContent = ezT(t.label); });
     SCAFFOLD_TYPES.forEach((t, i) => { const o = loadSel.options[i + 1]; if (o) o.textContent = ezT(SCAFFOLD_LABEL[t] || t); });
   };
   langBtn.addEventListener('click', () => { ezSetLocale(ezLocale() === 'zh' ? 'en' : 'zh'); applyLang(); });
   try { window.addEventListener('ezflex:locale', applyLang); } catch (_) {}
-  hd.appendChild(masterSel); hd.appendChild(saveBtn); hd.appendChild(delBtn); hd.appendChild(loadSel); hd.appendChild(loadAllBtn); hd.appendChild(langBtn);
+  hd.appendChild(masterSel); hd.appendChild(saveBtn); hd.appendChild(delBtn); hd.appendChild(loadSel); hd.appendChild(loadAllBtn); hd.appendChild(langBtn); hd.appendChild(themeSel);
   applyLang();
   const list = el('div', 'ezc-list');
   root.appendChild(hd); root.appendChild(list);
@@ -356,7 +368,8 @@ function attachCardDnD(list, node) {
       const idx = items.indexOf(item);
       const rect = item.getBoundingClientRect();
       const clone = item.cloneNode(true);
-      clone.style.cssText = `position:fixed;pointer-events:none;width:${rect.width}px;opacity:.85;z-index:99999;border:2px solid #2b3a4a;border-radius:6px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.12);top:${rect.top}px;left:${rect.left}px;transition:none;`;
+      clone.classList.add('ezc-clone');   // 颜色交给 .ezc-clone，跟当前主题一致
+      clone.style.cssText = `width:${rect.width}px;top:${rect.top}px;left:${rect.left}px;`;
       document.body.appendChild(clone);
       const st = { idx, clone, moved: false, targetIdx: idx };
       item.classList.add('dragging');
@@ -404,13 +417,28 @@ function attachCardDnD(list, node) {
   });
 }
 
+// 头部控件一行摆开的实际宽度（.ezc-hd 的 gap = 6）
+function headerWidth(hd) {
+  const kids = hd && hd.children;
+  if (!kids || !kids.length) return 0;
+  let w = 0;
+  for (let i = 0; i < kids.length; i++) w += kids[i].offsetWidth;
+  return w + (kids.length - 1) * 6;
+}
 function fitNode(node) {
   try {
     const root = node && node._ezRoot && node._ezRoot.querySelector('.ezc-root');
     if (!root || typeof node.setSize !== 'function') return;
     const cur = node.size || [0, 96];
     const contentH = root.scrollHeight + 12;
-    if (contentH > cur[1] + 4) node.setSize([Math.max(400, cur[0]), Math.min(420, contentH)]);
+    let w = Math.max(400, cur[0]);
+    // 头部一行放不下会被 overflow:hidden 裁掉，中英文按钮宽度还不一样：
+    // 首帧按实测宽度兜底一次（旧工作流里存下来的窄节点也能铺开），之后不再干预手动缩放。
+    if (!node._ezMainWidthFit) {
+      const needW = headerWidth(root.querySelector('.ezc-hd')) + 52;   // .ezc-shell 左右 14 + .ezc-root 左右 12
+      if (needW > 52) { node._ezMainWidthFit = true; w = Math.max(w, needW); }
+    }
+    if (contentH > cur[1] + 4 || w > cur[0]) node.setSize([w, Math.min(420, Math.max(cur[1], contentH))]);
   } catch (_) {}
 }
 function refreshUI(node) {
@@ -512,7 +540,7 @@ function setupNode(node) {
     makeDomWidgetHitThrough(widget.element || root);
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
-    try { node.setSize([Math.max(400, (node.size ? node.size[0] : 320) + 110), (node.size ? node.size[1] : 200) + 70]); } catch (_) {} // MainControl 初始加宽（头部多了语言按钮，太窄会挡住）tupNode 内）
+    try { node.setSize([Math.max(680, (node.size ? node.size[0] : 320) + 230), (node.size ? node.size[1] : 200) + 70]); } catch (_) {} // 初始加宽：头部多了主题下拉，窄了会换行/裁掉
     setTimeout(hideConfigWidget, 60, node);
     installResizeHandles(node, root);
     startTitleWatch(node);

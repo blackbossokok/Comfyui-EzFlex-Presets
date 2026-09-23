@@ -5,6 +5,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ezT, onLocaleChange, ezRelabel } from "./ezflex_i18n.js";
+import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough,
@@ -16,66 +17,67 @@ const MAX_CARDS = 16;
 const CSS = `
 .ezpv-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .ezpv-shell .ezpv-root{pointer-events:auto;}
-.ezpv-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
+.ezpv-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .ezpv-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
 .ezpv-hd{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;min-width:0;} /* 顶部工具栏单行不换行 */
-.ezpv-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
-.ezpv-btn:hover{background:#edf2fa;}
-.ezpv-save.on{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;}
-.ezpv-save.on:hover{background:#d1fae5;}
-.ezpv-save.off{background:#f6f8fc;border-color:#e2e8f0;color:#8492a6;}
+.ezpv-btn{background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:var(--ez-fg);font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
+.ezpv-btn:hover{background:var(--ez-surface-3);}
+.ezpv-save.on{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);}
+.ezpv-save.on:hover{background:var(--ez-ok-bg);}
+.ezpv-save.off{background:var(--ez-surface-2);border-color:var(--ez-border);color:var(--ez-fg-muted);}
 .ezpv-save .ezpv-auto{font-size:8px;line-height:1;margin-left:2px;}
 .ezpv-fs{width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;border-radius:0!important;margin:0!important;left:0!important;top:0!important;transform:none!important;}
-.ezpv-loc{background:#1a1a2e;color:#fff;border-color:#1a1a2e;}
-.ezpv-loc:hover{background:#2b3a4a;}
+.ezpv-loc{background:var(--ez-strong);color:var(--ez-on-strong);border-color:var(--ez-strong);}
+.ezpv-loc:hover{background:var(--ez-strong);}
 .ezpv-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezpv-card{display:flex;align-items:center;gap:8px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;padding:6px 8px;flex-wrap:nowrap;}
+.ezpv-card{display:flex;align-items:center;gap:8px;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:10px;padding:6px 8px;flex-wrap:nowrap;}
 .ezpv-card.dragging{opacity:.4;}
-.ezpv-handle{cursor:grab;color:#8a99ae;font-size:14px;line-height:1.6;padding:0 2px;}
-.ezpv-handle:hover{color:#1a1a2e;}
+.ezpv-handle{cursor:grab;color:var(--ez-fg-muted);font-size:14px;line-height:1.6;padding:0 2px;}
+.ezpv-handle:hover{color:var(--ez-fg);}
 .ezpv-body{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:4px;}
 .ezpv-crow{display:flex;align-items:center;gap:6px;}
-.ezpv-cname{font-size:12px;font-weight:500;color:#1a1f2b;flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.ezpv-badge{font-size:9px;font-weight:480;color:#fff;background:#5f6b7a;padding:0 7px;border-radius:100px;line-height:16px;white-space:nowrap;}
-.ezpv-fldr{background:transparent;border:none;color:#b7c1cf;font-size:15px;line-height:1;cursor:pointer;padding:1px 3px;flex:0 0 auto;}
-.ezpv-fldr:hover{color:#5f6b7a;}
-.ezpv-prev{background:#f3f6fc;border:1px solid #e6edf7;border-radius:8px;padding:5px 8px;font-size:11px;color:#3a4a5e;font-family:monospace;line-height:1.4;white-space:pre-wrap;word-break:break-all;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;cursor:pointer;pointer-events:auto;min-height:30px;}
+.ezpv-cname{font-size:12px;font-weight:500;color:var(--ez-fg);flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ezpv-badge{font-size:9px;font-weight:480;color:var(--ez-on-strong);background:var(--ez-strong);padding:0 7px;border-radius:100px;line-height:16px;white-space:nowrap;}
+.ezpv-fldr{background:transparent;border:none;color:var(--ez-fg-muted);font-size:15px;line-height:1;cursor:pointer;padding:1px 3px;flex:0 0 auto;}
+.ezpv-fldr:hover{color:var(--ez-fg-3);}
+.ezpv-prev{background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:8px;padding:5px 8px;font-size:11px;color:var(--ez-fg-2);font-family:monospace;line-height:1.4;white-space:pre-wrap;word-break:break-all;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;cursor:pointer;pointer-events:auto;min-height:30px;}
 .ezpv-prev.long{cursor:pointer;}
-.ezpv-prev.img{position:relative;display:flex;align-items:center;justify-content:center;padding:4px;background:#1f2933;cursor:pointer;}
+.ezpv-prev.img{position:relative;display:flex;align-items:center;justify-content:center;padding:4px;background:var(--ez-surface-3);cursor:pointer;}   /* 与 MediaLoader 缩略图底一致 */
 .ezpv-prev.img img{max-width:100%;max-height:120px;border-radius:6px;display:block;}
 .ezpv-prev.img .ezpv-badge{position:absolute;top:5px;right:5px;}
-.ezpv-prev.img .ezpv-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:30px;height:30px;border-radius:50%;background:rgba(0,0,0,.55);color:#fff;font-size:14px;display:flex;align-items:center;justify-content:center;padding-left:2px;}
-.ezpv-prev .ph{color:#8a99ae;font-family:Inter,sans-serif;font-style:italic;}
-.ezpv-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
-.ezpv-ph{height:0;border-top:3px solid #2b3a4a;border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
+.ezpv-prev.img .ezpv-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:30px;height:30px;border-radius:50%;background:var(--ez-strong);color:var(--ez-on-strong);font-size:14px;display:flex;align-items:center;justify-content:center;padding-left:2px;}
+.ezpv-prev .ph{color:var(--ez-fg-muted);font-family:Inter,sans-serif;font-style:italic;}
+.ezpv-empty{color:var(--ez-fg-muted);font-size:12px;text-align:center;padding:14px;}
+.ezpv-ph{height:0;border-top:3px solid var(--ez-fg-3);border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
 .ezpv-ph.hidden{display:none;}
 .ezpv-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:9999;background:rgba(0,0,0,.35);}
 .ezpv-modal.active{display:flex;}
-.ezpv-modal-box{background:#fff;border-radius:16px;padding:14px 16px;width:92%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;}
-.ezpv-modal-hd{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;}
-.ezpv-modal-hd b{font-size:13px;color:#0f141f;}
-.ezpv-modal-box textarea{width:100%;min-height:180px;max-height:60vh;padding:8px;border:1px solid #dce3ec;border-radius:9px;font:11px/1.5 monospace;color:#1a1f2b;background:#fff;resize:both;overflow:auto;box-sizing:border-box;outline:none;}
-.ezpv-kv{display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:60vh;border:1px solid #e6edf7;border-radius:9px;padding:6px;}
-.ezpv-kv-row{display:flex;gap:8px;font:11px/1.5 monospace;border-bottom:1px solid #f0f4fc;padding:3px 4px;}
-.ezpv-kv-k{flex:0 0 45%;color:#5f6b7a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;}
-.ezpv-kv-v{flex:1 1 auto;color:#1a1f2b;word-break:break-all;white-space:pre-wrap;}
-.ezpv-fpath{font:11px/1.5 monospace;color:#3a4a5e;background:#f6f8fc;border:1px solid #e6edf7;border-radius:8px;padding:6px 8px;word-break:break-all;}
+.ezpv-modal-box{background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:92%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;}
+.ezpv-modal-hd{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;}
+.ezpv-modal-hd b{font-size:13px;color:var(--ez-fg);}
+.ezpv-modal-box textarea{width:100%;min-height:180px;max-height:60vh;padding:8px;border:1px solid var(--ez-border);border-radius:9px;font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-bg);resize:both;overflow:auto;box-sizing:border-box;outline:none;}
+.ezpv-kv{display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:60vh;border:1px solid var(--ez-border-2);border-radius:9px;padding:6px;}
+.ezpv-kv-row{display:flex;gap:8px;font:11px/1.5 monospace;border-bottom:1px solid var(--ez-border-2);padding:3px 4px;}
+.ezpv-kv-k{flex:0 0 45%;color:var(--ez-fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;}
+.ezpv-kv-v{flex:1 1 auto;color:var(--ez-fg);word-break:break-all;white-space:pre-wrap;}
+.ezpv-fpath{font:11px/1.5 monospace;color:var(--ez-fg-2);background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:8px;padding:6px 8px;word-break:break-all;}
 .ezpv-fdirs{display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:240px;}
-.ezpv-fdirs button{text-align:left;background:#fbfcfe;border:1px solid #eef2f8;border-radius:8px;padding:5px 10px;font-size:12px;color:#1a1f2b;cursor:pointer;font-family:inherit;}
-.ezpv-fdirs button:hover{background:#edf2fa;}
-.ezpv-media{position:fixed;z-index:9998;background:#fff;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.25);padding:12px;display:none;left:50%;top:50%;transform:translate(-50%,-50%);max-width:82vw;max-height:82vh;overflow:auto;pointer-events:auto;}
+.ezpv-fdirs button{text-align:left;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:8px;padding:5px 10px;font-size:12px;color:var(--ez-fg);cursor:pointer;font-family:inherit;}
+.ezpv-fdirs button:hover{background:var(--ez-surface-3);}
+.ezpv-media{position:fixed;z-index:9998;background:var(--ez-bg);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.25);padding:12px;display:none;left:50%;top:50%;transform:translate(-50%,-50%);max-width:82vw;max-height:82vh;overflow:auto;pointer-events:auto;}
 .ezpv-media.active{display:block;}
 .ezpv-media-body{display:flex;flex-direction:column;gap:8px;justify-content:center;align-items:center;}
 .ezpv-media.ezpv-fs .ezpv-media-body{height:100%;justify-content:center;}
 .ezpv-media img{max-width:min(70vw,720px);max-height:70vh;border-radius:8px;display:block;}
 .ezpv-media.ezpv-fs img{width:auto;height:auto;max-width:100vw;max-height:100vh;object-fit:contain;cursor:grab;border-radius:0;transform-origin:center;}
 .ezpv-media.ezpv-fs video{width:100vw;height:100vh;object-fit:cover;max-width:none!important;max-height:none!important;}
-.ezpv-media-meta{font:11px/1.5 monospace;color:#1a1f2b;background:#f6f8fc;border:1px solid #e6edf7;border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;}
-.ezpv-media .cap{font-size:12px;color:#1a1f2b;padding:0 4px;}
+.ezpv-media-meta{font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;}
+.ezpv-media .cap{font-size:12px;color:var(--ez-fg);padding:0 4px;}
 `;
 
 let _styleInjected = false;
-function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
+function injectStyle() {
+  ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 const fetchApi = (p, o) => (api && typeof api.fetchApi === 'function') ? api.fetchApi(p, o) : fetch(p, o);
 // 关闭后恢复窗口级 keydown 监听回退
@@ -86,7 +88,7 @@ function attachFullscreen(host, closeFn, onExit) {
   const doExit = () => { if (onExit) { try { onExit(); } catch (_) {} } };
   const btn = document.createElement('button');
   btn.textContent = '⛶'; btn.title = ezT('Fullscreen');
-  btn.style.cssText = 'position:absolute;bottom:6px;right:6px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:#f7f9fd;border:1px solid #dce3ec;border-radius:8px;color:#5f6b7a;cursor:pointer;font-size:12px;';
+  btn.style.cssText = 'position:absolute;bottom:6px;right:6px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;color:var(--ez-fg-3);cursor:pointer;font-size:12px;';
   host.appendChild(btn);
   btn.addEventListener('click', (e) => { e.stopPropagation(); fs = !fs; host.classList.toggle('ezpv-fs', fs); if (!fs) doExit(); });
   const key = (e) => {
@@ -224,13 +226,13 @@ function modalEl() {
   _modal = document.createElement('div');
   _modal.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);';
   const box = document.createElement('div');
-  box.style.cssText = 'background:#fff;border-radius:12px;padding:12px 14px;width:92%;max-width:640px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid #eef2f8;box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
-  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
+  box.style.cssText = 'background:var(--ez-bg);border-radius:12px;padding:12px 14px;width:92%;max-width:640px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid var(--ez-border-2);box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
+  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const title = document.createElement('b'); title.textContent = ezT('Preview');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const ta = document.createElement('textarea'); ta.readOnly = true; ta.spellcheck = false;
-  ta.style.cssText = 'width:100%;min-height:180px;max-height:60vh;padding:8px;border:1px solid #dce3ec;border-radius:9px;font:11px/1.5 monospace;color:#1a1f2b;background:#fbfcfe;resize:none;overflow:auto;box-sizing:border-box;outline:none;';
+  ta.style.cssText = 'width:100%;min-height:180px;max-height:60vh;padding:8px;border:1px solid var(--ez-border);border-radius:9px;font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-surface);resize:none;overflow:auto;box-sizing:border-box;outline:none;';
   box.appendChild(hd); box.appendChild(ta);
   _modal.appendChild(box); document.body.appendChild(_modal);
   _modal._ta = ta; _modal._title = title;
@@ -247,13 +249,13 @@ function kvModalEl() {
   _kv = document.createElement('div');
   _kv.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);';
   const box = document.createElement('div');
-  box.style.cssText = 'background:#fff;border-radius:12px;padding:12px 14px;width:92%;max-width:600px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid #eef2f8;box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
-  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
+  box.style.cssText = 'background:var(--ez-bg);border-radius:12px;padding:12px 14px;width:92%;max-width:600px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid var(--ez-border-2);box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
+  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const title = document.createElement('b'); title.textContent = ezT('Details');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const list = document.createElement('div');
-  list.style.cssText = 'display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:60vh;border:1px solid #e6edf7;border-radius:9px;padding:6px;';
+  list.style.cssText = 'display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:60vh;border:1px solid var(--ez-border-2);border-radius:9px;padding:6px;';
   box.appendChild(hd); box.appendChild(list);
   _kv.appendChild(box); document.body.appendChild(_kv);
   _kv._title = title; _kv._list = list;
@@ -347,15 +349,15 @@ function openKeyValueModal(title, obj) {
     }
     const wrap = document.createElement('div');
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;gap:6px;align-items:center;font:11px/1.5 monospace;border-bottom:1px solid #f0f4fc;padding:3px 6px;padding-left:' + (4 + depth * 16) + 'px;cursor:default;';
+    row.style.cssText = 'display:flex;gap:6px;align-items:center;font:11px/1.5 monospace;border-bottom:1px solid var(--ez-border-2);padding:3px 6px;padding-left:' + (4 + depth * 16) + 'px;cursor:default;';
     if (node && typeof node === 'object') {
-      const toggle = document.createElement('span'); toggle.textContent = '▸'; toggle.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:#5f6b7a;flex:0 0 auto;';
+      const toggle = document.createElement('span'); toggle.textContent = '▸'; toggle.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:var(--ez-fg-3);flex:0 0 auto;';
       const kk = document.createElement('span');
       const kkTxt = document.createElement('span'); kkTxt.textContent = (key === null ? '' : String(key));   // 值单独一个文本节点，ezRelabel 才能整串匹配
       const kkSuf = document.createElement('span'); kkSuf.textContent = Array.isArray(node) ? ' [' + node.length + ']' : ' {' + Object.keys(node).length + '}';
       kk.appendChild(kkTxt); kk.appendChild(kkSuf);
       kk.title = hintKey(key) || String(key);
-      kk.style.cssText = 'flex:0 0 45%;color:#5f6b7a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
+      kk.style.cssText = 'flex:0 0 45%;color:var(--ez-fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
       row.appendChild(toggle); row.appendChild(kk);
       const children = document.createElement('div'); children.style.display = 'none';
       const toggleFn = (e) => { e.stopPropagation(); const open = toggle.textContent === '▸'; toggle.textContent = open ? '▾' : '▸'; children.style.display = open ? 'block' : 'none'; if (open && !children.childElementCount) { const list = Array.isArray(node) ? node.map((v, i) => [i, v]) : Object.entries(node); list.forEach(([k, v]) => children.appendChild(renderNode(v, k, depth + 1))); } };
@@ -364,9 +366,9 @@ function openKeyValueModal(title, obj) {
       wrap.appendChild(row); wrap.appendChild(children);
     } else {
       const kk = document.createElement('span'); kk.textContent = String(key); kk.title = hintKey(key) || String(key);
-      kk.style.cssText = 'flex:0 0 45%;color:#5f6b7a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
+      kk.style.cssText = 'flex:0 0 45%;color:var(--ez-fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;word-break:break-all;';
       const vv = document.createElement('span'); vv.textContent = (value === null ? 'null' : (value === undefined ? '' : String(value)));
-      vv.style.cssText = 'flex:1 1 auto;color:#1a1f2b;word-break:break-all;white-space:pre-wrap;';
+      vv.style.cssText = 'flex:1 1 auto;color:var(--ez-fg);word-break:break-all;white-space:pre-wrap;';
       row.appendChild(kk); row.appendChild(vv);
       wrap.appendChild(row);
     }
@@ -393,7 +395,7 @@ function mediaEl() {
   const cap = el('div', 'cap');
   body.appendChild(video); body.appendChild(img); body.appendChild(audio); body.appendChild(meta); body.appendChild(cap);
   const closeBtn = document.createElement('button'); closeBtn.textContent = '✕'; closeBtn.title = ezT('Close');
-  closeBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:#f7f9fd;border:1px solid #dce3ec;border-radius:8px;padding:2px 9px;font-size:12px;cursor:pointer;font-family:inherit;z-index:2;';
+  closeBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:2px 9px;font-size:12px;cursor:pointer;font-family:inherit;z-index:2;';
   _media.appendChild(closeBtn);
   _media.appendChild(body); _media._img = img; _media._audio = audio; _media._meta = meta; _media._cap = cap; _media._video = video;
   document.body.appendChild(_media);
@@ -459,37 +461,37 @@ function open3DViewer(url, title) {
   _threeModal = document.createElement('div');
   _threeModal.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:99999;background:rgba(10,14,20,.55);backdrop-filter:blur(2px);';
   const box = document.createElement('div');
-  box.style.cssText = 'background:#fff;border-radius:18px;padding:14px;width:96%;max-width:1040px;height:88vh;display:flex;flex-direction:column;gap:12px;font-family:Inter,system-ui,sans-serif;box-sizing:border-box;box-shadow:0 30px 90px rgba(0,0,0,.4);overflow:hidden;';
+  box.style.cssText = 'background:var(--ez-bg);border-radius:18px;padding:14px;width:96%;max-width:1040px;height:88vh;display:flex;flex-direction:column;gap:12px;font-family:Inter,system-ui,sans-serif;box-sizing:border-box;box-shadow:0 30px 90px rgba(0,0,0,.4);overflow:hidden;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;flex:0 0 auto;';
-  const t = document.createElement('b'); t.style.cssText = 'font-size:14px;color:#0f141f;'; t.textContent = title || ezT('3D Model');
-  const close = document.createElement('button'); close.textContent = '✕'; close.title = ezT('Close'); close.style.cssText = 'background:#f1f5f9;border:1px solid #dce3ec;border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:#64748b;';
+  const t = document.createElement('b'); t.style.cssText = 'font-size:14px;color:var(--ez-fg);'; t.textContent = title || ezT('3D Model');
+  const close = document.createElement('button'); close.textContent = '✕'; close.title = ezT('Close'); close.style.cssText = 'background:var(--ez-surface-3);border:1px solid var(--ez-border);border-radius:10px;width:28px;height:28px;font-size:13px;cursor:pointer;color:var(--ez-fg-3);';
   hd.appendChild(t); hd.appendChild(close);
 
   // 主体：左画布 + 右控制面板
   const body = document.createElement('div'); body.style.cssText = 'flex:1 1 auto;min-height:0;display:flex;gap:12px;';
-  const wrapEl = document.createElement('div'); wrapEl.style.cssText = 'flex:1 1 auto;min-width:0;position:relative;border-radius:14px;overflow:hidden;background:#f7f9fd;border:1px solid #e6edf7;';
+  const wrapEl = document.createElement('div'); wrapEl.style.cssText = 'flex:1 1 auto;min-width:0;position:relative;border-radius:14px;overflow:hidden;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);';
   const canvas = document.createElement('canvas'); canvas.tabIndex = 0; canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;outline:none;touch-action:none;cursor:grab;';
   wrapEl.appendChild(canvas);
-  const fsBtn = document.createElement('button'); fsBtn.textContent = '⛶'; fsBtn.title = ezT('Fullscreen / Exit fullscreen'); fsBtn.style.cssText = 'position:absolute;right:10px;bottom:10px;z-index:8;width:34px;height:34px;border:none;border-radius:10px;background:rgba(255,255,255,.92);color:#64748b;font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15);';
+  const fsBtn = document.createElement('button'); fsBtn.textContent = '⛶'; fsBtn.title = ezT('Fullscreen / Exit fullscreen'); fsBtn.style.cssText = 'position:absolute;right:10px;bottom:10px;z-index:8;width:34px;height:34px;border:none;border-radius:10px;background:var(--ez-surface);color:var(--ez-fg-3);font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15);';
   wrapEl.appendChild(fsBtn);
 
   // 右侧控制面板
-  const ctrl = document.createElement('div'); ctrl.style.cssText = 'flex:0 0 250px;width:250px;overflow-y:auto;background:#f8fafc;border:1px solid #e6edf7;border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;font-size:12px;color:#334155;';
+  const ctrl = document.createElement('div'); ctrl.style.cssText = 'flex:0 0 250px;width:250px;overflow-y:auto;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--ez-fg-2);';
   function grp(label, input) {
     const g = document.createElement('label'); g.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
-    const s = document.createElement('span'); s.style.cssText = 'font-size:11px;font-weight:600;color:#64748b;'; s.textContent = label; g.appendChild(s); g.appendChild(input); return g;
+    const s = document.createElement('span'); s.style.cssText = 'font-size:11px;font-weight:600;color:var(--ez-fg-3);'; s.textContent = label; g.appendChild(s); g.appendChild(input); return g;
   }
-  const bgInput = document.createElement('input'); bgInput.type = 'color'; bgInput.value = '#f7f9fd'; bgInput.style.cssText = 'width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;';
-  const matSel = document.createElement('select'); matSel.style.cssText = 'width:100%;font-size:12px;padding:5px 8px;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;';
+  const bgInput = document.createElement('input'); bgInput.type = 'color'; bgInput.value = '#f7f9fd'; bgInput.style.cssText = 'width:100%;height:26px;border:1px solid var(--ez-border);border-radius:8px;padding:2px;background:var(--ez-bg);cursor:pointer;';
+  const matSel = document.createElement('select'); matSel.style.cssText = 'width:100%;font-size:12px;padding:5px 8px;border:1px solid var(--ez-border);border-radius:8px;background:var(--ez-bg);cursor:pointer;';
   [['original', ezT('Original')], ['clay', ezT('Clay')], ['glass', ezT('Glass')], ['plastic', ezT('Plastic')], ['metal', ezT('Metal')], ['wireframe', ezT('Wireframe')]].forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; if (v === 'original') o.selected = true; matSel.appendChild(o); });
   const gridChk = document.createElement('input'); gridChk.type = 'checkbox'; gridChk.checked = true; gridChk.style.cssText = 'width:16px;height:16px;';
-  const matColor = document.createElement('input'); matColor.type = 'color'; matColor.value = '#ffffff'; matColor.style.cssText = 'width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;';
+  const matColor = document.createElement('input'); matColor.type = 'color'; matColor.value = '#ffffff'; matColor.style.cssText = 'width:100%;height:26px;border:1px solid var(--ez-border);border-radius:8px;padding:2px;background:var(--ez-bg);cursor:pointer;';
   function slider(label, min, max, val, step) {
     const g = document.createElement('label'); g.style.cssText = 'display:flex;flex-direction:column;gap:3px;';
-    const s = document.createElement('span'); s.style.cssText = 'font-size:11px;font-weight:600;color:#64748b;'; s.textContent = label;
+    const s = document.createElement('span'); s.style.cssText = 'font-size:11px;font-weight:600;color:var(--ez-fg-3);'; s.textContent = label;
     const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:center;gap:6px;';
     const r = document.createElement('input'); r.type = 'range'; r.min = String(min); r.max = String(max); r.value = String(val); r.step = String(step || '0.01'); r.style.cssText = 'flex:1 1 auto;';
-    const num = document.createElement('span'); num.style.cssText = 'font-size:10px;color:#64748b;width:34px;text-align:right;'; num.textContent = String(val);
+    const num = document.createElement('span'); num.style.cssText = 'font-size:10px;color:var(--ez-fg-3);width:34px;text-align:right;'; num.textContent = String(val);
     r.addEventListener('input', () => { num.textContent = Number(r.value).toFixed((step || 0.01) < 1 ? 2 : 0); });
     row.appendChild(r); row.appendChild(num);
     g.appendChild(s); g.appendChild(row);
@@ -501,25 +503,25 @@ function open3DViewer(url, title) {
   const gizmoBtns = {};
   gizmoBtnDefs.forEach(([v, l]) => {
     const b = document.createElement('button'); b.textContent = l;
-    b.style.cssText = 'flex:1 1 0;background:#eef2f7;border:1px solid #dce3ec;border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:#334155;';
+    b.style.cssText = 'flex:1 1 0;background:var(--ez-surface-3);border:1px solid var(--ez-border);border-radius:8px;padding:6px;font-size:12px;cursor:pointer;color:var(--ez-fg-2);';
     b.dataset.mode = v; gizmoBtns[v] = b; gizmoBtnsWrap.appendChild(b);
   });
-  const camSel = document.createElement('select'); camSel.style.cssText = 'width:100%;font-size:12px;padding:5px 8px;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;';
+  const camSel = document.createElement('select'); camSel.style.cssText = 'width:100%;font-size:12px;padding:5px 8px;border:1px solid var(--ez-border);border-radius:8px;background:var(--ez-bg);cursor:pointer;';
   [['perspective', ezT('Perspective')], ['orthographic', ezT('Orthographic')]].forEach(([v, l]) => { const o = document.createElement('option'); o.value = v; o.textContent = l; camSel.appendChild(o); });
   const fovRange = document.createElement('input'); fovRange.type = 'range'; fovRange.min = '10'; fovRange.max = '120'; fovRange.value = '45'; fovRange.style.cssText = 'width:100%;';
-  const fovNum = document.createElement('span'); fovNum.style.cssText = 'font-size:11px;color:#64748b;'; fovNum.textContent = '45°';
+  const fovNum = document.createElement('span'); fovNum.style.cssText = 'font-size:11px;color:var(--ez-fg-3);'; fovNum.textContent = '45°';
   const lightRange = document.createElement('input'); lightRange.type = 'range'; lightRange.min = '0'; lightRange.max = '3'; lightRange.step = '0.1'; lightRange.value = '0.9'; lightRange.style.cssText = 'width:100%;';
-  const lightNum = document.createElement('span'); lightNum.style.cssText = 'font-size:11px;color:#64748b;'; lightNum.textContent = '0.9';
-  const lightColor = document.createElement('input'); lightColor.type = 'color'; lightColor.value = '#ffffff'; lightColor.style.cssText = 'width:100%;height:26px;border:1px solid #dce3ec;border-radius:8px;padding:2px;background:#fff;cursor:pointer;';
-  const resetBtn = document.createElement('button'); resetBtn.textContent = ezT('Reset view'); resetBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
+  const lightNum = document.createElement('span'); lightNum.style.cssText = 'font-size:11px;color:var(--ez-fg-3);'; lightNum.textContent = '0.9';
+  const lightColor = document.createElement('input'); lightColor.type = 'color'; lightColor.value = '#ffffff'; lightColor.style.cssText = 'width:100%;height:26px;border:1px solid var(--ez-border);border-radius:8px;padding:2px;background:var(--ez-bg);cursor:pointer;';
+  const resetBtn = document.createElement('button'); resetBtn.textContent = ezT('Reset view'); resetBtn.style.cssText = 'width:100%;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:var(--ez-fg-2);';
 
   ctrl.appendChild(grp(ezT('Background'), bgInput));
   ctrl.appendChild(grp(ezT('Preset material'), matSel));
-  const matResetBtn = document.createElement('button'); matResetBtn.textContent = ezT('Reset material'); matResetBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
+  const matResetBtn = document.createElement('button'); matResetBtn.textContent = ezT('Reset material'); matResetBtn.style.cssText = 'width:100%;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:var(--ez-fg-2);';
   ctrl.appendChild(matResetBtn);
   // 材质参数（可收起）：颜色/滑块只对彩色预设（陶土/玻璃/塑料/金属）生效，原始/线框忽略颜色
-  const det = document.createElement('details'); det.style.cssText = 'border:1px solid #e6edf7;border-radius:9px;padding:8px;background:#fff;';
-  const sum = document.createElement('summary'); sum.textContent = ezT('Material parameters'); sum.style.cssText = 'cursor:pointer;font-size:12px;font-weight:600;color:#334155;';
+  const det = document.createElement('details'); det.style.cssText = 'border:1px solid var(--ez-border-2);border-radius:9px;padding:8px;background:var(--ez-bg);';
+  const sum = document.createElement('summary'); sum.textContent = ezT('Material parameters'); sum.style.cssText = 'cursor:pointer;font-size:12px;font-weight:600;color:var(--ez-fg-2);';
   det.appendChild(sum);
   det.appendChild(grp(ezT('Material color'), matColor));
   const mats = {};
@@ -544,7 +546,7 @@ function open3DViewer(url, title) {
   ctrl.appendChild(det);
   ctrl.appendChild(grp(ezT('Show grid'), gridChk));
   const toolGrp = document.createElement('div'); toolGrp.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
-  const toolLabel = document.createElement('span'); toolLabel.style.cssText = 'font-size:11px;font-weight:600;color:#64748b;'; toolLabel.textContent = ezT('Transform tool (drag model)');
+  const toolLabel = document.createElement('span'); toolLabel.style.cssText = 'font-size:11px;font-weight:600;color:var(--ez-fg-3);'; toolLabel.textContent = ezT('Transform tool (drag model)');
   toolGrp.appendChild(toolLabel); toolGrp.appendChild(gizmoBtnsWrap);
   ctrl.appendChild(toolGrp);
   ctrl.appendChild(grp(ezT('Camera'), camSel));
@@ -552,12 +554,12 @@ function open3DViewer(url, title) {
   const lightGrp = grp(ezT('Light intensity'), lightRange); lightGrp.appendChild(lightNum); ctrl.appendChild(lightGrp);
   ctrl.appendChild(grp(ezT('Light color'), lightColor));
   ctrl.appendChild(resetBtn);
-  const resetModelBtn = document.createElement('button'); resetModelBtn.textContent = ezT('Reset model'); resetModelBtn.style.cssText = 'width:100%;background:#fff;border:1px solid #dce3ec;border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:#334155;';
+  const resetModelBtn = document.createElement('button'); resetModelBtn.textContent = ezT('Reset model'); resetModelBtn.style.cssText = 'width:100%;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:9px;padding:7px;font-size:12px;cursor:pointer;color:var(--ez-fg-2);';
   ctrl.appendChild(resetModelBtn);
 
-  const status = document.createElement('div'); status.style.cssText = 'font-size:12px;color:#64748b;text-align:center;min-height:18px;line-height:1.4;word-break:break-word;';
+  const status = document.createElement('div'); status.style.cssText = 'font-size:12px;color:var(--ez-fg-3);text-align:center;min-height:18px;line-height:1.4;word-break:break-word;';
   status.textContent = ezT('Loading 3D model…');
-  const tip = document.createElement('div'); tip.style.cssText = 'font-size:11px;color:#94a3b8;';
+  const tip = document.createElement('div'); tip.style.cssText = 'font-size:11px;color:var(--ez-fg-muted);';
   tip.textContent = ezT('Left drag = orbit · Shift/Right drag = pan · Wheel = zoom');
 
   body.appendChild(wrapEl); body.appendChild(ctrl);
@@ -617,8 +619,7 @@ function open3DViewer(url, title) {
       try {
         const lm = new THREE.LoadingManager();
         lm.onError = (u) => { try { console.log('[3D texture/resource load failed]', u); } catch (_) {} };
-        lm.onStart = (u, n, t) => { try { console.log('[3D loading resource]', u); } catch (_) {} };
-        loader.manager = lm;
+            loader.manager = lm;
       } catch (_) {}
 
       loader.load(url,
@@ -757,9 +758,9 @@ function open3DViewer(url, title) {
           const setTool = (t) => {
             gzTool = t;
             Object.keys(gizmoBtns).forEach((k) => {
-              gizmoBtns[k].style.background = (k === t) ? '#dbeafe' : '#eef2f7';
-              gizmoBtns[k].style.borderColor = (k === t) ? '#93c5fd' : '#dce3ec';
-              gizmoBtns[k].style.color = (k === t) ? '#1d4ed8' : '#334155';
+              gizmoBtns[k].style.background = (k === t) ? 'var(--ez-surface-4)' : 'var(--ez-surface-3)';
+              gizmoBtns[k].style.borderColor = (k === t) ? 'var(--ez-info-border)' : 'var(--ez-border)';
+              gizmoBtns[k].style.color = (k === t) ? 'var(--ez-info-fg)' : 'var(--ez-fg-2)';
             });
           };
           Object.keys(gizmoBtns).forEach((k) => gizmoBtns[k].addEventListener('click', (e) => { e.stopPropagation(); setTool(k); }));
@@ -890,7 +891,7 @@ function renderPreview(entry) {
     if (entry.frames > 1) { const b = el('span', 'ezpv-badge'); b.textContent = entry.frames + ezT(' frames'); box.appendChild(b); }
     if (entry.gen_meta) {
       const g = el('span', 'ezpv-gen'); g.textContent = ezT('Generation info');
-      g.style.cssText = 'position:absolute;top:4px;right:4px;z-index:5;background:rgba(255,255,255,.92);border:1px solid #dce3ec;border-radius:7px;padding:1px 7px;font-size:10px;cursor:pointer;color:#2563eb;box-shadow:0 1px 3px rgba(0,0,0,.12);';
+      g.style.cssText = 'position:absolute;top:4px;right:4px;z-index:5;background:var(--ez-surface);border:1px solid var(--ez-border);border-radius:7px;padding:1px 7px;font-size:10px;cursor:pointer;color:var(--ez-info-fg);box-shadow:0 1px 3px rgba(0,0,0,.12);';
       g.addEventListener('click', (e) => { e.stopPropagation(); try { openKeyValueModal((entry.caption || '') + ezT(' Generation info'), JSON.parse(entry.gen_meta)); } catch (_) { openTextModal((entry.caption || '') + ezT(' Generation info'), entry.gen_meta); } });
       box.appendChild(g);
     }
@@ -978,10 +979,10 @@ function formatModalEl() {
   _fmtModal = document.createElement('div');
   _fmtModal.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);';
   const box = document.createElement('div');
-  box.style.cssText = 'background:#fff;border-radius:16px;padding:14px 16px;width:92%;max-width:420px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
-  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
+  box.style.cssText = 'background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:92%;max-width:420px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
+  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const title = document.createElement('b'); title.textContent = ezT('Save types');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const fields = document.createElement('div'); fields.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto;';
   const opts = { image: ['png', 'jpeg', 'webp', 'bmp', 'tiff'], audio: ['wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac'], video: ['mp4', 'webm', 'mov', 'gif', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'] };
@@ -994,19 +995,19 @@ function formatModalEl() {
   };
   const selects = {}; const subSelects = {};
   Object.keys(opts).forEach((cat) => {
-    const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;border:1px solid #eef2f8;border-radius:10px;padding:6px 8px;';
+    const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;border:1px solid var(--ez-border-2);border-radius:10px;padding:6px 8px;';
     const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:center;gap:8px;';
-    const tog = document.createElement('span'); tog.textContent = '▸'; tog.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:#5f6b7a;flex:0 0 auto;';
-    const lab = document.createElement('span'); lab.textContent = labels[cat]; lab.style.cssText = 'flex:0 0 48px;font-size:12px;color:#1a1f2b;';
-    const sel = document.createElement('select'); sel.style.cssText = 'flex:1 1 auto;appearance:none;background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:5px 10px;font-size:12px;font-family:inherit;';
+    const tog = document.createElement('span'); tog.textContent = '▸'; tog.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:var(--ez-fg-3);flex:0 0 auto;';
+    const lab = document.createElement('span'); lab.textContent = labels[cat]; lab.style.cssText = 'flex:0 0 48px;font-size:12px;color:var(--ez-fg);';
+    const sel = document.createElement('select'); sel.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:5px 10px;font-size:12px;font-family:inherit;';
     opts[cat].forEach((f) => { const o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o); });
     row.appendChild(tog); row.appendChild(lab); row.appendChild(sel);
     wrap.appendChild(row);
     const sub = document.createElement('div'); sub.style.cssText = 'display:none;flex-direction:column;gap:6px;padding-left:18px;';
     (subDefs[cat] || []).forEach((sd) => {
       const srow = document.createElement('div'); srow.style.cssText = 'display:flex;align-items:center;gap:8px;';
-      const sl = document.createElement('span'); sl.textContent = sd.label; sl.style.cssText = 'flex:0 0 62px;font-size:11px;color:#5f6b7a;';
-      const ss = document.createElement('select'); ss.style.cssText = 'flex:1 1 auto;appearance:none;background:#f7f9fd;border:1px solid #dce3ec;border-radius:8px;padding:3px 8px;font-size:11px;font-family:inherit;';
+      const sl = document.createElement('span'); sl.textContent = sd.label; sl.style.cssText = 'flex:0 0 62px;font-size:11px;color:var(--ez-fg-3);';
+      const ss = document.createElement('select'); ss.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:3px 8px;font-size:11px;font-family:inherit;';
       sd.values.forEach((v) => { const o = document.createElement('option'); o.value = v; o.textContent = v; ss.appendChild(o); });
       srow.appendChild(sl); srow.appendChild(ss); sub.appendChild(srow);
       subSelects[cat + '.' + sd.key] = ss;
@@ -1016,8 +1017,8 @@ function formatModalEl() {
     fields.appendChild(wrap);
     selects[cat] = sel;
   });
-  const ft = document.createElement('div'); ft.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #f0f4fc;padding-top:10px;';
-  const save = document.createElement('button'); save.textContent = ezT('OK'); save.style.cssText = 'background:#1a1a2e;color:#fff;border:1px solid #1a1a2e;border-radius:9px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const ft = document.createElement('div'); ft.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--ez-border-2);padding-top:10px;';
+  const save = document.createElement('button'); save.textContent = ezT('OK'); save.style.cssText = 'background:var(--ez-strong);color:var(--ez-on-strong);border:1px solid var(--ez-strong);border-radius:9px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
   ft.appendChild(save);
   box.appendChild(hd); box.appendChild(fields); box.appendChild(ft);
   _fmtModal.appendChild(box); document.body.appendChild(_fmtModal);
@@ -1055,10 +1056,10 @@ function openDataPreviewModal() {
   _dpModal = document.createElement('div');
   _dpModal.style.cssText = 'position:fixed;inset:0;display:flex;align-items:center;justify-content:center;z-index:99999;background:rgba(15,20,31,.5);';
   const box = document.createElement('div');
-  box.style.cssText = 'background:#fff;border-radius:16px;padding:14px 16px;width:94%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:Inter,sans-serif;box-sizing:border-box;';
-  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f0f4fc;padding-bottom:8px;';
+  box.style.cssText = 'background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:94%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:Inter,sans-serif;box-sizing:border-box;';
+  const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const t = document.createElement('b'); t.textContent = ezT('Data preview types / formats');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(t); hd.appendChild(close);
   const rows = [
     ['IMAGE', ezT('PNG / JPEG / WebP / BMP / TIFF (zoom to view)')],
@@ -1080,7 +1081,7 @@ function openDataPreviewModal() {
     ['EMPTY', ezT('"(not connected)"')],
   ];
   const list = document.createElement('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:4px;overflow:auto;';
-  rows.forEach(([k, v]) => { const r = document.createElement('div'); r.style.cssText = 'display:flex;gap:8px;font-size:12px;'; const kk = document.createElement('b'); kk.textContent = k; kk.style.cssText = 'flex:0 0 180px;color:#1a1f2b;'; const vv = document.createElement('span'); vv.textContent = v; vv.style.cssText = 'flex:1 1 auto;color:#5f6b7a;word-break:break-all;'; r.appendChild(kk); r.appendChild(vv); list.appendChild(r); });
+  rows.forEach(([k, v]) => { const r = document.createElement('div'); r.style.cssText = 'display:flex;gap:8px;font-size:12px;'; const kk = document.createElement('b'); kk.textContent = k; kk.style.cssText = 'flex:0 0 180px;color:var(--ez-fg);'; const vv = document.createElement('span'); vv.textContent = v; vv.style.cssText = 'flex:1 1 auto;color:var(--ez-fg-3);word-break:break-all;'; r.appendChild(kk); r.appendChild(vv); list.appendChild(r); });
   box.appendChild(hd); box.appendChild(list); _dpModal.appendChild(box); document.body.appendChild(_dpModal);
   attachFullscreen(box, () => { if (_dpModal) { _dpModal.remove(); _dpModal = null; } });
   close.addEventListener('click', () => { _dpModal.remove(); _dpModal = null; });
@@ -1165,7 +1166,7 @@ function attachDnD(container, itemSel, handleSel, onDrop) {
         const idx = items.indexOf(item);
         const rect = item.getBoundingClientRect();
         const clone = item.cloneNode(true);
-        clone.style.cssText = `position:fixed;pointer-events:none;width:${rect.width}px;opacity:.85;z-index:99999;border:2px solid #2b3a4a;border-radius:6px;background:#fff;box-shadow:0 8px 24px rgba(0,0,0,.12);top:${rect.top}px;left:${rect.left}px;transition:none;`;
+        clone.style.cssText = `position:fixed;pointer-events:none;width:${rect.width}px;opacity:.85;z-index:99999;border:2px solid var(--ez-strong);border-radius:6px;background:var(--ez-bg);box-shadow:0 8px 24px rgba(0,0,0,.12);top:${rect.top}px;left:${rect.left}px;transition:none;`;
         document.body.appendChild(clone);
         const st = { idx, clone, moved: false, targetIdx: idx };
         item.classList.add('dragging');

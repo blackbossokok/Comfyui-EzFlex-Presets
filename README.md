@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets (V1.2.5 stable)
+# Comfyui-EzFlex-Presets (V1.2.6 stable)
 
 **English** | [中文](README_ZH.md)
 
@@ -24,6 +24,7 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV116tz6xE5V)
 
 ## Changelog
 
+- V1.2.6: New shared theme system: 16 palettes (Light = the original palette / Lilac / Sage / Nord / Minimal / Caramel / Mist Blue / Deep Space / Morandi / Mermaid / Chocolate / Klein Blue / Cloud / Banana / Burgundy / Deep Teal) reach every EzFlex panel live through `--ez-*` CSS variables. FreeLatent fixes: themed canvas, always-visible grid, even borders, and a preset dropdown that drops down and follows the node. Tag panel fixes: the page bar works again and generated previews are saved once. All EzFlex data moved into `user/EzFlex/` (old files migrate automatically) and dead code / debug prints were removed.
 - V1.2.5: The tag panel gained a random-tag generator; the default tag library is now bundled (it was missed in the last release); preview generation gained a cleanup action. ModelsCombo can auto-read the trigger words of a loaded LoRA (shown live and editable in Prompt Helper), and the model browser gained a "Loaded" view. Fixed black socket labels not showing inside subgraphs and leftover labels after fast canvas moves. Overall edit supports collapsing individual cards.
 - V1.2.4: Prompt Helper overhaul: new tag system / card manager, plus security hardening.
 - V1.2.3: Bug fixes, continued security hardening, and node feature enhancements.
@@ -58,6 +59,7 @@ Search for "EzFlex" in the ComfyUI node list and pick a node.
 - Presets: freely combine / save / delete master presets.
 - Quick load: load other EzFlex nodes. "Load all" adds Models Combo Loader / Resolution-Latent Selector / Node Switch Master / Node Switch Group / Param Preset Control / Param Preset Output / **Prompt Helper** / **Media Loader** / **Preview Any**; **Media Out (`MediaOut`) is created by Media Loader (`EzFlex-MediaLoader`) separately.
 - Language: switch between Chinese and English.
+- Theme: one switch for every EzFlex panel (Light - the original palette / Lilac / Sage / Nord / Minimal / Caramel / Mist Blue / Deep Space / Morandi / Mermaid / Chocolate / Klein Blue / Cloud / Banana / Burgundy / Deep Teal). Lilac and Sage take the Radix Colors steps (the base of shadcn/ui); the rest keep their own official schemes. A base layer gives native inputs and select popups the right text color and color-scheme. Palettes live in the theme module and reach the panels through CSS variables, so a switch repaints all open panels immediately.
 
 ### Models Combo Loader (`EzFlex-ModelsCombo`)
 
@@ -144,7 +146,7 @@ Search for "EzFlex" in the ComfyUI node list and pick a node.
 - Reference media: reads media ports of generator nodes on the canvas and numbers them as `@图片N` / `@视频N` / `@音频N`; the "reference media" window lists assets grouped by generator node, with + insert / − remove / right-click "make it a global reference library".
 - Prompt specs: 15 built-in specs under "Settings · Rules" ("Do not compile", "Use API" + 13 vendor specs) plus custom ones (editable, saveable, with Chinese/English variants and a 中 | EN switch); reference markers are compiled into each vendor's syntax (`<Picture 1>`, `@image1`, …).
 - Optimize: the Tools dropdown offers "Optimize prompt (API) / (TextGenerate) / (llama)"; use once or enable "runtime auto-optimize"; the three switches are mutually exclusive and failures raise an error.
-- Card management: save cards as presets (`userdata/prompts/<name>.json`); save only the selected cards, click to load, delete.
+- Card management: save cards as presets (`user/EzFlex/prompts/<name>.json`; EzFlex settings live in `user/EzFlex/`); save only the selected cards, click to load, delete.
 - Ports: no CLIP input — one dynamic "combo media" port (ANY: image/video/audio/3D) + one text input per card; outputs "merged prompt" + one port per card.
 - Settings: six tabs — General / Rules / API / TextGenerate / llama / Paths; scan dirs, selected models and custom providers are persisted globally.
 - Panel header buttons: Overall edit / Settings / Card management / + New prompt card.
@@ -264,6 +266,7 @@ Comfyui-EzFlex-Presets/
     ├── freelatent_node.js   # FreeLatent embedded canvas resolution picker
     ├── ezflex_service.js    # shared: node registry / group matching / node.mode / preset API / dialogs
     ├── ezflex_i18n.js       # panel i18n: ezT(key) + Chinese dictionary (English is the source)
+    ├── ezflex_theme.js      # themes: 16 palettes → shared CSS variables (--ez-*), live for every panel
     ├── node_switch_group.js # NodeSwitchGroup panel
     ├── node_switch_master.js# NodeSwitchMaster panel
     ├── main_control.js      # MainControl panel

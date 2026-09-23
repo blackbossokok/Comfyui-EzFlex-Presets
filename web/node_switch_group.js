@@ -5,6 +5,7 @@
 // 刻意如此：同名分组在不同节点上含义不同，存服务器预设库会互相冲突（多节点同名会串）；代价是删掉节点，预设就没了。
 import { app } from "../../scripts/app.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
+import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, MODE_NUM, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
   registerNode, unregisterNode, nodeTypeOf,
@@ -19,58 +20,59 @@ const NODE = NODE_TYPES.GROUP;
 const CSS = `
 .ezg-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .ezg-shell .ezg-root{pointer-events:auto;}
-.ezg-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:#1a1a2e;background:#fff;border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
+.ezg-root{position:absolute;inset:0 14px 14px 14px;font-family:Inter,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:12px;padding:10px 12px 12px;display:flex;flex-direction:column;gap:10px;box-sizing:border-box;user-select:none;-webkit-user-select:none;min-width:0;min-height:0;overflow:hidden;}
 .ezg-root *{user-select:none;-webkit-user-select:none;box-sizing:border-box;}
 .ezg-hd{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}
-.ezg-hd select{appearance:none;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;border:1px solid #dce3ec;border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:#1a1f2b;font-family:inherit;cursor:pointer;min-width:110px;height:30px;line-height:1;flex:1 1 auto;}
-.ezg-hd select:focus{border-color:#8fa7c5;outline:none;}
-.ezg-btn{background:#f7f9fd;border:1px solid #dce3ec;border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:#1f2937;font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
-.ezg-btn:hover{background:#edf2fa;border-color:#bcc9db;}
-.ezg-btn.success{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;}
-.ezg-btn.success:hover{background:#d1fae5;}
-.ezg-btn.danger{background:#fef2f2;border-color:#fecaca;color:#991b1b;}
-.ezg-btn.danger:hover{background:#fee2e2;}
-.ezg-btn.warn{background:#fffbeb;border-color:#fcd34d;color:#92400e;}
-.ezg-btn.warn:hover{background:#fef3c7;}
-.ezg-filters{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;background:#f9fbfd;border:1px solid #eef2f8;border-radius:10px;padding:5px 8px;}
-.ezg-filters select{appearance:none;background:#f7f9fd url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 7px center;border:1px solid #dce3ec;border-radius:8px;padding:4px 24px 4px 9px;font-size:11px;font-family:inherit;color:#1a1f2b;outline:none;cursor:pointer;height:26px;line-height:1;flex:0 0 auto;}
-.ezg-filters select:focus{border-color:#8fa7c5;}
-.ezg-filters input{flex:1 1 120px;min-width:60px;max-width:58%;font-family:inherit;font-size:11px;border:1px solid #dce3ec;border-radius:8px;background:#fff;color:#1a1a2e;outline:none;padding:4px 9px;height:26px;line-height:1;}
-.ezg-filters input:focus{border-color:#8fa7c5;}
-.ezg-sub{width:28px;height:26px;border-radius:8px;border:1px solid #dce3ec;background:#fff;color:#5f6b7a;font-size:13px;font-weight:600;line-height:1;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;}
-.ezg-sub:hover{background:#edf2fa;border-color:#bcc9db;}
-.ezg-sub.on{background:#ecfdf3;border-color:#a7f0c6;color:#065f46;box-shadow:0 1px 4px rgba(6,95,70,.16);}
+.ezg-hd select{appearance:none;background:var(--ez-surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 10px center;border:1px solid var(--ez-border);border-radius:10px;padding:5px 28px 5px 12px;font-size:12px;font-weight:450;color:var(--ez-fg);font-family:inherit;cursor:pointer;min-width:110px;height:30px;line-height:1;flex:1 1 auto;}
+.ezg-hd select:focus{border-color:var(--ez-border-strong);outline:none;}
+.ezg-btn{background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:4px 11px;font-size:11px;font-weight:480;color:var(--ez-fg);font-family:inherit;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;gap:4px;white-space:nowrap;height:30px;line-height:1;}
+.ezg-btn:hover{background:var(--ez-surface-3);border-color:var(--ez-border-strong);}
+.ezg-btn.success{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);}
+.ezg-btn.success:hover{background:var(--ez-ok-bg);}
+.ezg-btn.danger{background:var(--ez-bad-bg);border-color:var(--ez-bad-border);color:var(--ez-bad-fg);}
+.ezg-btn.danger:hover{background:var(--ez-bad-bg);}
+.ezg-btn.warn{background:var(--ez-warn-bg);border-color:var(--ez-warn-border);color:var(--ez-warn-fg);}
+.ezg-btn.warn:hover{background:var(--ez-warn-bg);}
+.ezg-filters{display:flex;gap:6px;align-items:center;flex-wrap:nowrap;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:10px;padding:5px 8px;}
+.ezg-filters select{appearance:none;background:var(--ez-surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%236b7a8e' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 7px center;border:1px solid var(--ez-border);border-radius:8px;padding:4px 24px 4px 9px;font-size:11px;font-family:inherit;color:var(--ez-fg);outline:none;cursor:pointer;height:26px;line-height:1;flex:0 0 auto;}
+.ezg-filters select:focus{border-color:var(--ez-border-strong);}
+.ezg-filters input{flex:1 1 120px;min-width:60px;max-width:58%;font-family:inherit;font-size:11px;border:1px solid var(--ez-border);border-radius:8px;background:var(--ez-bg);color:var(--ez-fg);outline:none;padding:4px 9px;height:26px;line-height:1;}
+.ezg-filters input:focus{border-color:var(--ez-border-strong);}
+.ezg-sub{width:28px;height:26px;border-radius:8px;border:1px solid var(--ez-border);background:var(--ez-bg);color:var(--ez-fg-3);font-size:13px;font-weight:600;line-height:1;cursor:pointer;transition:all .12s;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;}
+.ezg-sub:hover{background:var(--ez-surface-3);border-color:var(--ez-border-strong);}
+.ezg-sub.on{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);box-shadow:0 1px 4px rgba(6,95,70,.16);}
 .ezg-fvalues{display:flex;gap:6px;align-items:center;flex:1 1 auto;min-width:0;}
-.ezg-swatch{width:22px;height:22px;border-radius:50%;border:2px solid #dce3ec;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06);cursor:pointer;padding:0;}
+.ezg-swatch{width:22px;height:22px;border-radius:50%;border:2px solid var(--ez-border);flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(0,0,0,.06);cursor:pointer;padding:0;}
 .ezg-fvalues .ezg-btn{height:26px;padding:2px 9px;font-size:11px;flex:0 0 auto;}
 .ezg-palette{font-family:Inter,sans-serif;}
-.ezg-psep{width:100%;font-size:10px;color:#8a9aa8;border-top:1px solid #eef2f8;padding-top:4px;margin-top:2px;}
+.ezg-psep{width:100%;font-size:10px;color:var(--ez-fg-muted);border-top:1px solid var(--ez-border-2);padding-top:4px;margin-top:2px;}
 .ezg-pdot{width:20px;height:20px;border-radius:50%;border:1px solid rgba(0,0,0,.12);cursor:pointer;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(255,255,255,.35);}
-.ezg-pdot.sel{outline:2px solid #1a1f2b;outline-offset:1px;}
-.ezg-filters input[type=color]{width:30px;height:26px;padding:0;border:1px solid #dce3ec;border-radius:8px;background:#fff;cursor:pointer;flex:0 0 auto;}
+.ezg-pdot.sel{outline:2px solid var(--ez-strong);outline-offset:1px;}
+.ezg-filters input[type=color]{width:30px;height:26px;padding:0;border:1px solid var(--ez-border);border-radius:8px;background:var(--ez-bg);cursor:pointer;flex:0 0 auto;}
 .ezg-filters input[type=color]::-webkit-color-swatch-wrapper{padding:1px;}
 .ezg-filters input[type=color]::-webkit-color-swatch{border:none;border-radius:6px;}
 .ezg-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
-.ezg-row{display:flex;align-items:center;gap:8px;padding:6px 8px;background:#fbfcfe;border:1px solid #eef2f8;border-radius:10px;flex-wrap:wrap;}
-.ezg-row .gname{font-size:12px;font-weight:480;color:#1a1f2b;flex:1 1 auto;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.ezg-mode{display:flex;background:#f1f4fa;border-radius:9px;padding:2px;border:1px solid #e2e8f0;flex:0 0 auto;}
-.ezg-mode button{background:transparent;border:none;padding:2px 12px;font-size:11px;font-weight:470;color:#4d5b6d;font-family:inherit;cursor:pointer;border-radius:7px;transition:all .1s;height:26px;line-height:1;}
-.ezg-mode button.active{background:#fff;color:#0f141f;box-shadow:0 1px 4px rgba(0,0,0,.06);font-weight:510;}
-.ezg-mode button.mode-on.active{background:#ecfdf3;color:#065f46;border:1px solid #a7f0c6;}
-.ezg-mode button.mode-off.active{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;}
-.ezg-mode button.mode-bypass.active{background:#fffbeb;color:#92400e;border:1px solid #fcd34d;}
-.ezg-empty{color:#8a9aa8;font-size:12px;text-align:center;padding:14px;}
+.ezg-row{display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:10px;flex-wrap:wrap;}
+.ezg-row .gname{font-size:12px;font-weight:480;color:var(--ez-fg);flex:1 1 auto;min-width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ezg-mode{display:flex;background:var(--ez-surface-3);border-radius:9px;padding:2px;border:1px solid var(--ez-border);flex:0 0 auto;}
+.ezg-mode button{background:transparent;border:none;padding:2px 12px;font-size:11px;font-weight:470;color:var(--ez-fg-2);font-family:inherit;cursor:pointer;border-radius:7px;transition:all .1s;height:26px;line-height:1;}
+.ezg-mode button.active{background:var(--ez-bg);color:var(--ez-fg);box-shadow:0 1px 4px rgba(0,0,0,.06);font-weight:510;}
+.ezg-mode button.mode-on.active{background:var(--ez-ok-bg);color:var(--ez-ok-fg);border:1px solid var(--ez-ok-border);}
+.ezg-mode button.mode-off.active{background:var(--ez-bad-bg);color:var(--ez-bad-fg);border:1px solid var(--ez-bad-border);}
+.ezg-mode button.mode-bypass.active{background:var(--ez-warn-bg);color:var(--ez-warn-fg);border:1px solid var(--ez-warn-border);}
+.ezg-empty{color:var(--ez-fg-muted);font-size:12px;text-align:center;padding:14px;}
 /* 预设行 / 匹配行各配一条收起-展开三角（单独一条，放在该行下面）：无底边小三角，
    平时隐藏、鼠标悬停才显形；展开态朝上、收起态朝下。 */
 .ezg-tri-row{display:flex;align-items:center;justify-content:center;height:12px;flex:0 0 auto;cursor:pointer;opacity:0;transition:opacity .15s;background:transparent;margin:-10px 0;}   /* 负 margin 吃掉 .ezg-root 的 10px gap：三角正好夹在两行中间、不占额外位置 */
 .ezg-tri-row.no-above{margin-top:0;}   /* 上面那行收起了：不要再往上顶，否则会和上一行叠在一起（会闪烁、点不中） */
-.ezg-tri-row:hover{opacity:1;background:rgba(43,58,74,.06);}
-.ezg-tri-row i{display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:6px solid #8a9aa8;transition:transform .15s;}
+.ezg-tri-row:hover{opacity:1;background:var(--ez-surface-3);}
+.ezg-tri-row i{display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:6px solid var(--ez-border-strong);transition:transform .15s;}
 .ezg-hd.collapsed,.ezg-filters.collapsed{display:none;}
 `;
 
 let _styleInjected = false;
-function injectStyle() { if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
+function injectStyle() {
+  ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 
 // ===== 节点状态 =====
@@ -339,9 +341,9 @@ function openColorPalette(node, anchor, current, onPick) {
   if (_palette && _palette.parentNode) _palette.remove();
   _palette = el('div', 'ezg-palette');
   const rect = anchor.getBoundingClientRect();
-  _palette.style.cssText = 'position:fixed;z-index:9999;background:#fff;border:1px solid #dce3ec;border-radius:10px;padding:8px;box-shadow:0 8px 28px rgba(0,0,0,.18);display:flex;flex-wrap:wrap;gap:6px;max-width:260px;left:' + rect.left + 'px;top:' + (rect.bottom + 6) + 'px;';
+  _palette.style.cssText = 'position:fixed;z-index:9999;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:10px;padding:8px;box-shadow:0 8px 28px rgba(0,0,0,.18);display:flex;flex-wrap:wrap;gap:6px;max-width:260px;left:' + rect.left + 'px;top:' + (rect.bottom + 6) + 'px;';
   const addDot = (hex, title) => {
-    const d = el('span', 'ezg-pdot'); d.title = title || hex || ''; d.style.background = hex || '#ccc';
+    const d = el('span', 'ezg-pdot'); d.title = title || hex || ''; d.style.background = hex || 'var(--ez-surface-4)';
     if (hex && toHexColor(current) === toHexColor(hex)) d.classList.add('sel');
     d.addEventListener('click', (e) => { e.stopPropagation(); onPick(hex || ''); closePalette(); });
     _palette.appendChild(d);
@@ -380,8 +382,8 @@ function buildFilters(node, onChange) {
     rest.innerHTML = '';
     if (st.filters.mode === 'color') {
       const swatch = el('button', 'ezg-swatch'); swatch.title = ezT('Color presets (click to open)');
-      swatch.style.background = st.filters.match || '#a4d399';
-      swatch.addEventListener('click', (e) => { e.stopPropagation(); openColorPalette(node, swatch, st.filters.match, (hex) => { st.filters.match = hex; swatch.style.background = st.filters.match || '#a4d399'; wheel.value = toHexColor(st.filters.match) || '#a4d399'; syncToConfig(node); onChange(); }); });
+      swatch.style.background = st.filters.match || 'var(--ez-ok)';
+      swatch.addEventListener('click', (e) => { e.stopPropagation(); openColorPalette(node, swatch, st.filters.match, (hex) => { st.filters.match = hex; swatch.style.background = st.filters.match || 'var(--ez-ok)'; wheel.value = toHexColor(st.filters.match) || '#a4d399'; syncToConfig(node); onChange(); }); });
       const wheel = el('input'); wheel.type = 'color'; wheel.value = toHexColor(st.filters.match) || '#a4d399'; wheel.title = ezT('Pick color');
       const applyColor = (hex) => { st.filters.match = hex; syncToConfig(node); swatch.style.background = hex; onChange(); };
       wheel.addEventListener('input', () => applyColor(wheel.value));

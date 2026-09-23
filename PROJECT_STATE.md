@@ -1,18 +1,18 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。唯一交接入口：改动前先看 §5「避坑」，下一步看 §7「待办」。
-> **当前 V1.2.5**：标签系统随机 tag（标签面板「随机」弹窗 + 卡片「自动随机tag / 随机tag」）+ 默认标签库随包 + 删标签/批量清预览 + ModelsCombo 触发词串（LoRA 元数据；PromptHelper「实时接收卡」可编辑）+ 浏览「已加载」筛选页 + 黑色 socket 标签修复（子图不显示 / 快速移动残留）+ 总体编辑单卡折叠。发布相关看 §9，标签系统（规范 + 状态）看 §10。
+> **当前 V1.2.6**：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
 > **⚠️ 强制要求：经典模式与 Nodes 2.0（Vue）必须分开写作用域**（`.ezfx-is-vue` / `:not(.ezfx-is-vue)`）。禁止写对两种模式同时生效的行为规则；改一种前先确认另一种不受影响，两种分别回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.2.5"`（`__init__.py` / `pyproject.toml` / README） |
+| 版本 | `__version__ = "1.2.6"`（`__init__.py` / `pyproject.toml` / README） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 生效方式 | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS → **Ctrl+F5 强刷** |
-| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-14-cards145`），控制台看 `[PromptHelper] module loaded · build …` |
+| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-23-theme126`），控制台看 `[PromptHelper] module loaded · build …` |
 | 依赖 | 必装 `mutagen>=1.46.0`；可选 `llama-cpp-python` / `gguf` / `onnx` / 外部 `ffprobe`（`shutil.which` 探测）；其余 torch/numpy/Pillow/safetensors/av 由 ComfyUI 自带 |
 
 ## 1. 节点清单（11 个，category 全 `EzFlex`）
@@ -22,7 +22,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - `__init__.py` 的 `NODE_CLASS_MAPPINGS` 与 `web/ezflex_service.js` 的 `NODE_TYPES` 必须一致（增删/改名两处一起改）。
 - 链路：`MainControl → Master → Group → node.mode(0/2/4)`；`ParamPresetControl →(连线)→ ParamPresetOutput`；`MediaLoader →(连线)→ MediaOut`；`PromptHelper` 旁挂。
 - 控制类（MainControl / Master / Group）**纯前端生效**：Python 只承载 config，`run()` 返回 `()`，mode 由浏览器改并随工作流序列化。
-- 文件：`__init__.py`（11 节点类 + 全部后端路由）；`web/*.js` 每节点一个面板 + `ezflex_service.js`（共享）+ `ezflex_media_index.js`（编号引擎）+ `ezflex_i18n.js`（面板词典）；`web/libs|utils|curves` 为本地离线 three.js 与加载器；`locales/zh/nodeDefs.json` 为官方 i18n；`user_data/` 为运行期预设库（不跟踪）；`_dev_tests/` 为回归套件。
+- 文件：`__init__.py`（11 节点类 + 全部后端路由）；`web/*.js` 每节点一个面板 + `ezflex_service.js`（共享）+ `ezflex_media_index.js`（编号引擎）+ `ezflex_i18n.js`（面板词典）+ `ezflex_theme.js`（主题变量）；`web/libs|utils|curves` 为本地离线 three.js 与加载器；`locales/zh/nodeDefs.json` 为官方 i18n；`user_data/` 为运行期预设库（不跟踪）；`_dev_tests/` 为回归套件。
 
 ## 2. 各节点行为（只留关键点）
 
@@ -46,6 +46,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - NSG config：`{filters:{mode,match,showAllGraphs,sort,presetCollapsed,matchCollapsed}, states, presets, current}`；分组发现定时器**必须按节点放**（`node._ezScanTimer`）；分组状态键 `groupKey = title + '##' + idx`；分组预设**存节点 config**（删节点即丢）。
 - NSM：行 = 画布上的 NSG 实例，总预设 = `{nodeId: 分组预设名}`，存 `/nodeswitch_master/presets`。
 - MainControl：被控 4 类（Combo/FreeLatent/NSM/ParamPreset）；总预设存 `/main_control/presets`；「加载全部」9 类，排布按视觉外框（`visualBox() + NODE_TITLE_HEIGHT`，排完 350ms 再对齐）。
+- 主题：`web/ezflex_theme.js` 定义 16 套配色（浅色=原配色；藕荷/青苔取 Radix Colors 1..12 色阶；其余由「背景/卡片/控件底/描边/主文字/次文字/主色/浅主色」推全五级表面，配置在 ezflex_theme.js 的 USER 表里），每套给全五级表面 + 三级描边 + 四级文字（对比度兜底）+ `color-scheme`；变量挂根元素，面板 CSS 只写变量，切 `data-ez-theme` 即全画布即时生效（存 localStorage）。另有 `:where()` 原生控件兜底层，补没写颜色的 input/select 文字色。
 - 三处下拉都禁止自定义预设占用内置名（`isReservedPresetName`）；内置预设用英文规范名，判定走 `basePresetMode`。
 
 ### ParamPresetControl / ParamPresetOutput（动态输出）
@@ -64,7 +65,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - 每卡端口文本 = 外部 `card_in_i`（非空）→ 该卡优化槽（`useOptimized`）→ 默认正文；再按节点规范 `_ph_compile_card` 只替换引用写法。**「合」关掉的卡只影响合并，端口照常输出**。
 - 三个自动优化开关（`autoTextgen/autoApi/autoLlama`）**互斥**，前端开一个自动关另两个、后端发现同开多个直接报错；三个全关 = 一定不优化。`clearCache` 独立，只清 PromptHelper 自己的 CLIP/llama 缓存。
 - 优化分两层：**整体（先合并再优化一次）**；分卡只在卡片弹窗手动点。优化失败**抛 ValueError**（看 `logs/comfyui.log` 的 `[PromptHelper]`）。
-- 设置存节点 config：`optimize`（含 `apiParams`）/ `rules`（mergeSep + 规范表）/ `ui`（dock 等）；卡片存档 `userdata/prompts/<名称>.json`（名校验 + 签名防误删）。
+- 设置存节点 config：`optimize`（含 `apiParams`）/ `rules`（mergeSep + 规范表）/ `ui`（dock 等）；卡片存档 `user/EzFlex/prompts/<名称>.json`（名校验 + 签名防误删）。
 - 引用媒体：编号来自编号引擎，芯片 `span.eph-mref`（图标/文字分节点），`insertMediaRefOnce` 每次插一份。
 - 平铺模式：三层浮层加 `.ph-dock`，位置记画布坐标随画布缩放；开关/尺寸/位置存 config（`ui.dock/dockOpen/dockMem`）。**改默认尺寸要 `PH_DOCK_SIZE_V` +1**。
 - **XSS（V1.2.3）**：卡片/总体编辑 HTML 经 `ezSanitizeHtml()` 清洗后再 `innerHTML`（保留排版标签与芯片 svg，去掉 script/on*/危险 URL）。
@@ -91,7 +92,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - 动态输出同步（前端 POST，带 `_EZ_OUTPUT_CAP` 上限 + 名字截断）：`/models_combo/outputs`、`/param_preset_control/outputs`、`/param_preset_output/outputs`、`/preview_any/outputs`、`/media_loader/outputs`、`/media_out/outputs`。`/prompt_helper/outputs` 已删。
 - PromptHelper：`/optimize`、`/custom_providers`(GET/POST/DELETE)、`/api_hosts`、`/pick_folder`、`/pick_skill`、`/scan_roots|scan_paths|model_paths`、`/llama_models|clip_models`、`/prompt_cards`。
 - MediaLoader：`/files`、`/browse`、`/serve`、`/upload`、`/open`、`/save_as`、`/pick_folder`、`/roots`。PreviewAny：`/serve_video|serve_3d`、`/3d/{path}`、`/fs/{path}`、`/folders`、`/open`、`/pick_folder`。ModelsCombo：`/preview`、`/lora_meta`、`/lora_meta_detail`。
-- 全局持久化（`folder_paths.user_directory`）：`ezflex_scan_paths.json`、`ezflex_model_paths.json`、`ezflex_custom_providers.json`、`ezflex_api_hosts.json`、`ezflex_save_roots.json`（V1.2.3）；卡片存档 `userdata/prompts/<名称>.json`。
+- 全局持久化：全部收在 `user_directory/EzFlex/` 下（`ezflex_scan_paths.json`、`ezflex_model_paths.json`、`ezflex_custom_providers.json`、`ezflex_api_hosts.json`、`ezflex_save_roots.json`、`ezflex_media_roots.json`、`ezflex_media_target.json`、`ezflex_prompt_rules.json`、`ezflex_prompt_categories.json`、`ezflex_prompt_tags.json`）；卡片存档 `EzFlex/prompts/<名称>.json`。旧的散落在 `user/` 根下的同名文件由 `_ezflex_user_file()` 首次访问时自动迁移（`_dev_tests/user_dir_test.py` 守着）。
 - web 静态由 `_serve_no_store` 覆盖，刷新即生效。
 
 ## 4. 媒体取值契约（勿回退）
@@ -117,6 +118,9 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 15. 3D 用**本地离线** three.js（`web/libs|utils|curves`），serve 走 `/preview_any/3d/{path}`。
 16. **socket 黑框标签**（5 个节点各一份 `installSocketLabels`，改要一起改）：显隐判断必须用**当前渲染的图** `app.canvas.graph`（`|| app.graph` 兜底）——用 `app.graph` 会把子图里的标签全隐藏；`_ezRoot` 未连接或 rect 无效时要 **hide 标签再 return**，不能直接 return（否则快速平移、控件被临时摘掉时标签会冻在屏幕上，看着像粘在左侧工具栏）。
 
+17. **行尾注释别吞语句**：`… // 说明 p._tpPage = pgBar;` 会把赋值整句吃掉（标签翻页栏空了一整版）；赋值/调用一律单独一行。
+18. **批量正则改 CSS 要自检**：脚本拼 `"background" + 捕获组` 出错会写出 15 处 `backgroundundefined:`（非法声明 → 元素丢背景，深色下看不见）；改完扫一遍 `undefined:` 并做深色主题回归。
+
 ## 6. 性能设计（EZ_PERF）
 
 - 交互期 `pumpFrames(ms=300)`：醒后 300ms 内每帧更新，停手自动停 → 静止零开销；触发源 = `setDirty` 补丁 + 画布 pointer 事件 + resize/scroll/`ezflex:changed`。**只靠 `onDrawForeground` 会慢一拍**，必须配 pumpFrames。
@@ -128,14 +132,14 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - [ ] 临时预览文件（`ezpv_*`，含 `ezpv_vid_*`）自动清理（真实占磁盘）。
 - [ ] FreeLatent：DOM 类型下拉切 lora 不自动补 `targetId`（LoRA 静默跳过）——待修。
 - [ ] PromptHelper：全/半角转换用 `textContent` 整段替换，会丢格式与 @芯片——待修。
-- [ ] 死代码清理（剩 ModelsCombo canvas 死路径、未用后端方法；PromptHelper 前端未用 helper 与已保存卡片选择器已删）。
+- [x] 死代码清理：ModelsCombo 不可达 canvas 簇（343 行）、`setDims`、`import zlib`、每节点调试日志、3 条冗余 CSS 已删（V1.2.6）；剩未用后端方法待清。
 - [ ] Vue 黑框标签叠加层按 Vue 端口坐标再校准。
 - [ ] MediaOut 可选增强（`count`/`image_path` 输出、JPEG/WebP 元数据、登记历史画廊）。
 - [ ] PromptHelper 规范缺「画面构成 / shot at 时间」字段；`rules` 全局复用（`userdata/ezflex_rules.json`）。
 - [ ] 综合媒体端口目前只计数/引用，不参与合并文本。
 - [ ] 图生图/视频生视频、图像缩放等后续节点。
 - [ ] 提示词规范缺官方条目（素材数量/时长上限、字幕/水印约束、Kling 长度上限、负面提示词处理等）。
-- [ ] 仓库待 `git push`（V1.2.5）。
+- [ ] 仓库待 `git push`（V1.2.6）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是 `None` 语义（README 已说明）。
 
@@ -185,6 +189,15 @@ foreach($s in @('import_test.mjs','media_out_prune_test.mjs','media_index_test.m
 - 路径包含性：`_ez_real/_ez_roots/_ez_inside`（realpath + commonpath，覆盖 `..`/绝对/兄弟前缀/符号链接）；`/preview_any/serve_video|serve_3d|fs|3d|folders`、`/media_loader/serve|browse|save_as` 限根。
 - 本机限定 `_ez_local`：回环 remote + 回环 Host + Origin/Referer 同源 + 拒 `Origin: null` 与 `Sec-Fetch-Site: cross-site`；覆盖 `open/pick_folder/pick_skill`、各配置写入、根登记；**V1.2.4 再补 25 条**（模型预览 / lora 元数据 / `preview_any` 文件与目录 / `media_loader serve|browse|files|upload` / 各 `*/outputs` / FreeLatent 默认预设 / 用户数据 GET）。有意不限本机的只剩 `/prompt_helper/media_target`（无敏感路径）与公开标签表。
 - 出站：`_ph_check_outbound` 主机允许列表（内置厂商 + 本机登记）+ **仅 http/https** + 每跳重定向校验 + 代理也校验；`?root=` 仅本机；模型解析 `strict`（远端只认登记根）。
+
+**V1.2.6 变更**
+- 主题系统（新）：`web/ezflex_theme.js` 定 16 套配色（浅色=原配色 / 藕荷 / 青苔 / 北境 / 极简冷灰 / 暖白焦糖 / 冷灰雾蓝 / 深空黑 / 莫兰迪紫灰 / 人鱼核 / 巧克力棕 / 克莱因蓝 / 云舞白 / 香蕉黄 / 勃艮第红 / 深青绿），每套给五级表面 + 三级描边 + 四级文字 + 状态色（`readable()` 对比度兜底）；切 `data-ez-theme` 全画布即时生效（localStorage `ezflex.theme`，默认浅色，入口在 MainControl 头部 en 右侧）。全部面板 CSS 只用 `var(--ez-*)`；原生控件用 `:where()` 兜底层补 `color` + `color-scheme`（系统下拉/滚动条也随主题明暗）；2D canvas 用 `ezThemeColor()/ezThemeAlpha()` 取实际色值。
+- FreeLatent：画布颜色跟主题走（`onThemeChange` 触发重画）；网格按需抽稀（每格不足 6px 就把步长翻倍，不再整块不画）；画布边界改完整方框、选区矩形坐标取整（四边等宽）；预设下拉固定向下展开、跟随按钮重摆，点画布/滚轮/删节点/清空工作流都会收，第二下能收起。
+- 标签预览：生成后只保存一次（原来 `tpSetMine` 内部先存一次不含预览、紧接着又存一次，两次互不等待，先发的后到会把预览覆盖回旧内容）。
+- 标签面板翻页栏：`p._tpPage = pgBar` 曾被行尾注释吃掉 → 页码 / 「每页」输入整栏空白，已复原。
+- 存储收口：`user_directory/EzFlex/` 统一放 10 个 `ezflex_*.json` + `prompts/`（卡片）；旧位置散落的同名文件由 `_ezflex_user_file()` 首次访问自动迁移（不覆盖新文件），`_dev_tests/user_dir_test.py` 守着这条规则。
+- 清理与修复：ModelsCombo 不可达 canvas 面板/画布菜单/拖线簇（343 行）、`setDims`、`import zlib`、每节点调试日志、3 条冗余 CSS 已删；修 15 处 `backgroundundefined:` 坏声明（声明非法 → 元素丢背景，深色下看不见）。
+- 界面微调：卡片弹窗工具栏 `skill` 移到「合」前；总编辑工具栏尾部顺序改「收起小标题 | 卡片 | 标签 | skill | ＋新增卡片」；FreeLatent 预设项悬停不再上浮、不改文字色；星星恢复亮金 `#f6c343`。
 
 **V1.2.5 变更**
 - 标签系统：工具栏「排序 | 随机 | ＋新增标签」加「随机」弹窗（每行 分类层叠选择 / 数量 / 开关 / 减号；右上 恢复默认随机组 / ＋新增随机分类；右下 保存随机设置 / 生成随机tag）；卡片菜单与卡片区空白、已插入芯片面板空白加「生成随机tag」；配置存 localStorage `ezflex.randGroups`（弹窗内是草稿，保存/生成才落盘）。默认六组 = 画师 `c1` / 角色 `c4` / 人物 `k:person` / 服饰 `k:clothing` / 表情动作 `k:expression` / 场景 `k:scene`。生成一律**先清空再生成**（标签面板清已插入标签；卡片单点清本卡正文），并写回当前卡片。默认标签库 CSV 随包（`user_data/PromptHelperLib`）。删标签 / 批量「移除预览图」清预览（`tpDropPreview`）。
@@ -291,13 +304,15 @@ _tagDoc.libs[libId] = { name, groups, place{名→分类id}, fav[名], meta{名:
 7. 别用"括号配对"切函数体改代码（字符串里的 `{}` 会截断）；每次只改一个点 + 立刻 `node --check` + 跑相关测试。
 8. 节点被删 / 新建或切换工作流时，挂在它上面的浮层要一起收（`closeEzPanelsForNode` + `LGraph.clear` 兜底），否则会带到下一个工作流里。
 
+9. 标签面板翻页栏靠 `p._tpPage = pgBar` 挂到面板上；这句曾被行尾注释吃掉 → `tpPageBar()` 拿不到 bar 直接 return，页码与「每页」输入整栏空白。
+
 ### 10.9 数据与存储
 | 内容 | 位置 | 事实 |
 |---|---|---|
 | 标签库（只读） | `user_data/PromptHelperLib/*.csv` | `tag,category,count,"aliases"`；Danbooru 140779 行 |
 | 细分大类 | `.../_tag_kind.csv` | `tag,kind`，40720 行；8 个顶层 person 10025 / object 9479 / clothing 8347 / sex 3617 / scene 3336 / style 2897 / expression 2514 / camera 505；**全部是 `顶层/子类`**，所以默认树里父行 = 子行之和 |
 | 中英对照 | `.../_zh_CN.csv` | `tag,zh`；已并到 ~61823 条；中文列 + 中文搜索的唯一来源 |
-| 用户数据 | `<user_directory>/ezflex_prompt_tags.json` | `{categories, tags, libs}`；标签预览图 = `tags[].preview`（base64 data URL，单条 <400000 字符；两侧共用；删标签时随 `tpDropPreview` 清掉，其余不自动清）；CSV 永不改写 |
+| 用户数据 | `<user_directory>/EzFlex/ezflex_prompt_tags.json` | `{categories, tags, libs}`；标签预览图 = `tags[].preview`（base64 data URL，单条 <400000 字符；两侧共用；删标签时随 `tpDropPreview` 清掉，其余不自动清）；CSV 永不改写 |
 | 生图设置 | `user_data/PromptHelperGen/settings.json` | 工作流 api.json 文本 + 模型/参数/固定提示词。**不入库**（模型路径是本机的）；文件缺失时用代码默认：后端 `_PGEN_DEFAULT`、前端 `openGenSettings` 字面量 + `GEN_DEF_POS/GEN_DEF_NEG`（512²、steps 20、cfg 6、euler/simple、webp/80/384 + 那对 Anime 质量正负提示词；`builtinMode` 默认 `ckpt`）。模型字段留空由用户选，ckpt 模式会自动挑第一个 checkpoint |
 
 ### 10.10 待办（标签相关）
