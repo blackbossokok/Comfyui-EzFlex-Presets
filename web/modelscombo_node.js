@@ -36,10 +36,13 @@ const MC_CSS = `
 .mc-param select:focus{border-color:var(--ez-border-strong);box-shadow:0 0 0 3px rgba(43,58,74,.06);}
 .mc-range-wrap{display:flex;align-items:center;gap:3px;flex:1 1 0;min-width:54px;margin-right:8px;border:1px dashed transparent;}
 .mc-range-wrap:last-child{margin-right:0;}
-.mc-range{flex:1 1 auto;min-width:0;max-width:none;height:4px;-webkit-appearance:none;appearance:none;background:var(--ez-surface-4);border-radius:2px;outline:none;padding:0;margin:0;}
-.mc-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:12px;height:12px;border-radius:50%;background:var(--ez-strong);cursor:pointer;border:1px solid var(--ez-strong);}
+/* 轨道：加描边 + 实色填充（--mc-range-pct 由 JS 写）。只靠 surface-4 的细轨道在浅色主题下和面板底几乎同色 → 整条看不见 */
+.mc-range{flex:1 1 auto;min-width:0;max-width:none;height:5px;-webkit-appearance:none;appearance:none;background:linear-gradient(to right,var(--ez-accent-border) 0 var(--mc-range-pct,0%),var(--ez-surface-4) var(--mc-range-pct,0%) 100%);border:1px solid var(--ez-border-strong);border-radius:3px;outline:none;padding:0;margin:0;box-sizing:border-box;}
+.mc-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:10px;height:10px;border-radius:50%;background:var(--ez-accent);cursor:pointer;border:0;}
 .mc-range::-webkit-slider-thumb:hover{transform:scale(1.1);}
-.mc-range::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:var(--ez-strong);cursor:pointer;border:1px solid var(--ez-strong);}
+.mc-range::-moz-range-track{height:5px;background:var(--ez-surface-4);border:1px solid var(--ez-border-strong);border-radius:3px;box-sizing:border-box;}
+.mc-range::-moz-range-progress{height:5px;background:var(--ez-accent-border);border-radius:3px;}
+.mc-range::-moz-range-thumb{width:10px;height:10px;border-radius:50%;background:var(--ez-accent);cursor:pointer;border:0;}
 .mc-range-num{flex:0 0 22px;width:22px;padding:2px 0;font-size:9px;border:1px solid var(--ez-border);border-radius:4px;background:var(--ez-bg);outline:none;font-family:inherit;-moz-appearance:textfield;text-align:center;box-sizing:border-box;}
 .mc-range-num::-webkit-outer-spin-button,.mc-range-num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
 .mc-target{flex:0.4 1 0;min-width:40px;padding:3px 3px;font-size:9px;border:1px solid var(--ez-border);border-radius:5px;background:var(--ez-surface-3);outline:none;cursor:pointer;font-family:inherit;}
@@ -222,7 +225,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     'stable_diffusion', 'stable_cascade', 'sd3', 'stable_audio', 'mochi', 'ltxv', 'pixart',
     'cosmos', 'lumina2', 'wan', 'hidream', 'chroma', 'ace', 'omnigen2', 'qwen_image',
     'hunyuan_image', 'flux2', 'ovis', 'longcat_image', 'cogvideox', 'lens', 'pixeldit',
-    'ideogram4', 'boogu', 'krea2', 'joyimage', 'mage', 'minimax'
+    'ideogram4', 'boogu', 'krea2', 'joyimage', 'mage', 'minimax', 'yue2'
   ];
   const DEVICE_OPTS = ['default', 'cuda', 'cpu', 'cuda:0', 'cuda:1'];
 
@@ -719,8 +722,13 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         num.type = 'number';
         num.min = String(f.min); num.max = String(f.max); num.step = String(f.step);
         num.value = Number(loader.extra[f.key] != null ? loader.extra[f.key] : f.def).toFixed(1);
-        range.addEventListener('input', () => { num.value = Number(range.value).toFixed(1); setExtra(node, loader, f.key, parseFloat(range.value)); });
-        num.addEventListener('input', () => { if (!isNaN(parseFloat(num.value))) { const v = parseFloat(num.value); range.value = v; setExtra(node, loader, f.key, v); } });
+        const syncFill = () => {   // 轨道实色填充比例（浅色主题下没它整条几乎看不见）
+          const pct = f.max > f.min ? Math.max(0, Math.min(100, (Number(range.value) - f.min) / (f.max - f.min) * 100)) : 0;
+          range.style.setProperty('--mc-range-pct', pct + '%');
+        };
+        syncFill();
+        range.addEventListener('input', () => { syncFill(); num.value = Number(range.value).toFixed(1); setExtra(node, loader, f.key, parseFloat(range.value)); });
+        num.addEventListener('input', () => { if (!isNaN(parseFloat(num.value))) { const v = parseFloat(num.value); range.value = v; syncFill(); setExtra(node, loader, f.key, v); } });
         wrap.appendChild(range); wrap.appendChild(num);
         ctl = wrap;
       } else {
