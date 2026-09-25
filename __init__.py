@@ -59,10 +59,11 @@ def _sha256(p):
     except Exception:
         return ""
 import comfy.sd
+import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.6"
+__version__ = "1.2.7"
 
 WEB_DIRECTORY = "./web"
 
@@ -120,7 +121,7 @@ CLIP_TYPES = [
     "stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv",
     "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2",
     "qwen_image", "hunyuan_image", "flux2", "ovis", "longcat_image", "cogvideox",
-    "lens", "pixeldit", "ideogram4", "boogu", "krea2", "joyimage", "mage", "minimax",
+    "lens", "pixeldit", "ideogram4", "boogu", "krea2", "joyimage", "mage", "minimax", "yue2",
 ]
 
 # 页面 device 下拉提供的选项
@@ -902,6 +903,11 @@ def load_vae(loader):
     dtype = dtype_options(extra, allowed=dict((k, v) for k, v in WEIGHT_DTYPES.items() if k in VAE_DTYPES)).get("dtype")
     vae = comfy.sd.VAE(sd=sd, metadata=metadata, device=vae_device, dtype=dtype)
     vae.throw_exception_if_invalid()
+    # 与内置 VAELoader 一致：登记重载工厂，multigpu 深拷贝 / Select VAE Device 才能按设备重载
+    # （老版本没有 load_vae_patcher 就跳过，不影响单卡加载）
+    factory = getattr(comfy.sd, "load_vae_patcher", None)
+    if factory is not None:
+        vae.patcher.cached_patcher_init = (factory, (path, metadata, vae_device))
     return vae
 
 
@@ -986,11 +992,15 @@ class ModelsComboLoader:
             if model is None and clip is None:
                 print(f"[ModelsCombo] LoRA '{lora['name']}': target has no MODEL/CLIP, skipped")
                 continue
-            lora_path = folder_paths.get_full_path_or_raise("loras", lora["file"])
-            lora_sd = comfy.utils.load_torch_file(lora_path)
             strength_model = float(lora["extra"].get("strength_model", 1.0))
             strength_clip = float(lora["extra"].get("strength_clip", 1.0))
-            new_model, new_clip = comfy.sd.load_lora_for_models(model, clip, lora_sd, strength_model, strength_clip)
+            if strength_model == 0 and strength_clip == 0:   # 与内置 LoraLoader 一致：0 强度不加载文件、原样透传
+                applied.append(lora)
+                continue
+            lora_path = folder_paths.get_full_path_or_raise("loras", lora["file"])
+            # 与内置 LoraLoader 一致：safe_load + 带上 metadata（新模型的 lora_metadata 附件靠它）
+            lora_sd, lora_meta = comfy.utils.load_torch_file(lora_path, safe_load=True, return_metadata=True)
+            new_model, new_clip = comfy.sd.load_lora_for_models(model, clip, lora_sd, strength_model, strength_clip, lora_metadata=lora_meta)
             # 无论返回什么，都把「当前模型/CLIP」保留给下一个 lora 继续串联
             if new_model is not None:
                 target["model"] = new_model
@@ -1143,8 +1153,11 @@ class FreeLatentNode(io.ComfyNode):
                 f"latent dimensions must be divisible by 8 (latent = pixels / 8). Set align to a multiple of 8, or change the width/height."
             )
         batch = max(1, int(batch))
-        latent = torch.zeros([batch, 4, h // 8, w // 8], dtype=torch.float32)
-        return io.NodeOutput({"samples": latent}, w, h, batch)
+        # 与内置 EmptyLatentImage 同款：中间设备/精度 + downscale_ratio_spacial（新模型靠它知道空间下采样倍数）
+        latent = torch.zeros([batch, 4, h // 8, w // 8],
+                             device=comfy.model_management.intermediate_device(),
+                             dtype=comfy.model_management.intermediate_dtype())
+        return io.NodeOutput({"samples": latent, "downscale_ratio_spacial": 8}, w, h, batch)
 
 
 def _control_input_types(tooltip):
@@ -4698,7 +4711,7 @@ def _ph_apply_api_params(provider, model, body, ap, is_anthropic):
         else:
             body["reasoning_effort"] = level
     # OpenAI o 系列 / GPT-5 推理模型不接受自定义 temperature / top_p
-    if provider == "OpenAI" and re.match(r"^(o\d|gpt-5)", str(model or "").lower()):
+    if provider == "OpenAI" and re.match(r"^(o\d|gpt-5|gpt-6)", str(model or "").lower()):
         body.pop("temperature", None); body.pop("top_p", None)
     # 联网搜索
     if ap.get("webSearch"):
@@ -4774,6 +4787,11 @@ def _ph_optimize_impl(data, strict=False):
         "xAI Grok": "https://api.x.ai/v1",
         "Mistral": "https://api.mistral.ai/v1",
         "Groq": "https://api.groq.com/openai/v1",
+        "Zhipu GLM": "https://open.bigmodel.cn/api/paas/v4",
+        "Volcengine Doubao": "https://ark.cn-beijing.volces.com/api/v3",
+        "MiniMax": "https://api.minimax.chat/v1",
+        "Perplexity": "https://api.perplexity.ai",
+        "Cohere": "https://api.cohere.ai/compatibility/v1",
         "Ollama": "http://localhost:11434/v1",
     }
     is_anthropic = "Claude" in provider
@@ -5008,6 +5026,7 @@ _PH_BUILTIN_HOSTS = (
     "api.openai.com", "api.deepseek.com", "generativelanguage.googleapis.com", "api.anthropic.com",
     "api.siliconflow.cn", "openrouter.ai", "dashscope.aliyuncs.com", "api.moonshot.ai",
     "api.x.ai", "api.mistral.ai", "api.groq.com",
+    "open.bigmodel.cn", "ark.cn-beijing.volces.com", "api.minimax.chat", "api.perplexity.ai", "api.cohere.ai",
 )
 
 
@@ -5876,6 +5895,15 @@ async def _ph_pcards_save(req):
         preview_in = None
     if isinstance(cards, list) and cards:
         rec = {"name": name, "cards": cards, "kind": kind_in if kind_in in ("card", "group") else "card", "category": category}
+        # 只改卡片内容时这里会重建 rec：把原文件里已有的预览图带回来（前端保存卡片不传 preview，不然一存就没图）
+        if preview_in is None and os.path.isfile(fn):
+            try:
+                with open(fn, 'r', encoding='utf-8') as fh:
+                    prev = json.loads(fh.read())
+                if isinstance(prev, dict) and isinstance(prev.get("preview"), str):
+                    preview_in = prev["preview"]
+            except Exception:
+                pass
         if preview_in is not None:
             rec["preview"] = preview_in
     else:
@@ -6351,7 +6379,7 @@ except Exception:
 _MEDIA_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 _MEDIA_VID_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
 _MEDIA_AUD_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma"}
-_MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".3ds", ".dae", ".blend"}
+_MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".spz", ".splat", ".ksplat", ".3ds", ".dae", ".blend"}
 # PreviewAny 存档允许的扩展名：只写媒体/文本文档，未知后缀（.bat/.desktop/.sh 等）一律不落盘。
 _SAVE_ALLOWED_EXTS = _MEDIA_IMG_EXTS | _MEDIA_VID_EXTS | _MEDIA_AUD_EXTS | {".txt", ".md", ".json", ".csv", ".log", ".html"}
 
@@ -6408,11 +6436,24 @@ def _ml_resolve(path):
 
 
 def _ml_load_image(path):
-    """与内置 Load Image 同款：CHW 归一化到 float32 的 [1,H,W,3]（0..1，RGB）。"""
-    from PIL import Image, ImageOps
-    i = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-    arr = np.array(i).astype(np.float32) / 255.0
-    return torch.from_numpy(arr)[None,]
+    """与内置 Load Image 同款：逐帧归一化到 [N,H,W,3]（0..1，RGB）——静态图 N=1，动图（GIF/WebP/APNG）整段出批；
+    尺寸不一致的帧按内置做法跳过。设备/精度走 intermediate_device()/intermediate_dtype()
+    （默认 CPU/fp32，开了 --gpu-only / --fp16-intermediates 时才和内置一样变）。"""
+    from PIL import Image, ImageOps, ImageSequence
+    frames = []
+    w = h = None
+    with Image.open(path) as im:
+        for frame in ImageSequence.Iterator(im):
+            rgb = ImageOps.exif_transpose(frame).convert("RGB")
+            if w is None:
+                w, h = rgb.size
+            if rgb.size != (w, h):
+                continue
+            frames.append(torch.from_numpy(np.array(rgb).astype(np.float32) / 255.0)[None,])
+    if not frames:
+        raise ValueError(f"[EzFlex-MediaLoader] image has no decodable frames: {os.path.basename(path)}")
+    out = torch.cat(frames, dim=0)
+    return out.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
 
 
 def _ml_load_video(path):

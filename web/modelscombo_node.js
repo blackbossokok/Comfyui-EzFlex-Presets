@@ -1893,8 +1893,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         return;
       }
       scan();
-      const nodeH = (node.size && node.size[1]) || 1;
-      const sy = rect.height / nodeH;
+      const sy = sx0;   // 纵向也按画布缩放（=节点宽度比）：别用 rect.height/nodeH，节点拉高后 rect 高不跟着长会把黑框间距压扁
       node._mcOutLogged = true;
       all.forEach((item) => {
         let pos = null;

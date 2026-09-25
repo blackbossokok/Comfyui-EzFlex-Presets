@@ -160,7 +160,7 @@ function mediaKind(name) {
   if (/^(png|jpe?g|webp|gif|bmp|tif?f|heic|avif|psd)$/.test(ext)) return 'image';
   if (/^(mp4|avi|mkv|mov|webm|flv|wmv|m4v)$/.test(ext)) return 'video';
   if (/^(mp3|wav|flac|aac|ogg|m4a|wma|opus)$/.test(ext)) return 'audio';
-  if (/^(gltf|glb|obj|fbx|stl|ply|3ds|dae|blend)$/.test(ext)) return 'model_3d';
+  if (/^(gltf|glb|obj|fbx|stl|ply|spz|splat|ksplat|3ds|dae|blend)$/.test(ext)) return 'model_3d';
   return 'other';
 }
 function typeShort(c) { return ({ image: ezT('Image'), video: ezT('Video'), audio: ezT('Audio'), model_3d: ezT('Model'), other: ezT('File') })[c] || ezT('File'); }
@@ -1185,8 +1185,9 @@ function open3d(node, item, card) {
       if (ext === 'glb' || ext === 'gltf') { const gltf = await import(THREE_BASE + 'GLTFLoader.js'); loader = new gltf.GLTFLoader(); }
       else if (ext === 'fbx') { const fbx = await import(THREE_BASE + 'FBXLoader.js'); loader = new fbx.FBXLoader(); }
       else if (ext === 'obj') { const objs = await import(THREE_BASE + 'OBJLoader.js'); loader = new objs.OBJLoader(); }
-      // 只随包带了 GLTF / FBX / OBJ 三个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
-      else { throw new Error(ezT('Unsupported 3D format .') + (ext || '?') + ezT(' (only glb / gltf / obj / fbx are supported)')); }
+      else if (ext === 'splat') { const sp = await import(THREE_BASE + 'SplatLoader.js'); loader = new sp.SplatLoader(THREE); }   // 本地极简高斯泼溅加载器
+      // 只随包带了 GLTF / FBX / OBJ / Splat 四个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
+      else { throw new Error(ezT('Unsupported 3D format .') + (ext || '?') + ezT(' (only glb / gltf / obj / fbx / splat are supported)')); }
       loader.load(url, (obj) => {
         status.textContent = '';
         const wrap = new THREE.Group(); wrap.add(obj);
@@ -1319,7 +1320,7 @@ function installOutsideLabels(node) {
     const nodeW0 = (node.size && node.size[0]) || 1; const sx0 = rect.width / nodeW0;
     if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.35) { all.forEach((item) => { item.el.style.display = 'none'; }); return; }
     scan();
-    const nodeH = (node.size && node.size[1]) || 1; const sy = rect.height / nodeH;
+    const sy = sx0;   // 纵向也按画布缩放（=节点宽度比）：别用 rect.height/nodeH，节点拉高后 rect 高不跟着长会把黑框间距压扁
     all.forEach((item) => {
       let pos = null; try { pos = node.getOutputPos(item.i); } catch (_) { pos = null; }
       if (!pos || !pos.length) { item.el.style.display = 'none'; return; }

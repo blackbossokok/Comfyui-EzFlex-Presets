@@ -37,7 +37,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-09-23-theme126';
+const PH_BUILD = '2026-09-25-providers';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -470,7 +470,7 @@ const CSS = `
 
 /* 黑框  socket 标签（仿 ModelsCombo installOutsideLabels） */
 .eph-socket-label{position:fixed;z-index:40;pointer-events:none;background:rgba(12,16,24,.4);color:#eef1f6;font-size:9px;line-height:1;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,.18);white-space:nowrap;user-select:none;display:inline-flex;align-items:center;box-shadow:0 1px 4px rgba(0,0,0,.25);}
-.eph-socket-label .eph-socket-dot{width:7px;height:7px;border-radius:50%;flex:0 0 auto;margin-right:5px;border:1px solid rgba(255,255,255,.35);}
+
 
 /* 编辑器弹窗 */
 .eph-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);}
@@ -3433,32 +3433,42 @@ function ruleRefPreview(rule, kind) {
 let _settingsModal = null, _settingsNode = null;
 const _SET_PROVIDERS = [
   { value: 'OpenAI', label: 'OpenAI', host: 'https://api.openai.com/v1',
-    models: ['gpt-6-astra', 'gpt-6-astra-pro', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6-cyber', 'gpt-5.5-pro', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.3-codex-spark', 'gpt-4.1'] },
+    models: ['gpt-6-astra-pro', 'gpt-6-astra', 'gpt-6-sol-pro', 'gpt-6-sol', 'gpt-6-luna-pro', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-4.1'] },
   { value: 'DeepSeek', label: 'DeepSeek', host: 'https://api.deepseek.com/v1',
-    models: ['deepseek-v4.1-flash', 'deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro-0813', 'deepseek-v4-flash-0731'] },
+    models: ['deepseek-flash', 'deepseek-v4-pro', 'deepseek-v4.1-flash', 'deepseek-v4-flash', 'deepseek-v4-flash-vision-exp', 'deepseek-v4-pro-0813'] },
   { value: 'Google Gemini', label: 'Gemini', host: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    models: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite', 'gemini-3.1-flash-image', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-flash-image'] },
+    models: ['gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-3.6-flash', 'gemini-3-pro', 'gemini-3-pro-preview', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-image', 'gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-flash-image'] },
   { value: 'Anthropic Claude', label: 'Claude', host: 'https://api.anthropic.com/v1',
-    models: ['claude-fable-5.1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-mythos-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
+    models: ['claude-opus-5.5', 'claude-fable-5.1', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-mythos-5', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'] },
   { value: 'Alibaba Qwen', label: 'Qwen Portal', host: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen3.8-max-0902', 'qwen3.8-flash', 'qwen3.8-max-preview', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-flash', 'qwen3.6-plus', 'qwen3.5-flash', 'qwen3.5-plus', 'qwen3-max', 'qwen3-coder-next', 'qwen-flash', 'qvq-max'] },
+    models: ['qwen3.8-max', 'qwen3.8-max-prime', 'qwen3.8-max-0902', 'qwen3.8-flash', 'qwen3.8-omni-flash', 'qwen3.8-max-preview', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-flash', 'qwen3-max', 'qwen3-coder-next', 'qwen-flash', 'qvq-max'] },
   { value: 'Moonshot Kimi', label: 'Moonshot Kimi', host: 'https://api.moonshot.ai/v1',
-    models: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6', 'moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k', 'moonshot-v1-8k-vision-preview'] },
+    models: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6', 'moonshot-v1-128k', 'moonshot-v1-32k', 'moonshot-v1-8k', 'moonshot-v1-8k-vision-preview'] },
   { value: 'xAI Grok', label: 'xAI Grok', host: 'https://api.x.ai/v1',
-    models: ['grok-4.6', 'grok-4.5', 'grok-4.3', 'grok-4.20-reasoning', 'grok-4.20-non-reasoning', 'grok-latest'] },
+    models: ['grok-4.7', 'grok-4.6', 'grok-4.5', 'grok-4.3', 'grok-4.20-reasoning', 'grok-4.20-non-reasoning', 'grok-latest'] },
   { value: 'Mistral', label: 'Mistral', host: 'https://api.mistral.ai/v1',
-    models: ['mistral-large-3', 'mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'magistral-medium-latest', 'magistral-small-latest', 'codestral-latest', 'devstral-medium-latest'] },
+    models: ['mistral-medium-3.5', 'mistral-large-3', 'mistral-codestral', 'mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'magistral-medium-latest', 'codestral-latest', 'devstral-medium-latest'] },
   { value: 'Groq', label: 'Groq', host: 'https://api.groq.com/openai/v1',
-    models: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b', 'moonshotai/kimi-k2-instruct', 'llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'deepseek-r1-distill-llama-70b'] },
+    models: ['llama-4-maverick', 'llama-4-scout', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b', 'moonshotai/kimi-k2-instruct', 'llama-3.3-70b-versatile', 'deepseek-r1-distill-llama-70b'] },
+  { value: 'Zhipu GLM', label: 'Zhipu GLM', host: 'https://open.bigmodel.cn/api/paas/v4',
+    models: ['glm-5.3', 'glm-5.3-prime', 'glm-5.3-flash', 'glm-5.3-flashx'] },
+  { value: 'Volcengine Doubao', label: 'Volcengine Doubao', host: 'https://ark.cn-beijing.volces.com/api/v3',
+    models: ['doubao-seed-1-6-250615', 'doubao-1.5'] },
+  { value: 'MiniMax', label: 'MiniMax', host: 'https://api.minimax.chat/v1',
+    models: ['MiniMax-M2'] },
+  { value: 'Perplexity', label: 'Perplexity', host: 'https://api.perplexity.ai',
+    models: ['sonar-pro', 'sonar', 'sonar-reasoning'] },
+  { value: 'Cohere', label: 'Cohere', host: 'https://api.cohere.ai/compatibility/v1',
+    models: ['command-a-plus'] },
   { value: 'SiliconFlow', label: 'SiliconFlow', host: 'https://api.siliconflow.cn/v1',
-    models: ['deepseek-ai/DeepSeek-V2.5', 'deepseek-ai/DeepSeek-R1', 'deepseek-ai/DeepSeek-V3', 'Qwen/Qwen2-7B-Instruct', 'THUDM/glm-4-9b-chat', 'stabilityai/stable-diffusion-xl-base-1.0'] },
+    models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1', 'Qwen/Qwen3-235B-A22B', 'Qwen/Qwen3-32B', 'THUDM/glm-4-9b-chat', 'stabilityai/stable-diffusion-xl-base-1.0'] },
   { value: 'OpenRouter', label: 'OpenRouter', host: 'https://openrouter.ai/api/v1',
-    models: ['openai/gpt-6-astra', 'openai/gpt-6-astra-pro', 'anthropic/claude-fable-5.1', 'anthropic/claude-opus-5', 'anthropic/claude-sonnet-5', 'google/gemini-3.8-flash', 'google/gemini-3.7-flash', 'x-ai/grok-4.6', 'deepseek/deepseek-v4.1-flash', 'qwen/qwen3.8-max-0902', 'moonshotai/kimi-k3', 'openai/gpt-oss-120b'] },
-  { value: 'Ollama', label: 'Ollama (local)', host: 'http://localhost:11434/v1', customHost: true, keyOptional: true, models: ['llama2', 'llama3', 'llama3.1', 'llama3.2', 'llama4', 'gemma', 'gemma2', 'gemma3', 'gemma4', 'qwen', 'qwen2', 'qwen2.5', 'qwen3', 'mistral', 'phi', 'deepseek-r1', 'codellama'] },
+    models: ['openai/gpt-6-astra-pro', 'openai/gpt-6-astra', 'openai/gpt-6-sol', 'openai/gpt-6-luna', 'anthropic/claude-opus-5.5', 'anthropic/claude-fable-5.1', 'google/gemini-3.8-flash', 'x-ai/grok-4.7', 'deepseek/deepseek-v4.1-flash', 'qwen/qwen3.8-max', 'moonshotai/kimi-k3', 'z-ai/glm-5.3', 'openai/gpt-oss-120b'] },
+  { value: 'Ollama', label: 'Ollama (local)', host: 'http://localhost:11434/v1', customHost: true, keyOptional: true, models: ['llama4', 'llama3.3', 'llama3.2', 'qwen3.5', 'qwen3', 'qwen3-coder', 'qwen2.5-coder', 'gemma4', 'gemma3', 'deepseek-r1', 'mistral', 'phi', 'codellama'] },
 ];
 const _PROVIDER_BASE = (() => { const m = {}; _SET_PROVIDERS.forEach((p) => { m[p.value] = p.host; }); return m; })();
 const _TG_DEFAULTS = { clip_path: '', clip_type: 'stable_diffusion', clip_root: '', max_length: 512, sampling_mode: 'on', temperature: 0.7, top_k: 64, top_p: 0.95, min_p: 0.05, repetition_penalty: 1.05, seed: 0, presence_penalty: 0.0, thinking: false, use_default_template: true };
-const _CLIP_TYPES = ['stable_diffusion', 'stable_cascade', 'sd3', 'stable_audio', 'mochi', 'ltxv', 'pixart', 'cosmos', 'lumina2', 'wan', 'hidream', 'chroma', 'ace', 'omnigen2', 'qwen_image', 'hunyuan_image', 'flux2', 'ovis', 'longcat_image', 'cogvideox', 'lens', 'pixeldit', 'ideogram4', 'boogu', 'krea2', 'joyimage', 'mage', 'minimax'];
+const _CLIP_TYPES = ['stable_diffusion', 'stable_cascade', 'sd3', 'stable_audio', 'mochi', 'ltxv', 'pixart', 'cosmos', 'lumina2', 'wan', 'hidream', 'chroma', 'ace', 'omnigen2', 'qwen_image', 'hunyuan_image', 'flux2', 'ovis', 'longcat_image', 'cogvideox', 'lens', 'pixeldit', 'ideogram4', 'boogu', 'krea2', 'joyimage', 'mage', 'minimax', 'yue2'];
 // API 调用参数默认值：'' = 不发送该字段（用厂商默认）；温度 0.7 与原写死值一致。
 const _API_PARAMS_DEFAULTS = { temperature: 0.7, top_p: '', max_tokens: '', seed: '', stop: '', reasoning: 'off', webSearch: false };
 // llama 默认值：采样参数取 llama.cpp 官方默认，加载参数取 llama-cpp-python 默认（不填就用库自身的值）
@@ -5166,17 +5176,27 @@ const _tpW = new Map();         // 已插入标签的权重：name -> {w, br}
 async function loadPromptTags() {
   _tpDocV++;   // 数据变了 → 计数缓存作废
   _tpCountsCache.clear();
-  try { const r = await fetchApi(TAGS_API); const d = await r.json().catch(() => ({})); _tagDoc = { categories: Array.isArray(d.categories) ? d.categories : [], tags: Array.isArray(d.tags) ? d.tags : [], libs: (d.libs && typeof d.libs === 'object') ? d.libs : {} }; }
-  catch (_) { _tagDoc = { categories: [], tags: [], libs: {} }; }
+  let d = null;
+  try {
+    const r = await fetchApi(TAGS_API);
+    if (r.ok) d = await r.json().catch(() => null);
+  } catch (_) {}
+  // 读失败不能把本地当空：紧接着的 tpMigrateOnce 会把空文档存回服务端，一次网络抖动就清光预览图/收藏/归类。
+  // 库内标签来自 CSV 所以看着还在，丢的正是这些元数据（预览图最显眼）。保留当前数据并让迁移别自动存。
+  if (!d || typeof d !== 'object') { _tpMigrated = true; return; }
+  _tagDoc = { categories: Array.isArray(d.categories) ? d.categories : [], tags: Array.isArray(d.tags) ? d.tags : [], libs: (d.libs && typeof d.libs === 'object') ? d.libs : {} };
   _tpMigrated = false;                 // 数据换了 → 迁移标记重来
   if (_tpLibId) tpMigrateOnce();
 }
+let _tpSaveSeq = 0;
 async function savePromptTags() {
   _tpDocV++;   // 数据变了 → 计数缓存作废
   _tpCountsCache.clear();
+  const seq = ++_tpSaveSeq;
   try {
     const r = await fetchApi(TAGS_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_tagDoc) });
     const d = await r.json().catch(() => ({}));
+    if (seq !== _tpSaveSeq) return;    // 已有更新的保存发出：旧响应别把新状态（比如刚生成的预览图）覆盖回去
     if (r.ok && Array.isArray(d.tags)) _tagDoc = { categories: d.categories || [], tags: d.tags || [], libs: (d.libs && typeof d.libs === 'object') ? d.libs : (_tagDoc.libs || {}) };
   } catch (_) {}
 }
@@ -9335,23 +9355,12 @@ function installSocketLabels(node) {
   node._ephOutLabels = true;
   let all = [];
   let sig = '';
-  const dotColor = (t) => (t === '*' ? MEDIA_PORT_COLOR
-    : t === 'CLIP' ? '#fbbf24'
-    : t === 'MODEL' ? '#a78bfa'
-    : t === 'MODEL_3D' ? '#a78bfa'
-    : t === 'AUDIO' ? '#34d399'
-    : t === 'VIDEO' ? '#60a5fa'
-    : t === 'IMAGE' ? '#f87171'
-    : t === 'STRING' ? '#94a3b8'
-    : '#cbd5e1');
   const mk = (text) => {
     const l = el('div', 'eph-socket-label');
-    const dot = el('span', 'eph-socket-dot');
-    const span = el('span'); span.textContent = text || '';
-    l.appendChild(dot); l.appendChild(span);
+    l.textContent = text || '';
     l.style.display = 'none';
     document.body.appendChild(l);
-    return { el: l, dot, remove: () => { try { l.remove(); } catch (_) {} } };
+    return { el: l, remove: () => { try { l.remove(); } catch (_) {} } };
   };
   const scan = () => {
     const cur = [];
@@ -9408,7 +9417,6 @@ function installSocketLabels(node) {
       const offX = 11 * zoom;
       item.el.style.left = (item.in ? cx - tw - offX : cx + offX) + 'px';
       item.el.style.top = (cy - th / 2) + 'px';
-      try { item.dot.style.background = dotColor(item.type); } catch (_) {}
     });
   };
   // 不再每帧自递归：与画布同帧同步更新（onDrawForeground），resize/滚动/注册表变化时经 rAF 补

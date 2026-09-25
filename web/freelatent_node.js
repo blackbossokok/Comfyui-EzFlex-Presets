@@ -656,9 +656,8 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       }
       scan();
       const nodeW = (node.size && node.size[0]) || 1;
-      const nodeH = (node.size && node.size[1]) || 1;
       const sx = rect.width / nodeW;
-      const sy = rect.height / nodeH;
+      const sy = sx;   // 纵向也按画布缩放（=节点宽度比）：别用 rect.height/nodeH，节点拉高后 rect 高不跟着长会把黑框间距压扁
       all.forEach((item) => {
         let pos = null;
         try { pos = node.getConnectionPos(item.in, item.i, [0, 0]); } catch (_) { pos = null; }

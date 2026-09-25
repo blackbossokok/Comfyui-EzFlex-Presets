@@ -8,7 +8,7 @@ import { ezT, onLocaleChange, ezRelabel } from "./ezflex_i18n.js";
 import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
-  configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough,
+  configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.PREVIEW_ANY;
@@ -205,6 +205,7 @@ function syncSockets(node) {
 
   if (node.graph) node.graph.setDirtyCanvas(true, true);
   syncOutputTypes(conn);
+  try { node._ezEdgeUpdate && node._ezEdgeUpdate(); } catch (_) {}
 }
 function connectedCount(node) { return (node.inputs || []).filter((i) => i.link != null).length; }
 
@@ -610,9 +611,13 @@ function open3DViewer(url, title) {
       } else if (ext === 'obj') {
         const objs = await import(THREE_BASE + 'OBJLoader.js');
         loader = new objs.OBJLoader();
+      } else if (ext === 'splat') {
+        // 本地极简高斯泼溅加载器（32 字节/点，核心 three.js 出软圆点）；.spz/.ksplat 是压缩格式，仍走下面的报错
+        const sp = await import(THREE_BASE + 'SplatLoader.js');
+        loader = new sp.SplatLoader(THREE);
       } else {
-        // 只随包带了 GLTF / FBX / OBJ 三个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
-        throw new Error(`${ezT('Unsupported 3D format .')}${ext || '?'}${ezT(' (only glb / gltf / obj / fbx are supported)')}`);
+        // 只随包带了 GLTF / FBX / OBJ / Splat 四个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
+        throw new Error(`${ezT('Unsupported 3D format .')}${ext || '?'}${ezT(' (only glb / gltf / obj / fbx / splat are supported)')}`);
       }
       // 让加载器把相对贴图/缓冲 URL 解析到源文件所在目录（外部贴图由此能加载）
       loader.resourcePath = url.slice(0, url.lastIndexOf('/') + 1);
@@ -1240,6 +1245,15 @@ function setupNode(node) {
     hideConfigWidget(node);
     syncSockets(node);
     refreshUI(node);
+    // 黑框标签：输入/输出端口都用对应预览卡片的名（卡片名 = entry.caption，回传后 onExecuted 里刷新）
+    installEdgeLabels(node, {
+      side: 'both',
+      labelOf: (sock, index) => {
+        if (index >= connectedCount(node)) return '';   // 末尾那个空输入槽还没有卡片
+        const e = (stateFor(node).entries || [])[index];
+        return (e && e.caption) || (ezT('Input') + ' ' + (index + 1));
+      },
+    });
     setTimeout(() => { syncSockets(node); refreshUI(node); }, 80);
   } catch (e) { console.error('[PreviewAny] init failed:', e); }
 }
@@ -1254,7 +1268,7 @@ function hookPrototype(nt) {
   };
   const prevExec = nt.prototype.onExecuted; nt.prototype.onExecuted = function (message) {
     const r = prevExec ? prevExec.apply(this, arguments) : undefined;
-    try { if (message && message.entries) { stateFor(this).entries = message.entries; renderEntries(this); } } catch (_) {}
+    try { if (message && message.entries) { stateFor(this).entries = message.entries; renderEntries(this); if (this._ezEdgeUpdate) this._ezEdgeUpdate(); } } catch (_) {}
     return r;
   };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPrevSetup = false; return r; };

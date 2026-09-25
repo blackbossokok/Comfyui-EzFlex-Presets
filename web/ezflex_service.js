@@ -559,6 +559,90 @@ function _applyPanelHitThrough(element) {
 
 export function makeDomWidgetHitThrough(element) { _applyPanelHitThrough(element); }
 
+// ===== 节点外黑框 socket 标签（共享）=====
+// 把端口名画在节点边缘：DOM 覆盖层，与画布同帧对齐端口圆点、随画布缩放（纵向也按画布缩放，节点拉高不压间距）。
+// side: 'in' | 'out' | 'both'（默认 'out'）；labelOf(sock, index, isInput) 返回显示文字，空串 = 这个端口不画。
+// 端口增删 / 文字变化靠每帧签名自动重建；返回 update()，名字变了但画布没重绘时可手动调一次。
+let _ezEdgeCss = false;
+function _ezEdgeInjectCss() {
+  if (_ezEdgeCss) return; _ezEdgeCss = true;
+  try {
+    const s = document.createElement('style');
+    s.textContent = '.ezfx-socket-label{position:fixed;z-index:20;pointer-events:none;background:rgba(12,16,24,.4);color:#eef1f6;font-size:9px;line-height:1;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,.18);white-space:nowrap;user-select:none;display:inline-flex;}';
+    document.head.appendChild(s);
+  } catch (_) {}
+}
+export function installEdgeLabels(node, opts) {
+  opts = opts || {};
+  if (!node) return null;
+  if (node._ezEdgeOn) return node._ezEdgeUpdate;
+  node._ezEdgeOn = true;
+  _ezEdgeInjectCss();
+  const sides = opts.side === 'in' ? [true] : (opts.side === 'both' ? [true, false] : [false]);
+  const rootOf = opts.rootOf || ((n) => n._ezRoot);
+  let all = [], sig = '';
+  const scan = () => {
+    const cur = [];
+    sides.forEach((isIn) => {
+      (isIn ? (node.inputs || []) : (node.outputs || [])).forEach((s, i) => {
+        if (!s || s.hidden) return;
+        let text = '';
+        try { text = String(opts.labelOf ? opts.labelOf(s, i, isIn) : (s.name || s.type || '')); } catch (_) { text = ''; }
+        if (text) cur.push({ in: isIn, i, text });
+      });
+    });
+    const k = cur.map((x) => (x.in ? 'i' : 'o') + x.i + '|' + x.text).join(';');
+    if (k === sig) return;
+    sig = k;
+    all.forEach((x) => { try { x.el.remove(); } catch (_) {} });
+    all = cur.map((x) => {
+      const l = document.createElement('div'); l.className = 'ezfx-socket-label'; l.textContent = x.text; l.style.display = 'none';
+      document.body.appendChild(l);
+      return { el: l, in: x.in, i: x.i };
+    });
+    node._ezEdgeEls = all.map((x) => x.el);
+  };
+  const hideAll = () => { all.forEach((x) => { try { x.el.style.display = 'none'; } catch (_) {} }); };
+  const update = () => {
+    const rootEl = rootOf(node);
+    if (!rootEl || !rootEl.isConnected) { hideAll(); return; }
+    // 只在「当前渲染的那张图」里显示：子图（app.canvas.graph）也算当前图
+    const shown = (app && app.canvas && app.canvas.graph) || (app && app.graph) || null;
+    if (shown && node.graph && node.graph !== shown) { hideAll(); return; }
+    let rect = null; try { rect = rootEl.getBoundingClientRect(); } catch (_) { hideAll(); return; }
+    if (!rect || rect.width <= 0) { hideAll(); return; }
+    const nodeW = (node.size && node.size[0]) || 1;
+    const sx = rect.width / nodeW;
+    if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx < 0.3) { hideAll(); return; }
+    scan();
+    const np = node.pos || [0, 0];
+    const zoom = Math.max(0.5, sx);
+    all.forEach((item) => {
+      let pos = null;
+      try { pos = node.getConnectionPos(item.in, item.i, [0, 0]); } catch (_) { pos = null; }
+      if (!pos || !pos.length) { try { pos = item.in ? node.getInputPos(item.i) : node.getOutputPos(item.i); } catch (_2) { pos = null; } }
+      if (!pos || !pos.length) { item.el.style.display = 'none'; return; }
+      const cx = rect.left + ((pos[0] || 0) - (np[0] || 0)) * sx;
+      const cy = rect.top + ((pos[1] || 0) - (np[1] || 0)) * sx;
+      item.el.style.display = 'inline-flex';
+      item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px';
+      item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
+      item.el.style.borderRadius = (3 * zoom) + 'px';
+      item.el.style.boxShadow = '0 1px ' + (3 * zoom) + 'px rgba(0,0,0,.25)';
+      const tw = item.el.offsetWidth, th = item.el.offsetHeight || 16, offX = 11 * zoom;
+      item.el.style.left = (item.in ? cx - tw - offX : cx + offX) + 'px';
+      item.el.style.top = (cy - th / 2) + 'px';
+    });
+  };
+  node._ezEdgeUpdate = update;
+  const prevDraw = node.onDrawForeground;
+  node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); update(); pumpFrames(); };
+  scheduleOnRedraw(update);
+  pumpFrames();
+  update();
+  return update;
+}
+
 let _dlg = null;
 export function uiPrompt(msg, def) {
   return new Promise((resolve) => {

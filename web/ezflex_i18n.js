@@ -447,7 +447,7 @@ export const EZ_ZH = {
   "Load failed: ": "加载失败: ",
   "3D init failed: ": "3D 初始化失败: ",
   "Unsupported 3D format .": "不支持的 3D 格式 .",
-  " (only glb / gltf / obj / fbx are supported)": "（仅支持 glb / gltf / obj / fbx）",
+  " (only glb / gltf / obj / fbx / splat are supported)": "（仅支持 glb / gltf / obj / fbx / splat）",
   "Original": "原始",
   "Clay": "陶土",
   "Glass": "玻璃",

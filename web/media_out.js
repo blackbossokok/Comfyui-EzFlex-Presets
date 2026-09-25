@@ -427,7 +427,7 @@ function installOutsideLabels(node) {
     const nodeW0 = (node.size && node.size[0]) || 1; const sx0 = rect.width / nodeW0;
     if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx0 < 0.35) { all.forEach((item) => { item.el.style.display = 'none'; }); return; }
     scan();
-    const nodeH = (node.size && node.size[1]) || 1; const sy = rect.height / nodeH;
+    const sy = sx0;   // 纵向也按画布缩放（=节点宽度比）：别用 rect.height/nodeH，节点拉高后 rect 高不跟着长会把黑框间距压扁
     all.forEach((item) => {
       let pos = null; try { pos = node.getOutputPos(item.i); } catch (_) { pos = null; }
       if (!pos || !pos.length) { item.el.style.display = 'none'; return; }

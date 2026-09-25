@@ -10,7 +10,7 @@ import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig,
-  loadPresets, savePreset, deletePreset, uiPrompt, uiConfirm, installResizeHandles, makeDomWidgetHitThrough,
+  loadPresets, savePreset, deletePreset, uiPrompt, uiConfirm, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.PARAM_CTRL;
@@ -779,6 +779,14 @@ function setupNode(node) {
     installResizeHandles(node, root);
     try { node.setSize([430, Math.max(140, node.size ? node.size[1] : 140)]); } catch (_) {} // 初始宽度收窄 30px
     updatePorts(node, true);
+    // 黑框标签：输出端口 = 参数组卡片的自定义名（改名后 updatePorts 会重绘，标签每帧按 groups 现取 → 实时跟随）
+    installEdgeLabels(node, {
+      side: 'out',
+      labelOf: (sock) => {
+        const g = (stateFor(node).groups || []).find((x) => String(x.id) === String(sock._ezGroupId));
+        return (g && g.name) || sock.name || '';
+      },
+    });
     ensureDefaultPreset(); // 首启补建 default 真实预设，使同名保存可覆盖
     setTimeout(hideConfigWidget, 60, node);
   } catch (e) { console.error('[ParamPresetControl] init failed:', e); }

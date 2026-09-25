@@ -9,7 +9,7 @@ import { api } from "../../scripts/api.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import { ezThemeInit } from "./ezflex_theme.js";
 import {
-  NODE_TYPES, nodeTypeOf, findNodeById, installResizeHandles, makeDomWidgetHitThrough,
+  NODE_TYPES, nodeTypeOf, findNodeById, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.PARAM_OUT;
@@ -456,6 +456,8 @@ function setupNode(node) {
     (node.inputs || []).forEach((i) => { try { i.hideName = true; } catch (_) {} }); // 输入端口只露圆点
     hideConfigWidget(node);
     updatePorts(node, true);
+    // 黑框标签：只画输出；红色「数据组合」（EZFLEX_PARAM_GROUP）不画，其余用参数名（参数改名经 _ezOutAPI.update → updatePorts 实时跟随）
+    installEdgeLabels(node, { side: 'out', labelOf: (sock) => (sock && sock._ezFixedGroup ? '' : (sock.name || '')) });
     // 图加载时 link 可能晚于节点配置恢复，延迟再校一次
     setTimeout(() => updatePorts(node), 150);
   } catch (e) { console.error('[ParamPresetOutput] init failed:', e); }

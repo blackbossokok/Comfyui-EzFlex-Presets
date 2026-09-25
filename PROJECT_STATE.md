@@ -1,14 +1,14 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。唯一交接入口：改动前先看 §5「避坑」，下一步看 §7「待办」。
-> **当前 V1.2.6**：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
+> **当前 V1.2.7**：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
 > **⚠️ 强制要求：经典模式与 Nodes 2.0（Vue）必须分开写作用域**（`.ezfx-is-vue` / `:not(.ezfx-is-vue)`）。禁止写对两种模式同时生效的行为规则；改一种前先确认另一种不受影响，两种分别回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.2.6"`（`__init__.py` / `pyproject.toml` / README） |
+| 版本 | `__version__ = "1.2.7"`（`__init__.py` / `pyproject.toml` / README） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 生效方式 | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS → **Ctrl+F5 强刷** |
@@ -139,7 +139,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - [ ] 综合媒体端口目前只计数/引用，不参与合并文本。
 - [ ] 图生图/视频生视频、图像缩放等后续节点。
 - [ ] 提示词规范缺官方条目（素材数量/时长上限、字幕/水印约束、Kling 长度上限、负面提示词处理等）。
-- [ ] 仓库待 `git push`（V1.2.6）。
+- [ ] 仓库待 `git push`（V1.2.7）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是 `None` 语义（README 已说明）。
 

@@ -1,11 +1,11 @@
-# Comfyui-EzFlex-Presets（V1.2.6 稳定版）
+# Comfyui-EzFlex-Presets（V1.2.7 稳定版）
 
 [English](README.md) | **中文**
 
 用于comfyui的灵活组合插件，使用ai构建完成，目前插件还在更新完善中。
 
 ![整体预览](./images/overview.png)
-B站演示视频：[点击观看](https://www.bilibili.com/video/BV116tz6xE5V)
+B站演示视频：[点击观看](https://www.bilibili.com/video/BV1T8hy6JEf4)
 
 ## EzFlex 节点列表：
 - 总控制节点( `MainControl`）
@@ -22,6 +22,7 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV116tz6xE5V)
 - 共 **11 个节点**
 
 ## 版本更新内容：
+- V1.2.7:修复预览图消失bug，优化黑框文字表现，更新对齐官方节点功能。
 - V1.2.6:新增主题系统，优化FreeLatent画布，优化标签预览功能，规范数据保存，清理部分冗余代码，修复部分bug。
 - V1.2.5:标签系统新增随机tag功能，标签默认库加入（上次忘传了），生成预览图增加清理功能。ModelsCombo支持加载lora自动生成触发词功能(promptHelper内可实时显示),浏览增加查看已加载模型功能。修复黑色标签子节点不显示以及快速移动残留bug。总体编辑支持单个卡片折叠。
 - V1.2.4:提示词助手大更新：新增标签系统/卡片管理系统，提升安全性。
@@ -125,8 +126,8 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 | DICT | dict | 键值树（键:值） | JSON |
 | STRING / INT / FLOAT / BOOLEAN | str / int / float / bool | 文本（截断 + 弹窗全文） | TXT / MD / JSON / CSV / LOG / HTML |
 | LATENT | `{samples}` dict | shape / dtype 摘要 | — |
-| FILE_3D | `File3D` 对象（内置 Load3D 同款） | three.js 查看器（离线） | glb / gltf / obj / fbx |
-| MODEL_3D | File3D 对象（含 path/file） | three.js 查看器（离线） | glb / gltf / obj / fbx |
+| FILE_3D | `File3D` 对象（内置 Load3D 同款） | three.js 查看器（离线） | glb / gltf / obj / fbx / splat |
+| MODEL_3D | File3D 对象（含 path/file） | three.js 查看器（离线） | glb / gltf / obj / fbx / splat |
 | MESH | `Types.MESH`（顶点/面张量，Hunyuan3D / Trellis / MoGe 等） | 顶点/面导成临时 OBJ → three.js 查看器 | 顶点 ≤50 万、面 ≤100 万（超了只给摘要） |
 | SPLAT / VOXEL | `Types.SPLAT` / `Types.VOXEL`（张量） | 文本摘要（点数 / SH 系数 / 体素分辨率） | — |
 | MODEL | ModelPatcher | 模型元数据卡 | safetensors / gguf / onnx / ckpt / pt |
@@ -217,7 +218,7 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 - 浏览：文件资源管理器式（目录树、后退/前进/上级/刷新、手动路径输入、搜索、批量选择）。
 - 输出：每张卡片一个端口，类型是专属的 EZFLEX_MEDIA_CARD（深红）—— 传的是「卡片对象」而不是媒体值，所以只能接 EzFlex-MediaOut（这样挡住误连内置节点）；要真正的媒体值请接 MediaOut。
 - 可加载类型：图片 / 视频 / 音频 / 3D 模型 / 文本 / 其它，输出值与 ComfyUI 内置加载节点同款，可直接接标准节点。
-- 支持扩展名：图片 .png .jpg .jpeg .webp .gif .bmp .tif .tiff｜视频 .mp4 .webm .mov .mkv .avi .m4v｜音频 .mp3 .wav .flac .ogg .aac .m4a .opus .wma｜3D .obj .glb .gltf .fbx .stl .ply .3ds .dae .blend｜文本/其它 → STRING（文本给文件内容、其它给路径）。
+- 支持扩展名：图片 .png .jpg .jpeg .webp .gif .bmp .tif .tiff｜视频 .mp4 .webm .mov .mkv .avi .m4v｜音频 .mp3 .wav .flac .ogg .aac .m4a .opus .wma｜3D .obj .glb .gltf .fbx .stl .ply .spz .splat .ksplat .3ds .dae .blend｜文本/其它 → STRING（文本给文件内容、其它给路径）。
 - 顶栏「加载输出」：一键生成一个 EzFlex-MediaOut 并连好线。
 
 > ⚠️ **根目录（可浏览根）设置请谨慎 —— 在 ComfyUI 对局域网 / 公网开放时，它会决定"别人能看到你哪些文件"**
