@@ -1,18 +1,18 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。唯一交接入口：改动前先看 §5「避坑」，下一步看 §7「待办」。
-> **当前 V1.2.9**：生成信息兜底修（放大/检测/控制权重不再混进 Model，放大模型单列 Upscale model；EzFlex-ModelsCombo 的 config JSON 解出 model/clip/vae/lora；config JSON 不再污染 Prompt）+ NSG 分组发现以节点自己的图为基准 + 标题正则不中退回字面匹配 + 复制/载入后同步过滤器重扫行（修复制后偶发匹配不到分组）。V1.2.8：预览任意（PreviewAny）批次图片——整批缩略图条（非全屏在弹窗底部、全屏也保留）+ 全屏左右悬停箭头/键盘翻页，存档逐张落盘（单卡上限 64 帧）；各弹窗全屏键统一移到 ✕ 左侧；NSG 分组发现改为以节点自己的图为基准（不用 getCurrentGraph）+ 标题正则不中退回字面匹配 + 复制/载入后同步过滤器并重扫行（修「复制后偶发匹配不到分组」）；生成信息兜底修：放大/检测等权重不再顶替底模（放大模型单列 `Upscale model`），`EzFlex-ModelsCombo` config 里的 model/clip/vae/lora 能解出，config JSON 不再污染 `Prompt`；英文 README 严格对齐中文并升版本号。V1.2.7：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
+> **当前 V1.2.10**：ModelsCombo 第一个输出口在切窗口/刷新/重启后断连——`trigger_words` 只在 `loaders` 非空时追加，空载瞬态回到旧路径（空 `want`）；V1.2.9：生成信息兜底修（放大/检测/控制权重不再混进 Model，放大模型单列 Upscale model；EzFlex-ModelsCombo 的 config JSON 解出 model/clip/vae/lora；config JSON 不再污染 Prompt）+ NSG 分组发现以节点自己的图为基准 + 标题正则不中退回字面匹配 + 复制/载入后同步过滤器重扫行（修复制后偶发匹配不到分组）。V1.2.8：预览任意（PreviewAny）批次图片——整批缩略图条（非全屏在弹窗底部、全屏也保留）+ 全屏左右悬停箭头/键盘翻页，存档逐张落盘（单卡上限 64 帧）；各弹窗全屏键统一移到 ✕ 左侧；NSG 分组发现改为以节点自己的图为基准（不用 getCurrentGraph）+ 标题正则不中退回字面匹配 + 复制/载入后同步过滤器并重扫行（修「复制后偶发匹配不到分组」）；生成信息兜底修：放大/检测等权重不再顶替底模（放大模型单列 `Upscale model`），`EzFlex-ModelsCombo` config 里的 model/clip/vae/lora 能解出，config JSON 不再污染 `Prompt`；英文 README 严格对齐中文并升版本号。V1.2.7：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
 > **⚠️ 强制要求：经典模式与 Nodes 2.0（Vue）必须分开写作用域**（`.ezfx-is-vue` / `:not(.ezfx-is-vue)`）。禁止写对两种模式同时生效的行为规则；改一种前先确认另一种不受影响，两种分别回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.2.9"`（`__init__.py` / `pyproject.toml` / README） |
+| 版本 | `__version__ = "1.2.10"`（`__init__.py` / `pyproject.toml` / README） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 生效方式 | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS → **Ctrl+F5 强刷** |
-| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-26-previewbatch128`），控制台看 `[PromptHelper] module loaded · build …` |
+| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-26-v129`），控制台看 `[PromptHelper] module loaded · build …` |
 | 依赖 | 必装 `mutagen>=1.46.0`；可选 `llama-cpp-python` / `gguf` / `onnx` / 外部 `ffprobe`（`shutil.which` 探测）；其余 torch/numpy/Pillow/safetensors/av 由 ComfyUI 自带 |
 
 ## 1. 节点清单（11 个，category 全 `EzFlex`）
@@ -30,7 +30,9 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - 输入隐藏 `config`；输出 `MODEL/CLIP/VAE 1..N`（类 `RETURN_TYPES` 运行期/前端同步，编辑时类型化）。`MAX_PORTS_PER_TYPE = 32`。
 - `parse_config` 校验 loader 类型/extra；`load_checkpoint/load_unet/load_clip/load_vae` 与内置节点同款，device/weight_dtype/clip_type 都有白名单校验。
 - **LoRA 串联**：按 id 顺序依次 `load_lora_for_models`，`strength_model/strength_clip` 取自 `extra`；**目标 `targetId` 为空则该 LoRA 被跳过**（新增 LoRA 会自动指向第一个主加载器；把已有行切成 lora 后不会自动补，需手选目标）。
-- **触发词串输出**：始终有一个固定 STRING 口 `trigger_words`（**固定排最后，不动前面 model/clip/vae 的顺序与复用**；没有 lora 时输出空串）；值 = 按 LoRA 顺序把各自 LoraManager `<模型>.metadata.json` 的触发词用 ", " 拼起来（没触发词 / 没 file / 没 metadata 的跳过）。**触发词取 `_lora_trained_words()`：顶层 `trainedWords` 为空就退回 `civitai.trainedWords`（实机 LoraManager 顶层就是空的，C 站的词在 civitai 下面）**，再退回 `activation_text`。**这个口常驻**：切预设不会摘掉它，下游不断连。前后端同步点：`_mc_output_types` 与前端 `updatePorts` 都无条件追加。
+- **载入守卫：loaders 未载入时不重排端口**（V1.2.9）：`updatePorts` 开头判断 `!st.loaders.length && 仍有任一连线` → 直接 `return false`。config 还没解析进来时 `want` 为空/不全，按它删端口会把正在恢复的 MODEL/CLIP/VAE 连线割断（「刷新后第一个口断连」）。等 loaders 到位再正常重排；空节点（默认口无连线）不受影响。**避坑**：试过「保留有连线的多余口」与「新建前优先复用未用的有连线口」——在默认口 / 类型错位时会给新口新建、又保留旧口，凭空多出端口且重绘永不收敛，已废弃。
+- **触发词串输出**：只要 `loaders` 非空就有一个固定 STRING 口 `trigger_words`（**固定排最后，不动前面 model/clip/vae 的顺序与复用**；没有 lora 时输出空串）；值 = 按 LoRA 顺序把各自 LoraManager `<模型>.metadata.json` 的触发词用 ", " 拼起来（没触发词 / 没 file / 没 metadata 的跳过）。**触发词取 `_lora_trained_words()`：顶层 `trainedWords` 为空就退回 `civitai.trainedWords`（实机 LoraManager 顶层就是空的，C 站的词在 civitai 下面）**，再退回 `activation_text`。**切预设不会摘掉它**（下游不断连）；但 `loaders` 尚未载入（空配置）时不追加——空载瞬态动端口会把刷新后恢复中的第一个口删掉。前后端同步点：`_mc_output_types` 与前端 `updatePorts` 都按「`loaders` 非空」追加。
+- **面板选中态（V1.2.10）**：统一用 `ezPanelState(node, key[, value])` 存 `node.properties`（LiteGraph 随工作流序列化/还原，刷新、切工作台、重启自动恢复），O(1)，**不要拿当前配置反查预设表**（那是 O(节点×预设) 的字符串比较）。已接：ModelsCombo 预设 `ComboPreset`、FreeLatent 比例预设 `FlatPreset`。`ParamPresetControl`/`MainControl`/`NodeSwitchGroup`/`MediaLoader` 本来就存 config 的 `current`，无需改。
 - 「⧉ 浏览」弹窗：读 LoraManager 的 `<模型名>.metadata.json` + 同目录预览图（`/models_combo/lora_meta`、`/lora_meta_detail`、`/preview`）。标签行最右多一个**「已加载」**页：它不是另一种视图，而是**一个筛选**（`_loadedFileSet()` 按文件名匹配节点里已选的模型文件），筛出来的就是**普通模型卡**（和 LoRA 页同一套卡片）。注意它只覆盖 LoraManager 有索引的 checkpoint / unet / lora（clip/vae 不在 LoraManager 索引里，故不出现）。
 - 实例 API：`node._ezComboAPI`。
 
@@ -75,7 +77,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - **标签提示**：标签面板「标签提示」开关（localStorage `ezflex.tagHint`）→ 四个输入处打字弹候选（英文+中文），见 §10.6。
 - **画师写法**：面板「画师写法」按钮（在「标签提示」后）按库存 `libs[库].artist`（'' / '@' / 'artist:'）→ `tpFmt` 给画师标签（CSV category=1）加前缀，只在插入/已插入框显示，搜索和卡片不变。后端 `_ph_libs_clean` 已放行 `artist`（**要重启 ComfyUI 才持久化**）。
 - **面板布局**：工具栏行 = 标签库下拉（排第一、不写字只悬停提示、变窄时**先压它**）→ 搜索（`flex:0 1 130px`，尽量留着）→ 筛选/排序/+添加标签/标签提示/引用画师；四个小图标单独一行（收起分组栏只收这行）；标题栏只有「全屏 / ✕」。
-- 标签系统语义 / 规则 / 存储：完整口径见 §10（两套空间：库侧 `place/fav/meta`，我的侧 `mine` 副本；伪行 全部/已收藏/我的标签；固定真节点「未分类」；**临时分类已删除**）。当前 PH_BUILD = 2026-09-26-previewbatch128。
+- 标签系统语义 / 规则 / 存储：完整口径见 §10（两套空间：库侧 `place/fav/meta`，我的侧 `mine` 副本；伪行 全部/已收藏/我的标签；固定真节点「未分类」；**临时分类已删除**）。当前 PH_BUILD = 2026-09-26-v129。
 - **总体编辑单卡折叠 / 标签批量移除预览图**：小标题行标题框后面加一颗 chevron（`.eph-all-fold`）单张收正文，状态按卡片 id 记在 `_allClosed`（重建块还原、删卡即清）；工具栏那颗仍是全局收起**小标题行**，两者靠 `.eph-all:not(.collapsed)` 隔开。标签批量栏加「移除预览图」（`tagRemoveSelPreviews`，按名字去重删记录 `preview`，二次确认）。生成预览图是**覆盖**（`t.preview = …`，非追加）；**删除标签时**预览 base64 随 `tpDropPreview` 一起清掉（清完没别的含义的空记录整个回收），其余操作不自动清，只落在 §10.9 的 `ezflex_prompt_tags.json`。
 - **随机 tag**：工具栏「排序 | 随机 | ＋新增标签」。弹窗每行 = [分类按钮（点开 = 与「移动至」同一套 `tpCatPickMenu` 右侧层叠菜单，树根 CSV 分类 / 细分大类）+ 数量（居中、无上下箭头）+ 开关 + 减号]，右上「恢复默认随机组 / ＋新增随机分类」，右下「保存随机设置 / 生成随机tag」。弹窗里改的是**草稿**，点「保存随机设置」或「生成随机tag」才写 localStorage `ezflex.randGroups`（键 `{cat,n,on}`；关闭不保存）。默认六组 = 画师(`c1`)/角色(`c4`)/人物/服饰/表情动作/场景。生成按组抽样；标签面板「生成随机tag」先清掉已插入的标签再生成（不再累加）。右键入口三处：卡片菜单（在「编辑标签」和「生成预览」之间）/ 卡片区空白 / 已插入芯片面板空白。卡片弹窗工具栏在**「合」前面**加了「自动随机tag」（绿 = 运行期每次排队按当前设置重写本卡内容、灰 = 不重写；按卡片记 `autoRand`）和「随机tag」（单点：清空本卡再生成一次）——两者都**先清空再生成**。运行期随机在 `api.queuePrompt` 包装里做（`phRandPatchPrompt`）：**既改本次提交的 prompt（执行用这一份，不动磁盘上的工作流），也写回画布上的卡片**（`card.content` 覆盖 + `syncToConfig` + `refreshUI`，打开着的卡片弹窗同步换掉），所以执行完能看到随机结果、也能接着编辑；抽不到 tag 时**不清空卡片**并在控制台 warn（提示检查随机组 / 标签库）。HTTP API 直连不经前端则保持原内容。
 - **实时接收卡**：卡片右键「实时接收文本卡（可编辑）」= 卡片 `liveIn`。接了 `card_in_i` 时**不变灰、正文可编辑**（其他卡照旧"覆盖 + 置灰"）；运行期**以卡片正文为准**（正文空才用外部输入兜底），并把收到的原文用 `ui.recv = [{id,text}]` 回传：前端在源变了时刷新卡片、源不变时**保留你在卡片里的临时编辑**（例如临时加个提升触发概率的词，不动 LoRA 本身的触发词）。**运行期三个自动优化一律不作用到实时卡**：只输出它的默认正文，不单独优化、不用优化槽，也不进整体优化的输入（整体优化结果里再把它的原文原样拼回去）。前端还会在 **ModelsCombo 配置变化 / 连线变化 / 载入**时直接按上游配置拉触发词（`phPullLiveCards`，metadata 按 file 缓存），**不用等运行**就能刷新。
@@ -141,7 +143,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - [ ] 综合媒体端口目前只计数/引用，不参与合并文本。
 - [ ] 图生图/视频生视频、图像缩放等后续节点。
 - [ ] 提示词规范缺官方条目（素材数量/时长上限、字幕/水印约束、Kling 长度上限、负面提示词处理等）。
-- [ ] 仓库待 `git push`（V1.2.9）。
+- [ ] 仓库待 `git push`（V1.2.10）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是 `None` 语义（README 已说明）。
 

@@ -63,7 +63,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.9"
+__version__ = "1.2.10"
 
 WEB_DIRECTORY = "./web"
 
@@ -743,8 +743,8 @@ def _mc_output_types(loaders):
             out_types.append("CLIP"); out_names.append(nm + "_clip")
         if l.get("type") in ("checkpoint", "vae"):
             out_types.append("VAE"); out_names.append(nm + "_vae")
-    # 触发词串端口常驻、固定排最后：没有 LoRA 时输出空串。切预设不会摘掉这个口（下游不断连）。
-    out_types.append("STRING"); out_names.append("trigger_words")
+    if loaders:   # 有加载器就常驻触发词口（无 LoRA = 空串），固定排最后
+        out_types.append("STRING"); out_names.append("trigger_words")
     return out_types, out_names
 
 
@@ -1025,9 +1025,9 @@ class ModelsComboLoader:
             if loader["type"] in ("checkpoint", "vae") and entry["vae"] is not None:
                 out_types.append("VAE"); out_names.append(nm + "_vae"); outputs.append(entry["vae"])
 
-        # 触发词串常驻（无 LoRA = 空串）：按 LoRA 顺序拼（没有触发词的跳过）。端口与前端 updatePorts 一致，永远排最后。
-        out_types.append("STRING"); out_names.append("trigger_words")
-        outputs.append(_mc_trigger_words(applied))
+        if loaders:   # 触发词串常驻（无 LoRA = 空串）；空配置不加，端口数与前端一致
+            out_types.append("STRING"); out_names.append("trigger_words")
+            outputs.append(_mc_trigger_words(applied))
 
         self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
         self.__class__.RETURN_NAMES = tuple(out_names)

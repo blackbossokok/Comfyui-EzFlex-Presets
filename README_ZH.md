@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.2.9 稳定版）
+# Comfyui-EzFlex-Presets（V1.2.10 稳定版）
 
 [English](README.md) | **中文**
 
@@ -22,7 +22,8 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - 共 **11 个节点**
 
 ## 版本更新内容：
-- V1.2.9:修复previewany读取图片生成信息不对的问题（提示词支持穿透连线读取），修复开关组nodeswitchgroup复制后可能匹配不到节点的问题。ModelsCombo 触发词端口常驻（无 LoRA 为空串，切预设不断连）。
+- V1.2.10:修复模型组合加载器modelscombo第一个端口切换窗口/刷新/重启会断连的问题；修复预设选项切换窗口/刷新会丢失的bug。
+- V1.2.9:修复previewany读取图片生成信息不对的问题（提示词支持穿透连线读取），修复开关组nodeswitchgroup复制后可能匹配不到节点的问题。ModelsCombo 有配置时触发词端口常驻（无 LoRA 为空串）。
 - V1.2.8:预览任意previewany节点支持批量图片预览，优化预览窗口表现。
 - V1.2.7:修复预览图消失bug，优化黑框文字表现，更新对齐官方节点功能。
 - V1.2.6:新增主题系统，优化FreeLatent画布，优化标签预览功能，规范数据保存，清理部分冗余代码，修复部分bug。

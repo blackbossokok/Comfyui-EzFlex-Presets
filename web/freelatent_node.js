@@ -3,7 +3,7 @@
 // 状态实时写回 config 输入框，由 config 进 prompt、驱动 Python 节点创建 Latent。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames } from "./ezflex_service.js";
+import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezPanelState } from "./ezflex_service.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import { ezThemeInit, ezThemeColor, ezThemeAlpha, onThemeChange } from "./ezflex_theme.js";
 
@@ -786,7 +786,11 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     // 初始化比例下拉
     buildAspectSel(aspectSel, st);
     // 初始化预设 + 自定义比例（从 user_data 读取）
-    refreshPresetSel(presetSel).then(() => syncPresetTrigger(node)).catch(() => {});
+    refreshPresetSel(presetSel).then(() => {
+      const saved = ezPanelState(node, 'FlatPreset');   // 选中态存在 node.properties：刷新/切工作台后恢复
+      if (saved) presetSel.value = saved;
+      syncPresetTrigger(node);
+    }).catch(() => {});
     loadDefaultPreset(node);
     loadCustomRatios(node).then(() => buildAspectSel(aspectSel, st));
     // 同步默认控件显示
@@ -1014,7 +1018,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     return loadPresetList().then((list) => {
       const p = list.find((x) => x.name === name);
       if (!p) return;
-      node._ezCurPreset = name;
+      ezPanelState(node, 'FlatPreset', name);
       const cfg = p.config || {};
       const st = stateFor(node);
       const w = int(cfg.width, st.width);
@@ -1314,12 +1318,12 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       // 供 EzFlex-MainControl 读取/套用本节点宽高预设
       if (!node._ezLatentAPI) node._ezLatentAPI = {
         presetNames: () => loadPresetList().then((list) => seedPresets(list)).then((l) => l.map((p) => p.name)),
-        current: () => { const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) return s.value; return node._ezCurPreset || ''; },
+        current: () => { const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) return s.value; return ezPanelState(node, 'FlatPreset') || ''; },
         setCurrent: async (name) => {
-          if (!name) { node._ezCurPreset = ''; const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) s.value = ''; syncPresetTrigger(node); return; }
+          if (!name) { ezPanelState(node, 'FlatPreset', ''); const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) s.value = ''; syncPresetTrigger(node); return; }
           const list = await loadPresetList();
           if (!list.some((p) => p.name === name)) return; // 预设不存在则不动
-          node._ezCurPreset = name; await applyPresetByName(node, name);
+          ezPanelState(node, 'FlatPreset', name); await applyPresetByName(node, name);
           const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s && s.value !== name) { s.value = name; }
           syncPresetTrigger(node);
         },

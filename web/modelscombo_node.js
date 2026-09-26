@@ -3,7 +3,7 @@
 // 由 config 输入框进 prompt、驱动 Python 节点 → 不再依赖会被缓存的独立 HTML 页面。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezSanitizeHtml } from "./ezflex_service.js";
+import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezSanitizeHtml, ezPanelState } from "./ezflex_service.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import { ezThemeInit } from "./ezflex_theme.js";
 
@@ -346,6 +346,10 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   function updatePorts(node, noRedraw) {
     if (!node || !node.outputs) return false;
     const st = stateFor(node);
+    // 载入守卫：config 还没解析进来（loaders 为空）时不要重排 —— 这时 want 只剩常驻的 trigger_words，
+    // 按它删/建端口会把正在恢复的 MODEL/CLIP/VAE 连线割断（「刷新后 MODEL 断连」）。等 loaders 到位再排。
+    // 空节点（默认口没有连线）不受影响，照常收敛成常驻的 trigger_words。
+    if (!st.loaders.length && (node.outputs || []).some((o) => (Array.isArray(o.links) && o.links.length > 0) || o.link != null)) return false;
     const mains = st.loaders.filter((l) => ['checkpoint', 'unet', 'clip', 'vae'].indexOf(l.type) >= 0);
     const sr = (nm) => String(nm || '').split('.').pop() || '';
     // 输出顺序 = 加载器顺序：每个主加载器按自身类型依次产出 model/clip/vae（checkpoint 三者相邻），与 Python load_combo 一致
@@ -356,7 +360,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       if (['checkpoint', 'clip'].indexOf(l.type) >= 0) want.push(['CLIP', b + '_clip']);
       if (['checkpoint', 'vae'].indexOf(l.type) >= 0) want.push(['VAE', b + '_vae']);
     });
-    want.push(['STRING', 'trigger_words']);   // 触发词串端口常驻（无 LoRA = 空串），固定排最后：切预设不断连
+    if (st.loaders.length) want.push(['STRING', 'trigger_words']);   // 有配置就常驻触发词口（无 LoRA = 空串），固定排最后；loaders 未载入时不追加
     let changed = false;
     // 快照旧输出：优先按「名称」复用（拖拽排序时连接跟随同名 socket）。
     // 名称变了但「类型+位置」没变（如 anima→krea2 都是 checkpoint）时按位置+类型复用该 socket（保留连接，只改名）。
@@ -378,7 +382,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       sock.hidden = false;
       seq.push(sock);
     });
-    // 删除未被复用的旧 socket（其连接随 removeOutput 一并清除）
+    // 删除未被复用的旧 socket（其连接随 removeOutput 一并清除）。
+    // 注意：loaders 尚未载入完成时空转排会删掉恢复中的端口、割断下游连线，所以上面已经提前 return（见开头守卫）。
     old.forEach((o, i) => {
       if (!used.has(i)) {
         const idx = node.outputs.indexOf(o);
@@ -649,7 +654,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     bar.appendChild(savePresetBtn);
     bar.appendChild(presetSel);
     bar.appendChild(delPresetBtn);
-    refreshPresetSel(presetSel);
+    refreshPresetSel(presetSel, node);
 
     const list = el('div', 'mc-list');
     const main = el('div', 'mc-main');
@@ -666,7 +671,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     savePresetBtn.addEventListener('click', () => savePreset(node, presetSel, presetName.value));
     // 选中即生效（同 FreeLatent）：下拉选到某个预设立即应用；选到占位则清空内部
     presetSel.addEventListener('change', () => {
-      if (!presetSel.value) { node._ezCurPreset = ''; stateFor(node).loaders = []; syncToConfig(node); render(node); return; }
+      if (!presetSel.value) { ezPanelState(node, 'ComboPreset', ''); stateFor(node).loaders = []; syncToConfig(node); render(node); return; }
       loadPreset(node, presetSel, presetSel.value);
     });
     delPresetBtn.addEventListener('click', () => deletePreset(node, presetSel));
@@ -1102,7 +1107,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
   // ===== 预设（服务端 user_data 文件夹，JSON）=====
   const PRESET_API = '/models_combo/presets';
-  async function refreshPresetSel(sel) {
+  async function refreshPresetSel(sel, node) {
     if (!sel) return;
     sel.innerHTML = '';
     const d = el('option', null, { value: '' });
@@ -1111,6 +1116,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     let list = [];
     try { const r = await fetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
     list.forEach((p) => { const o = el('option', null, { value: p.name }); o.textContent = p.name; sel.appendChild(o); });
+    // 选中态存 node.properties（随工作流序列化/还原）：刷新、切工作台、重启都能恢复，且不用反查预设表
+    const name = ezPanelState(node, 'ComboPreset') || '';
+    if (name && list.some((p) => p.name === name)) sel.value = name;
   }
   async function savePreset(node, sel, name) {
     name = (name || '').trim();
@@ -1120,7 +1128,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     try {
       await fetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cur) });
     } catch (_) { /* 忽略 */ }
-    await refreshPresetSel(sel);
+    ezPanelState(node, 'ComboPreset', name);
+    await refreshPresetSel(sel, node);
     sel.value = name;
     showWarn(node, ezT('Saved preset ') + name);
   }
@@ -1130,7 +1139,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     try { const r = await fetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
     const p = list.find((x) => x.name === name);
     if (!p) { showWarn(node, ezT('Preset does not exist')); return; }
-    node._ezCurPreset = name;
+    ezPanelState(node, 'ComboPreset', name);
     stateFor(node).loaders = parseLoaders(JSON.stringify(p.loaders));
     let mx = 0;
     stateFor(node).loaders.forEach((l) => { if (typeof l.id === 'number' && l.id > mx) mx = l.id; });
@@ -1142,8 +1151,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const name = sel && sel.value;
     if (!name) { showWarn(node, ezT('Select a preset')); return; }
     try { await fetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); } catch (_) { /* 忽略 */ }
-    await refreshPresetSel(sel);
+    await refreshPresetSel(sel, node);
     sel.value = '';
+    ezPanelState(node, 'ComboPreset', '');
     showWarn(node, ezT('Deleted preset ') + name);
   }
 
@@ -2016,17 +2026,17 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       // 供 EzFlex-MainControl 读取/套用本节点预设
       if (!node._ezComboAPI) node._ezComboAPI = {
         presetNames: async () => { try { const r = await fetch(PRESET_API); return (await r.json()).map((p) => p.name); } catch (_) { return []; } },
-        current: () => { const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); if (s) return s.value; return node._ezCurPreset || ''; },
+        current: () => { const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); if (s) return s.value; return ezPanelState(node, 'ComboPreset') || ''; },
         setCurrent: async (name) => {
           if (!name) {
-            node._ezCurPreset = '';
+            ezPanelState(node, 'ComboPreset', '');
             stateFor(node).loaders = []; syncToConfig(node); render(node);
             const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); if (s) s.value = '';
             return;
           }
           const list = await (async () => { try { const r = await fetch(PRESET_API); return await r.json(); } catch (_) { return []; } })();
           if (!list.some((p) => p.name === name)) return; // 预设不存在则不动
-          node._ezCurPreset = name; await loadPreset(node, null, name);
+          ezPanelState(node, 'ComboPreset', name); await loadPreset(node, null, name);
           const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); if (s && s.value !== name) { s.value = name; }
         },
         refresh: () => render(node),

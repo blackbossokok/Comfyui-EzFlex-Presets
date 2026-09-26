@@ -236,6 +236,17 @@ export function changeModeOfNodes(nodes, mode) {
 export function configWidget(node) {
   return (node.widgets || []).find((w) => w.name === 'config');
 }
+// 面板下拉的选中态：存 node.properties（LiteGraph 随工作流序列化/还原，刷新、切工作台、重启自动恢复），
+// O(1)。比「拿当前配置反查预设表」省得多，也不再依赖内存里的临时字段。
+// 省略 value = 读；返回 undefined 表示没存过。
+export function ezPanelState(node, key, value) {
+  if (!node) return undefined;
+  if (!node.properties) node.properties = {};
+  const k = 'ez' + key;
+  if (value === undefined) return node.properties[k];
+  if (node.properties[k] !== value) node.properties[k] = value;
+  return value;
+}
 // 配置写完后广播：媒体编号表靠它即时重建，不用等轮询。
 export function notifyConfigChanged(node) {
   try { window.dispatchEvent(new CustomEvent('ezflex:config-changed', { detail: { node: node } })); } catch (_) {}

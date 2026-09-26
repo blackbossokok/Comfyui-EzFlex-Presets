@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets (V1.2.9 stable)
+# Comfyui-EzFlex-Presets (V1.2.10 stable)
 
 [English](README.md) | **中文**
 
@@ -22,7 +22,8 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - **11 nodes in total**
 
 ## Version history:
-- V1.2.9: Fixed Preview Any reading incorrect image generation info (prompt text is now read through connected nodes); fixed Node Switch Group possibly failing to match nodes after being copied. The ModelsCombo trigger-words output port is now always present (empty without LoRA), so it no longer disconnects on a preset switch.
+- V1.2.10: Fixed the ModelsCombo first output port disconnecting after switching windows, refreshing, or restarting; fixed preset selections being lost after switching windows or refreshing.
+- V1.2.9: Fixed Preview Any reading incorrect image generation info (prompt text is now read through connected nodes); fixed Node Switch Group possibly failing to match nodes after being copied. ModelsCombo keeps the trigger-words output port whenever it has a config (empty without LoRA).
 - V1.2.8: Preview Any (`EzFlex-PreviewAny`) supports batch image preview; the preview window behavior was improved.
 - V1.2.7: Fixed the preview-image disappearing bug, improved black-label text rendering, updated to align with official node features.
 - V1.2.6: Added the theme system, optimized the FreeLatent canvas, optimized tag previews, normalized data storage, cleaned up some redundant code, and fixed some bugs.
