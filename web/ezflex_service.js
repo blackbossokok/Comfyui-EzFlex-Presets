@@ -192,10 +192,17 @@ export function on(evt, fn) { (_bus[evt] = _bus[evt] || []).push(fn); }
 export function emit(evt, arg) { (_bus[evt] || []).forEach((fn) => { try { fn(arg); } catch (_) {} }); }
 
 // ===== 画布分组匹配（参考 rgthree fast_groups_service / utils.js）=====
-export function allGraphGroups() {
-  const graph = (app.canvas && app.canvas.getCurrentGraph && app.canvas.getCurrentGraph()) || app.graph;
-  const groups = [...(graph._groups || [])];
-  (graph.subgraphs || []).forEach((g) => { if (g && g._groups) groups.push(...g._groups); });
+// rootGraph 缺省 = 根图。**不要用 getCurrentGraph 当基准**：复制节点/在子图里操作时「当前视图」会变，
+// 分组面板就会时对时错（表现为偶尔匹配不到分组）。基准应该永远是「这个 NSG 自己所在的图」。
+export function allGraphGroups(rootGraph) {
+  const base = rootGraph || (app && app.graph) || null;
+  const groups = [];
+  const walk = (g) => {
+    if (!g) return;
+    if (g._groups) groups.push(...g._groups);
+    (g.subgraphs || []).forEach(walk);
+  };
+  walk(base);
   return groups;
 }
 export function groupNodes(group) {
@@ -204,7 +211,7 @@ export function groupNodes(group) {
   if (Array.isArray(group.nodes) && group.nodes.length) return group.nodes.filter((n) => n instanceof LGraphNode);
   // _children 为空：画布边界法（节点中心在分组矩形内即算成员）
   const bb = group.getBounding ? group.getBounding() : [group._pos[0], group._pos[1], group._size[0], group._size[1]];
-  return ((group.graph && group.graph.nodes) || []).filter((n) => {
+  return ((group.graph && (group.graph._nodes || group.graph.nodes)) || []).filter((n) => {
     const b = n.getBounding ? n.getBounding() : [n.pos[0], n.pos[1], n.size[0], n.size[1]];
     const cx = b[0] + b[2] / 2, cy = b[1] + b[3] / 2;
     return cx >= bb[0] && cx < bb[0] + bb[2] && cy >= bb[1] && cy < bb[1] + bb[3];

@@ -63,7 +63,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.8"
+__version__ = "1.2.9"
 
 WEB_DIRECTORY = "./web"
 
@@ -743,8 +743,8 @@ def _mc_output_types(loaders):
             out_types.append("CLIP"); out_names.append(nm + "_clip")
         if l.get("type") in ("checkpoint", "vae"):
             out_types.append("VAE"); out_names.append(nm + "_vae")
-    if any(l.get("type") == "lora" for l in (loaders or [])):
-        out_types.append("STRING"); out_names.append("trigger_words")   # 触发词串固定排最后
+    # 触发词串端口常驻、固定排最后：没有 LoRA 时输出空串。切预设不会摘掉这个口（下游不断连）。
+    out_types.append("STRING"); out_names.append("trigger_words")
     return out_types, out_names
 
 
@@ -1025,9 +1025,9 @@ class ModelsComboLoader:
             if loader["type"] in ("checkpoint", "vae") and entry["vae"] is not None:
                 out_types.append("VAE"); out_names.append(nm + "_vae"); outputs.append(entry["vae"])
 
-        if loras:   # 触发词串：按 LoRA 顺序拼（没有触发词的跳过）；没接 LoRA 就不加这个口
-            out_types.append("STRING"); out_names.append("trigger_words")
-            outputs.append(_mc_trigger_words(applied))
+        # 触发词串常驻（无 LoRA = 空串）：按 LoRA 顺序拼（没有触发词的跳过）。端口与前端 updatePorts 一致，永远排最后。
+        out_types.append("STRING"); out_names.append("trigger_words")
+        outputs.append(_mc_trigger_words(applied))
 
         self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
         self.__class__.RETURN_NAMES = tuple(out_names)
@@ -2972,8 +2972,11 @@ class PreviewAnyNode:
         if not isinstance(workflow, dict):
             return None
         nodes = workflow.get("nodes") or []
-        model, lora, clip, vae, prompts, sampler = [], [], [], [], [], {}
+        model, lora, clip, vae, prompts, sampler, upscale = [], [], [], [], [], {}, []
         _MODEL_EXT = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".onnx", ".lora", ".zip")
+        # 放大/超分权重不是本次出图的底模；检测/控制/换脸等辅助权重同样不算。
+        _UPSCALE_HINTS = ("upscale", "superresolution", "super_resolution", "esrgan", "swinir", "gfpgan", "codeformer", "restoreformer")
+        _AUX_HINTS = ("control", "detector", "insightface", "ipadapter", "faceid", "segment", "yolo", "samloader", "clipvision", "style_model", "gligen")
 
         def _is_model_ext(s):
             return isinstance(s, str) and s.lower().endswith(_MODEL_EXT)
@@ -2984,6 +2987,88 @@ class PreviewAnyNode:
                 return True
             except Exception:
                 return False
+
+        # 连线穿透：CLIPTextEncode 的 text 常常是连线（如 EzFlex-PromptHelper 的「Merged prompt」），
+        # 只读自己的 widget 会读空 —— 按 workflow.links 上溯去找真正写着提示词的那个节点。
+        by_id = {}
+        for n in nodes:
+            if isinstance(n, dict) and n.get("id") is not None:
+                by_id[str(n.get("id"))] = n
+        link_src = {}
+        for l in (workflow.get("links") or []):
+            if isinstance(l, dict):
+                link_src[str(l.get("id"))] = (l.get("origin_id"), l.get("origin_slot"))
+            elif isinstance(l, (list, tuple)) and len(l) >= 3:
+                link_src[str(l[0])] = (l[1], l[2])
+
+        def _plain_widget(n):
+            wv = n.get("widgets_values") or []
+            if not isinstance(wv, (list, tuple)):
+                wv = [wv]
+            for w in wv:
+                if not isinstance(w, str):
+                    continue
+                ws = w.strip()
+                if not ws or _is_model_ext(ws) or ws[0] in "{[" or _num(ws):
+                    continue
+                return ws
+            return ""
+
+        def _prompt_of(n, depth=0, seen=None, slot=None):
+            """穿透连线取提示词正文。PromptHelper 特殊：正文在 config JSON 的卡片里（slot 0 = 合并，slot N = 第 N 张卡）。"""
+            if not isinstance(n, dict) or depth > 8:
+                return ""
+            if seen is None:
+                seen = set()
+            nid = str(n.get("id"))
+            if nid in seen:
+                return ""
+            seen.add(nid)
+            cl = str(n.get("type") or "").lower()
+            wv = n.get("widgets_values") or []
+            if not isinstance(wv, (list, tuple)):
+                wv = [wv]
+            if "prompthelper" in cl or "prompt_helper" in cl:
+                for w in wv:
+                    if not isinstance(w, str) or not w.strip().startswith("{"):
+                        continue
+                    try:
+                        cfg = json.loads(w)
+                    except Exception:
+                        continue
+                    cards = parse_prompt_cards(cfg)
+                    if not cards:
+                        continue
+                    if isinstance(slot, int) and 1 <= slot <= len(cards):
+                        c = cards[slot - 1]                 # PromptHelper 的 Card N 输出口
+                        t = str(c.get("content") or "").strip() or _ph_html_to_text(c.get("contentHTML") or "").strip()
+                        if t:
+                            return t
+                    ov = parse_prompt_overall(cfg)
+                    if ov.get("useOptimized") and str(ov.get("text") or "").strip():
+                        return str(ov["text"]).strip()
+                    sep = parse_prompt_rules(cfg)["mergeSep"]
+                    parts = []
+                    for c in cards:
+                        if c.get("mergeOff"):
+                            continue
+                        t = str(c.get("content") or "").strip() or _ph_html_to_text(c.get("contentHTML") or "").strip()
+                        if t:
+                            parts.append(t)
+                    if parts:
+                        return sep.join(parts)
+                return ""
+            t = _plain_widget(n)
+            if t:
+                return t
+            for i in (n.get("inputs") or []):
+                if isinstance(i, dict) and i.get("link") is not None:
+                    hit = link_src.get(str(i.get("link")))
+                    if hit:
+                        t = _prompt_of(by_id.get(str(hit[0])), depth + 1, seen, hit[1])
+                        if t:
+                            return t
+            return ""
 
         for n in nodes:
             if not isinstance(n, dict):
@@ -3002,16 +3087,45 @@ class PreviewAnyNode:
                         lora.append(w)
                     elif "vae" in cl:
                         vae.append(w)
+                    elif any(x in cl for x in _AUX_HINTS):
+                        pass                     # 检测/控制/换脸等辅助权重：不是出图模型
+                    elif any(x in cl for x in _UPSCALE_HINTS):
+                        upscale.append(w)
                     elif "clip" in cl:
                         clip.append(w)
                     elif any(x in cl for x in ("checkpoint", "unet", "diffusion", "loadmodel", "load_model", "model")):
                         model.append(w)
-            # 提示词：CLIPTextEncode / 带 text 的编码节点，取第一个非模型文件名的文本 widget
-            if ("clip" in cl and "encode" in cl) or "text" in cl or "prompt" in cl:
+            # EzFlex-ModelsCombo：模型文件在 config JSON 里（不是独立的 *.safetensors widget），要单独解出来
+            if "modelscombo" in cl:
                 for w in wv:
-                    if isinstance(w, str) and w.strip() and not _is_model_ext(w):
-                        prompts.append(w)
-                        break
+                    if not isinstance(w, str):
+                        continue
+                    try:
+                        loaders = json.loads(w)
+                    except Exception:
+                        continue
+                    if not isinstance(loaders, list):
+                        continue
+                    for L in loaders:
+                        if not isinstance(L, dict):
+                            continue
+                        f = L.get("file")
+                        if not isinstance(f, str) or not f.strip():
+                            continue
+                        t = str(L.get("type") or "").lower()
+                        if t == "lora":
+                            lora.append(f)
+                        elif t == "vae":
+                            vae.append(f)
+                        elif t == "clip":
+                            clip.append(f)
+                        else:
+                            model.append(f)
+            # 提示词：CLIPTextEncode / 带 text 的编码节点；正文可能是连线（PromptHelper / 文本节点），要穿透
+            if ("clip" in cl and "encode" in cl) or "text" in cl or "prompt" in cl:
+                t = _prompt_of(n)
+                if t:
+                    prompts.append(t)
             # 采样参数：K/Sampler 常见 widget 顺序尽力推断（含 control_after_generate 偏移）
             if "sampler" in cl and isinstance(wv, (list, tuple)) and len(wv) >= 3:
                 has_ctrl = len(wv) > 1 and isinstance(wv[1], str) and wv[1].lower() in ("randomize", "fixed", "increment", "decrement")
@@ -3038,6 +3152,8 @@ class PreviewAnyNode:
             out["CLIP"] = list(dict.fromkeys(clip))
         if vae:
             out["VAE"] = list(dict.fromkeys(vae))
+        if upscale:
+            out["Upscale model"] = list(dict.fromkeys(upscale))
         if prompts:
             out["Prompt"] = list(dict.fromkeys(prompts))
         if sampler:

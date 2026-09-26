@@ -1,14 +1,14 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。唯一交接入口：改动前先看 §5「避坑」，下一步看 §7「待办」。
-> **当前 V1.2.8**：预览任意（PreviewAny）批次图片——整批缩略图条（非全屏在弹窗底部、全屏也保留）+ 全屏左右悬停箭头/键盘翻页，存档逐张落盘（单卡上限 64 帧）；各弹窗全屏键统一移到 ✕ 左侧；英文 README 严格对齐中文并升版本号。V1.2.7：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
+> **当前 V1.2.9**：生成信息兜底修（放大/检测/控制权重不再混进 Model，放大模型单列 Upscale model；EzFlex-ModelsCombo 的 config JSON 解出 model/clip/vae/lora；config JSON 不再污染 Prompt）+ NSG 分组发现以节点自己的图为基准 + 标题正则不中退回字面匹配 + 复制/载入后同步过滤器重扫行（修复制后偶发匹配不到分组）。V1.2.8：预览任意（PreviewAny）批次图片——整批缩略图条（非全屏在弹窗底部、全屏也保留）+ 全屏左右悬停箭头/键盘翻页，存档逐张落盘（单卡上限 64 帧）；各弹窗全屏键统一移到 ✕ 左侧；NSG 分组发现改为以节点自己的图为基准（不用 getCurrentGraph）+ 标题正则不中退回字面匹配 + 复制/载入后同步过滤器并重扫行（修「复制后偶发匹配不到分组」）；生成信息兜底修：放大/检测等权重不再顶替底模（放大模型单列 `Upscale model`），`EzFlex-ModelsCombo` config 里的 model/clip/vae/lora 能解出，config JSON 不再污染 `Prompt`；英文 README 严格对齐中文并升版本号。V1.2.7：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
 > **⚠️ 强制要求：经典模式与 Nodes 2.0（Vue）必须分开写作用域**（`.ezfx-is-vue` / `:not(.ezfx-is-vue)`）。禁止写对两种模式同时生效的行为规则；改一种前先确认另一种不受影响，两种分别回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.2.8"`（`__init__.py` / `pyproject.toml` / README） |
+| 版本 | `__version__ = "1.2.9"`（`__init__.py` / `pyproject.toml` / README） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 生效方式 | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS → **Ctrl+F5 强刷** |
@@ -30,7 +30,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - 输入隐藏 `config`；输出 `MODEL/CLIP/VAE 1..N`（类 `RETURN_TYPES` 运行期/前端同步，编辑时类型化）。`MAX_PORTS_PER_TYPE = 32`。
 - `parse_config` 校验 loader 类型/extra；`load_checkpoint/load_unet/load_clip/load_vae` 与内置节点同款，device/weight_dtype/clip_type 都有白名单校验。
 - **LoRA 串联**：按 id 顺序依次 `load_lora_for_models`，`strength_model/strength_clip` 取自 `extra`；**目标 `targetId` 为空则该 LoRA 被跳过**（新增 LoRA 会自动指向第一个主加载器；把已有行切成 lora 后不会自动补，需手选目标）。
-- **触发词串输出**：配置里只要有 lora 行就多一个固定 STRING 口 `trigger_words`（**固定排最后，不动前面 model/clip/vae 的顺序与复用**）；值 = 按 LoRA 顺序把各自 LoraManager `<模型>.metadata.json` 的触发词用 ", " 拼起来（没触发词 / 没 file / 没 metadata 的跳过）。**触发词取 `_lora_trained_words()`：顶层 `trainedWords` 为空就退回 `civitai.trainedWords`（实机 LoraManager 顶层就是空的，C 站的词在 civitai 下面）**，再退回 `activation_text`。没接 lora 就不加这个口。前后端同步点：`_mc_output_types` 与前端 `updatePorts` 都按同一条件追加。
+- **触发词串输出**：始终有一个固定 STRING 口 `trigger_words`（**固定排最后，不动前面 model/clip/vae 的顺序与复用**；没有 lora 时输出空串）；值 = 按 LoRA 顺序把各自 LoraManager `<模型>.metadata.json` 的触发词用 ", " 拼起来（没触发词 / 没 file / 没 metadata 的跳过）。**触发词取 `_lora_trained_words()`：顶层 `trainedWords` 为空就退回 `civitai.trainedWords`（实机 LoraManager 顶层就是空的，C 站的词在 civitai 下面）**，再退回 `activation_text`。**这个口常驻**：切预设不会摘掉它，下游不断连。前后端同步点：`_mc_output_types` 与前端 `updatePorts` 都无条件追加。
 - 「⧉ 浏览」弹窗：读 LoraManager 的 `<模型名>.metadata.json` + 同目录预览图（`/models_combo/lora_meta`、`/lora_meta_detail`、`/preview`）。标签行最右多一个**「已加载」**页：它不是另一种视图，而是**一个筛选**（`_loadedFileSet()` 按文件名匹配节点里已选的模型文件），筛出来的就是**普通模型卡**（和 LoRA 页同一套卡片）。注意它只覆盖 LoraManager 有索引的 checkpoint / unet / lora（clip/vae 不在 LoraManager 索引里，故不出现）。
 - 实例 API：`node._ezComboAPI`。
 
@@ -44,6 +44,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 
 ### NodeSwitchGroup / NodeSwitchMaster / MainControl（纯前端）
 - NSG config：`{filters:{mode,match,showAllGraphs,sort,presetCollapsed,matchCollapsed}, states, presets, current}`；分组发现定时器**必须按节点放**（`node._ezScanTimer`）；分组状态键 `groupKey = title + '##' + idx`；分组预设**存节点 config**（删节点即丢）。
+- **（V1.2.9）分组发现基准 = NSG 自己的图**（`allGraphGroups(node.graph)`）：复制节点 / 在子图里操作时「当前视图」会变，用 `getCurrentGraph()` 会偶发扫到别的图 → 匹配不到分组。标题匹配：正则不命中（标题带 `( ) [ ] + . * ?` 等正则字符）时**退回字面包含**。`onConfigure`（复制/载入）后必须 `_ezSyncFilters()` 同步过滤器 DOM + `refreshUI` 重扫行（`setupNode` 可能先于 configure 跑，否则面板停在默认 match）。
 - NSM：行 = 画布上的 NSG 实例，总预设 = `{nodeId: 分组预设名}`，存 `/nodeswitch_master/presets`。
 - MainControl：被控 4 类（Combo/FreeLatent/NSM/ParamPreset）；总预设存 `/main_control/presets`；「加载全部」9 类，排布按视觉外框（`visualBox() + NODE_TITLE_HEIGHT`，排完 350ms 再对齐）。
 - 主题：`web/ezflex_theme.js` 定义 16 套配色（浅色=原配色；藕荷/青苔取 Radix Colors 1..12 色阶；其余由「背景/卡片/控件底/描边/主文字/次文字/主色/浅主色」推全五级表面，配置在 ezflex_theme.js 的 USER 表里），每套给全五级表面 + 三级描边 + 四级文字（对比度兜底）+ `color-scheme`；变量挂根元素，面板 CSS 只写变量，切 `data-ez-theme` 即全画布即时生效（存 localStorage）。另有 `:where()` 原生控件兜底层，补没写颜色的 input/select 文字色。
@@ -57,7 +58,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - 输入 `input_1..16`(ANY)，输出透传原值（`RETURN_TYPES="*"`，可插在工作流中间），`OUTPUT_NODE=True`。
 - `_infer_type` 按 `type(value).__module__ + __name__` 判定（不能靠 hasattr 探测 patcher）；覆盖 IMAGE/MASK/LATENT/AUDIO/VIDEO/CONDITIONING/LIST/DICT/标量/File3D/MESH/SPLAT/VOXEL/MODEL/CLIP/VAE…；**已知类型都不许落到裸 repr**（`preview_types_test.py` 98 条钉住）。
 - **文件直通（勿回退）**：来自文件的视频/音频不重新编码（`_video_file_source` / `_audio_file_src`）；内存型 `VideoFromComponents` 用 `get_stream_source()` 落 `ezpv_vid_<sha1>.mp4`（保留音轨/帧率/时长）。
-- 生成信息链：PIL 内嵌文本 → 同名 sidecar → 容器内嵌（ffprobe，回落 mutagen）。
+- **（V1.2.9）**生成信息链：PIL 内嵌文本 → 同名 sidecar → 容器内嵌（ffprobe，回落 mutagen）；内存张量（生成图/视频）再退回 `_workflow_gen_meta` 扫工作流。**兜底分类（V1.2.8 修）**：`_UPSCALE_HINTS`/`_AUX_HINTS` 把 `UpscaleModelLoader`、检测/控制/换脸权重从 `Model` 里剔出（放大模型单列 `Upscale model`）；`EzFlex-ModelsCombo` 的 config JSON 单独解析出 model/clip/vae/lora；`Prompt` 只取非模型、非 JSON config 的文本 widget。**穿透连线（V1.2.9）**：CLIPTextEncode 的 text 若是连线，按 `workflow.links` 上溯取正文 —— `EzFlex-PromptHelper` 按 origin_slot 取（slot 0 = 合并卡片，slot N = 第 N 张卡），其它文本节点取明文 widget、没有就继续上溯；正/负两段提示词都会列进 `Prompt`。
 - **存档**：用 `entry["image_src"]` 原图，PNG 写 `PngInfo(workflow/prompt)`；**只允许白名单后缀**（`_SAVE_ALLOWED_EXTS`），**绝对 savePath 只允许 output 或本机「选择文件夹」登记过的目录**（`_pv_save_roots`），否则回落 output。
 - **批次图片（V1.2.8）**：IMAGE 是 `[B,H,W,C]`，整批都能看/存。卡片角标显示张数（`entry.images`/只读的 `entry.batch_kind`），点开 = MediaLoader 式弹窗：主图 + 底部缩略图条 + 左右翻页（键盘 ←/→；全屏同样保留底部缩略图条，另加左右悬停箭头；各弹窗全屏键统一挨在 ✕ 左边）；存档逐张落盘 `name_<ms>_NN`（`entry.saved_paths`；单张命名不变），仍用原图 + workflow/prompt 元数据。单卡最多导出 `_PREVIEW_MAX_BATCH = 64` 帧，超出的帧数记在 `entry.batch_total`（不落临时文件）。**「批量出图」与「视频抽帧」张量本身区分不了**：只按工作流上游节点类名（含 video/frame/sequence/gif/webm/mp4/mov → `frames`，否则 `images`）给角标文案；HTTP API 直连没有工作流时一律按 `images`。
 
@@ -140,7 +141,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - [ ] 综合媒体端口目前只计数/引用，不参与合并文本。
 - [ ] 图生图/视频生视频、图像缩放等后续节点。
 - [ ] 提示词规范缺官方条目（素材数量/时长上限、字幕/水印约束、Kling 长度上限、负面提示词处理等）。
-- [ ] 仓库待 `git push`（V1.2.8）。
+- [ ] 仓库待 `git push`（V1.2.9）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是 `None` 语义（README 已说明）。
 

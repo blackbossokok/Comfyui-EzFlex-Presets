@@ -291,6 +291,7 @@ export const EZ_ZH = {
   "Device": "设备",
   "Type": "类型",
   "Model": "模型",
+  "Upscale model": "放大模型",
   "No preview image": "无预览图",
   "Preview": "预览",
   "+ Add loader…": "+ 添加加载器…",

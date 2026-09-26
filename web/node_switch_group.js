@@ -111,10 +111,11 @@ function presetOptions(node) {
 function discoverGroups(node) {
   const st = stateFor(node);
   const f = st.filters;
-  let groups = allGraphGroups();
+  // 以「这个 NSG 自己所在的图」为准：复制节点 / 在子图里操作时当前视图会变，不能用 getCurrentGraph 当基准。
+  const own = (node && node.graph) || (app.canvas && app.canvas.getCurrentGraph && app.canvas.getCurrentGraph()) || app.graph;
+  let groups = allGraphGroups(own);
   if (!f.showAllGraphs) {
-    const cur = (app.canvas && app.canvas.getCurrentGraph && app.canvas.getCurrentGraph()) || app.graph;
-    groups = groups.filter((g) => (g.graph || app.graph) === cur);
+    groups = groups.filter((g) => (g.graph || own) === own);
   }
   const val = String(f.match || '').trim();
   if (val) {
@@ -127,7 +128,10 @@ function discoverGroups(node) {
     } else {
       let re = null;
       try { re = new RegExp(val, 'i'); } catch (_) { re = null; }   // 非法正则不能把 discoverGroups 整条链带崩
-      groups = groups.filter((g) => { if (!re) return false; try { return re.exec(g.title || ''); } catch (_) { return false; } });
+      const hitRe = (g) => { if (!re) return false; try { return re.test(g.title || ''); } catch (_) { return false; } };
+      const byRe = groups.filter(hitRe);
+      // 用户常常直接输入分组标题原文；标题里带 ( ) [ ] + . * ? 等正则字符时正则命中不到，退回「字面包含」匹配
+      groups = byRe.length ? byRe : groups.filter((g) => String(g.title || '').toLowerCase().indexOf(val.toLowerCase()) >= 0);
     }
   }
   groups = groups.slice().sort((a, b) => {
@@ -406,6 +410,8 @@ function buildFilters(node, onChange) {
   modeSel.addEventListener('change', () => { st.filters.mode = modeSel.value; syncToConfig(node); buildMode(); onChange(); });
   buildMode();
   wrap.appendChild(modeSel); wrap.appendChild(rest); wrap.appendChild(sortSel);
+  // 载入/复制（onConfigure）后把过滤器 DOM 拉回 config 的真实值（行列表由 refreshUI 重扫）
+  node._ezSyncFilters = () => { modeSel.value = st.filters.mode; sortSel.value = st.filters.sort || 'position'; buildMode(); };
   return wrap;
 }
 
@@ -531,7 +537,14 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__ezGroupHooked) return; nt.__ezGroupHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () {
+    const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
+    loadFromConfig(this);
+    // 复制/载入：setupNode 可能先于 configure 跑（面板那时用的是默认 match），配置到位后要同步过滤器 DOM + 重扫行
+    try { if (this._ezSyncFilters) this._ezSyncFilters(); } catch (_) {}
+    try { refreshUI(this); } catch (_) {}
+    return r;
+  };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezScanIv); clearTimeout(this._ezScanTimer); try { if (this._ezTitleRaf) cancelAnimationFrame(this._ezTitleRaf); this._ezTitleRaf = 0; } catch (_) {} unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezGroupSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }

@@ -356,7 +356,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       if (['checkpoint', 'clip'].indexOf(l.type) >= 0) want.push(['CLIP', b + '_clip']);
       if (['checkpoint', 'vae'].indexOf(l.type) >= 0) want.push(['VAE', b + '_vae']);
     });
-    if (st.loaders.some((l) => l && l.type === 'lora')) want.push(['STRING', 'trigger_words']);   // 触发词串固定排最后，不动前面的端口顺序
+    want.push(['STRING', 'trigger_words']);   // 触发词串端口常驻（无 LoRA = 空串），固定排最后：切预设不断连
     let changed = false;
     // 快照旧输出：优先按「名称」复用（拖拽排序时连接跟随同名 socket）。
     // 名称变了但「类型+位置」没变（如 anima→krea2 都是 checkpoint）时按位置+类型复用该 socket（保留连接，只改名）。

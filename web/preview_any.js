@@ -68,9 +68,10 @@ const CSS = `
 .ezpv-media.active{display:block;}
 .ezpv-media-body{display:flex;flex-direction:column;gap:8px;justify-content:center;align-items:center;}
 .ezpv-media.ezpv-fs .ezpv-media-body{height:100%;justify-content:center;}
-.ezpv-media img{max-width:min(70vw,720px);max-height:70vh;border-radius:8px;display:block;}
-.ezpv-media.ezpv-fs img{width:auto;height:auto;max-width:100vw;max-height:100vh;object-fit:contain;cursor:grab;border-radius:0;transform-origin:center;}
-.ezpv-media.ezpv-fs.has-strip img{max-height:calc(100vh - 130px);}   /* 全屏也保留底部缩略图条：图片留出位置，不被盖住 */
+/* 只作用于「主图」（body 直接子元素）；缩略图条里的 img 在 .ezpv-strip-item 下，不能被全屏规则连带放大 */
+.ezpv-media-body > img{max-width:min(70vw,720px);max-height:70vh;border-radius:8px;display:block;}
+.ezpv-media.ezpv-fs .ezpv-media-body > img{width:auto;height:auto;max-width:100vw;max-height:100vh;object-fit:contain;cursor:grab;border-radius:0;transform-origin:center;}
+.ezpv-media.ezpv-fs.has-strip .ezpv-media-body > img{max-height:calc(100vh - 130px);}   /* 全屏也保留底部缩略图条：主图留出位置，不被盖住 */
 .ezpv-media.ezpv-fs video{width:100vw;height:100vh;object-fit:cover;max-width:none!important;max-height:none!important;}
 .ezpv-media-meta{font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;}
 .ezpv-media .cap{font-size:12px;color:var(--ez-fg);padding:0 4px;}
@@ -286,6 +287,7 @@ function kvModalEl() {
   return _kv;
 }
 const _META_HINTS = {
+  'Upscale model': 'Upscale / super-resolution model applied after generation (not the base model)',
   'modelspec.architecture': 'Architecture: determines loader/plugin compatibility (e.g. stable_diffusion_xl / diffusion_transformer)',
   'modelspec.author': 'Author / source',
   'modelspec.title': 'Model display name',
