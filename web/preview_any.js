@@ -70,9 +70,22 @@ const CSS = `
 .ezpv-media.ezpv-fs .ezpv-media-body{height:100%;justify-content:center;}
 .ezpv-media img{max-width:min(70vw,720px);max-height:70vh;border-radius:8px;display:block;}
 .ezpv-media.ezpv-fs img{width:auto;height:auto;max-width:100vw;max-height:100vh;object-fit:contain;cursor:grab;border-radius:0;transform-origin:center;}
+.ezpv-media.ezpv-fs.has-strip img{max-height:calc(100vh - 130px);}   /* 全屏也保留底部缩略图条：图片留出位置，不被盖住 */
 .ezpv-media.ezpv-fs video{width:100vw;height:100vh;object-fit:cover;max-width:none!important;max-height:none!important;}
 .ezpv-media-meta{font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;}
 .ezpv-media .cap{font-size:12px;color:var(--ez-fg);padding:0 4px;}
+.ezpv-strip{display:none;align-items:center;gap:6px;width:100%;}
+.ezpv-media.has-strip .ezpv-strip{display:flex;}   /* 全屏不隐藏：多图时底部缩略图条一直在 */
+.ezpv-strip-btn{background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:7px;width:26px;height:26px;flex:0 0 auto;padding:0;cursor:pointer;color:var(--ez-fg-2);font-size:14px;line-height:1;}
+.ezpv-strip-list{flex:1 1 auto;display:flex;gap:6px;overflow-x:auto;padding:2px 0;}
+.ezpv-strip-item{position:relative;width:56px;height:56px;flex:0 0 auto;border-radius:6px;overflow:hidden;cursor:pointer;border:2px solid transparent;background:var(--ez-surface-3);display:flex;align-items:center;justify-content:center;}
+.ezpv-strip-item.on{border-color:var(--ez-strong);}
+.ezpv-strip-item img{width:100%;height:100%;object-fit:contain;display:block;}   /* 整图缩放（不裁切） */
+.ezpv-strip-count{font-size:11px;color:var(--ez-fg-3);white-space:nowrap;flex:0 0 auto;}
+.ezpv-nav{position:absolute;top:50%;transform:translateY(-50%);z-index:3;width:40px;height:40px;border:none;border-radius:50%;background:var(--ez-surface);box-shadow:0 2px 12px rgba(0,0,0,.18);color:var(--ez-fg-2);font-size:22px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s;}
+.ezpv-media.has-strip:hover .ezpv-nav{opacity:1;pointer-events:auto;}   /* 悬停显形的左右箭头：全屏同样可用（底部缩略图条也在） */
+.ezpv-nav.l{left:2px;}
+.ezpv-nav.r{right:2px;}
 `;
 
 let _styleInjected = false;
@@ -82,14 +95,21 @@ function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e
 const fetchApi = (p, o) => (api && typeof api.fetchApi === 'function') ? api.fetchApi(p, o) : fetch(p, o);
 // 关闭后恢复窗口级 keydown 监听回退
 let _escStack = [];
-// 为弹窗加「全屏」按钮：全屏时仅 ESC / 右上角 X 退出；X 平时隐藏、靠近显示
-function attachFullscreen(host, closeFn, onExit) {
+// 为弹窗加「全屏」按钮：紧挨在 ✕ 左边。文字型弹窗插进标题栏，媒体弹窗（✕ 是绝对定位）贴其左侧。
+function attachFullscreen(host, closeFn, onExit, closeBtn) {
   let fs = false;
   const doExit = () => { if (onExit) { try { onExit(); } catch (_) {} } };
   const btn = document.createElement('button');
   btn.textContent = '⛶'; btn.title = ezT('Fullscreen');
-  btn.style.cssText = 'position:absolute;bottom:6px;right:6px;z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;color:var(--ez-fg-3);cursor:pointer;font-size:12px;';
-  host.appendChild(btn);
+  const abs = !!(closeBtn && closeBtn.parentNode && closeBtn.style && closeBtn.style.position === 'absolute');
+  if (closeBtn && closeBtn.parentNode && !abs) {
+    // margin-left:auto 把「全屏 + ✕」这一对顶到标题栏右侧，标题留在左边
+    btn.style.cssText = 'margin-left:auto;margin-right:6px;height:24px;padding:0 10px;display:inline-flex;align-items:center;justify-content:center;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;color:var(--ez-fg-3);cursor:pointer;font-size:12px;';
+    closeBtn.parentNode.insertBefore(btn, closeBtn);
+  } else {
+    btn.style.cssText = 'position:absolute;top:8px;right:' + (abs ? '44px' : '6px') + ';z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;color:var(--ez-fg-3);cursor:pointer;font-size:12px;';
+    host.appendChild(btn);
+  }
   btn.addEventListener('click', (e) => { e.stopPropagation(); fs = !fs; host.classList.toggle('ezpv-fs', fs); if (!fs) doExit(); });
   const key = (e) => {
     if (e.key === 'Escape') {
@@ -238,7 +258,7 @@ function modalEl() {
   _modal.appendChild(box); document.body.appendChild(_modal);
   _modal._ta = ta; _modal._title = title;
   close.addEventListener('click', () => { _modal.style.display = 'none'; });
-  attachFullscreen(box, () => { _modal.style.display = 'none'; });
+  attachFullscreen(box, () => { _modal.style.display = 'none'; }, close);
   bindOutsideClose(box, () => { _modal.style.display = 'none'; });
   return _modal;
 }
@@ -261,7 +281,7 @@ function kvModalEl() {
   _kv.appendChild(box); document.body.appendChild(_kv);
   _kv._title = title; _kv._list = list;
   close.addEventListener('click', () => { _kv.style.display = 'none'; });
-  attachFullscreen(box, () => { _kv.style.display = 'none'; });
+  attachFullscreen(box, () => { _kv.style.display = 'none'; }, close);
   bindOutsideClose(box, () => { _kv.style.display = 'none'; });
   return _kv;
 }
@@ -394,11 +414,24 @@ function mediaEl() {
   const audio = document.createElement('audio'); audio.controls = true; audio.style.display = 'none'; audio.style.width = '100%';
   const meta = document.createElement('pre'); meta.className = 'ezpv-media-meta'; meta.style.display = 'none';
   const cap = el('div', 'cap');
-  body.appendChild(video); body.appendChild(img); body.appendChild(audio); body.appendChild(meta); body.appendChild(cap);
+  const strip = el('div', 'ezpv-strip');
+  const stripList = el('div', 'ezpv-strip-list');
+  const stripCount = el('span', 'ezpv-strip-count');
+  const stripPrev = el('button', 'ezpv-strip-btn'); stripPrev.textContent = '‹'; stripPrev.title = ezT('Previous');
+  const stripNext = el('button', 'ezpv-strip-btn'); stripNext.textContent = '›'; stripNext.title = ezT('Next');
+  stripPrev.addEventListener('click', (e) => { e.stopPropagation(); _media._imgPrev(); });
+  stripNext.addEventListener('click', (e) => { e.stopPropagation(); _media._imgNext(); });
+  strip.appendChild(stripPrev); strip.appendChild(stripList); strip.appendChild(stripNext); strip.appendChild(stripCount);
+  body.appendChild(video); body.appendChild(img); body.appendChild(audio); body.appendChild(meta); body.appendChild(cap); body.appendChild(strip);
   const closeBtn = document.createElement('button'); closeBtn.textContent = '✕'; closeBtn.title = ezT('Close');
   closeBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:2px 9px;font-size:12px;cursor:pointer;font-family:inherit;z-index:2;';
+  const navL = el('button', 'ezpv-nav l'); navL.textContent = '‹'; navL.title = ezT('Previous');
+  const navR = el('button', 'ezpv-nav r'); navR.textContent = '›'; navR.title = ezT('Next');
+  navL.addEventListener('click', (e) => { e.stopPropagation(); _media._imgPrev(); });
+  navR.addEventListener('click', (e) => { e.stopPropagation(); _media._imgNext(); });
   _media.appendChild(closeBtn);
-  _media.appendChild(body); _media._img = img; _media._audio = audio; _media._meta = meta; _media._cap = cap; _media._video = video;
+  _media.appendChild(body); _media.appendChild(navL); _media.appendChild(navR);
+  _media._img = img; _media._audio = audio; _media._meta = meta; _media._cap = cap; _media._video = video;
   document.body.appendChild(_media);
   const pauseMedia = () => { try { _media._video.pause(); } catch (_) {} try { _media._audio.pause(); } catch (_) {} };
   let zm = 1, pan = { x: 0, y: 0 }, panDrag = { on: false, sx: 0, sy: 0, pid: null };
@@ -424,9 +457,43 @@ function mediaEl() {
   _media.addEventListener('pointercancel', () => { panDrag.on = false; });
   const resetZoom = () => { zm = 1; pan.x = 0; pan.y = 0; applyZoom(); };
   _media._resetZoom = resetZoom;
+  // 批次图片：主图 + 底部缩略图条 + 左右翻页（视频/音频/单图不显示）。
+  let _imgs = null, _idx = 0, _total = 0;
+  const showImage = () => {
+    if (!_imgs || !_imgs.length) return;
+    _idx = ((_idx % _imgs.length) + _imgs.length) % _imgs.length;
+    _media._img.src = _imgs[_idx];
+    stripCount.textContent = (_idx + 1) + ' / ' + _imgs.length + (_total > _imgs.length ? ' (' + _total + ')' : '');
+    Array.prototype.forEach.call(stripList.children, (x, i) => x.classList.toggle('on', i === _idx));
+    resetZoom();
+  };
+  _media._imgPrev = () => { if (_imgs && _imgs.length > 1) { _idx -= 1; showImage(); } };
+  _media._imgNext = () => { if (_imgs && _imgs.length > 1) { _idx += 1; showImage(); } };
+  _media._setImages = (list, index, total) => {
+    _imgs = (list && list.length) ? list.slice() : null;
+    _idx = index || 0;
+    _total = total || 0;
+    stripList.innerHTML = '';
+    if (!_imgs || _imgs.length < 2) { _media.classList.remove('has-strip'); stripCount.textContent = ''; return; }
+    _media.classList.add('has-strip');
+    _imgs.forEach((u, i) => {
+      const th = el('div', 'ezpv-strip-item');
+      const im = el('img'); im.src = u; im.loading = 'lazy'; im.alt = String(i + 1); th.appendChild(im);
+      th.addEventListener('click', (ev) => { ev.stopPropagation(); _idx = i; showImage(); });
+      stripList.appendChild(th);
+    });
+    showImage();
+  };
+  window.addEventListener('keydown', (e) => {
+    if (!_media.classList.contains('active') || !_imgs || _imgs.length < 2) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'VIDEO' || ae.tagName === 'AUDIO')) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); _media._imgPrev(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); _media._imgNext(); }
+  });
   const closeMedia = () => { pauseMedia(); resetZoom(); _media.classList.remove('active'); };
   closeBtn.addEventListener('click', closeMedia);
-  attachFullscreen(_media, closeMedia, pauseMedia);
+  attachFullscreen(_media, closeMedia, pauseMedia, closeBtn);
   bindOutsideClose(_media, () => { if (_media.classList.contains('active')) closeMedia(); });
   return _media;
 }
@@ -435,8 +502,11 @@ function openMediaPreview(payload) {
   m._img.style.display = 'none'; m._audio.style.display = 'none'; m._meta.style.display = 'none'; m._video.style.display = 'none';
   try { m._audio.pause(); } catch (_) {}
   try { m._video.pause(); } catch (_) {}
+  const imgs = (payload.images && payload.images.length) ? payload.images : null;
+  m._setImages(imgs, payload.index || 0, payload.batch_total || 0);
   if (payload.video || payload.video_src) { m._video.src = payload.video || payload.video_src; if (payload.poster) m._video.poster = payload.poster; m._video.style.display = 'block'; } // 不自动播放
-  if (payload.image_src) { m._img.src = payload.image_src; m._img.style.display = 'block'; }
+  if (imgs) { m._img.style.display = 'block'; }   // 主图已由 _setImages 填好
+  else if (payload.image_src) { m._img.src = payload.image_src; m._img.style.display = 'block'; }
   else if (payload.image) { m._img.src = payload.image; m._img.style.display = 'block'; }
   if (payload.audio_src) { m._audio.src = payload.audio_src; m._audio.style.display = 'block'; }
   else if (payload.audio) { m._audio.src = payload.audio; m._audio.style.display = 'block'; } // 不自动播放，交给用户点 play
@@ -473,8 +543,8 @@ function open3DViewer(url, title) {
   const wrapEl = document.createElement('div'); wrapEl.style.cssText = 'flex:1 1 auto;min-width:0;position:relative;border-radius:14px;overflow:hidden;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);';
   const canvas = document.createElement('canvas'); canvas.tabIndex = 0; canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;outline:none;touch-action:none;cursor:grab;';
   wrapEl.appendChild(canvas);
-  const fsBtn = document.createElement('button'); fsBtn.textContent = '⛶'; fsBtn.title = ezT('Fullscreen / Exit fullscreen'); fsBtn.style.cssText = 'position:absolute;right:10px;bottom:10px;z-index:8;width:34px;height:34px;border:none;border-radius:10px;background:var(--ez-surface);color:var(--ez-fg-3);font-size:16px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.15);';
-  wrapEl.appendChild(fsBtn);
+  const fsBtn = document.createElement('button'); fsBtn.textContent = '⛶'; fsBtn.title = ezT('Fullscreen / Exit fullscreen'); fsBtn.style.cssText = 'margin-left:auto;margin-right:6px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;background:var(--ez-surface-3);border:1px solid var(--ez-border);border-radius:10px;color:var(--ez-fg-3);font-size:14px;cursor:pointer;';
+  hd.insertBefore(fsBtn, close);   // 3D 查看器全屏键也挨着 ✕ 左边
 
   // 右侧控制面板
   const ctrl = document.createElement('div'); ctrl.style.cssText = 'flex:0 0 250px;width:250px;overflow-y:auto;background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;font-size:12px;color:var(--ez-fg-2);';
@@ -893,14 +963,18 @@ function renderPreview(entry) {
     box.style.position = 'relative';
     const img = el('img'); img.src = 'data:image/png;base64,' + entry.preview; img.alt = val;
     box.appendChild(img);
-    if (entry.frames > 1) { const b = el('span', 'ezpv-badge'); b.textContent = entry.frames + ezT(' frames'); box.appendChild(b); }
+    const imgs = entry.images || [];
+    if (imgs.length > 1) {
+      const b = el('span', 'ezpv-badge'); b.textContent = imgs.length + ezT(entry.batch_kind === 'frames' ? ' frames' : ' images');
+      b.style.left = '5px'; b.style.right = 'auto'; box.appendChild(b);
+    }
     if (entry.gen_meta) {
       const g = el('span', 'ezpv-gen'); g.textContent = ezT('Generation info');
       g.style.cssText = 'position:absolute;top:4px;right:4px;z-index:5;background:var(--ez-surface);border:1px solid var(--ez-border);border-radius:7px;padding:1px 7px;font-size:10px;cursor:pointer;color:var(--ez-info-fg);box-shadow:0 1px 3px rgba(0,0,0,.12);';
       g.addEventListener('click', (e) => { e.stopPropagation(); try { openKeyValueModal((entry.caption || '') + ezT(' Generation info'), JSON.parse(entry.gen_meta)); } catch (_) { openTextModal((entry.caption || '') + ezT(' Generation info'), entry.gen_meta); } });
       box.appendChild(g);
     }
-    box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ image: img.src, image_src: entry.image_src, caption: (entry.caption || '') + '  ' + val, meta: entry.meta, frames: entry.frames, type }); });
+    box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ images: imgs, batch_total: entry.batch_total, image: img.src, image_src: entry.image_src, caption: (entry.caption || '') + '  ' + val, meta: entry.meta, frames: entry.frames, type }); });
     return box;
   }
   if (type === 'MODEL_3D' || type === 'FILE_3D' || type === 'MESH') {   // MESH：顶点/面张量已在后端导成临时 OBJ
@@ -1027,7 +1101,7 @@ function formatModalEl() {
   ft.appendChild(save);
   box.appendChild(hd); box.appendChild(fields); box.appendChild(ft);
   _fmtModal.appendChild(box); document.body.appendChild(_fmtModal);
-  attachFullscreen(box, () => { _fmtModal.style.display = 'none'; });
+  attachFullscreen(box, () => { _fmtModal.style.display = 'none'; }, close);
   _fmtModal._selects = selects; _fmtModal._subSelects = subSelects; _fmtModal._subDefs = subDefs; _fmtModal._node = null;
   close.addEventListener('click', () => { _fmtModal.style.display = 'none'; });
   _fmtModal.addEventListener('click', (e) => { if (e.target === _fmtModal) _fmtModal.style.display = 'none'; });
@@ -1088,7 +1162,7 @@ function openDataPreviewModal() {
   const list = document.createElement('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:4px;overflow:auto;';
   rows.forEach(([k, v]) => { const r = document.createElement('div'); r.style.cssText = 'display:flex;gap:8px;font-size:12px;'; const kk = document.createElement('b'); kk.textContent = k; kk.style.cssText = 'flex:0 0 180px;color:var(--ez-fg);'; const vv = document.createElement('span'); vv.textContent = v; vv.style.cssText = 'flex:1 1 auto;color:var(--ez-fg-3);word-break:break-all;'; r.appendChild(kk); r.appendChild(vv); list.appendChild(r); });
   box.appendChild(hd); box.appendChild(list); _dpModal.appendChild(box); document.body.appendChild(_dpModal);
-  attachFullscreen(box, () => { if (_dpModal) { _dpModal.remove(); _dpModal = null; } });
+  attachFullscreen(box, () => { if (_dpModal) { _dpModal.remove(); _dpModal = null; } }, close);
   close.addEventListener('click', () => { _dpModal.remove(); _dpModal = null; });
   _dpModal.addEventListener('click', (e) => { if (e.target === _dpModal) { _dpModal.remove(); _dpModal = null; } });
 }

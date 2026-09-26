@@ -63,7 +63,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.7"
+__version__ = "1.2.8"
 
 WEB_DIRECTORY = "./web"
 
@@ -1327,6 +1327,9 @@ _MEDIA_CARD = "EZFLEX_MEDIA_CARD"
 _PREVIEW_MAX = 16
 _PREVIEW_MAX_VALUE_LEN = 500
 _PREVIEW_MAX_IMG_SIDE = 1600
+_PREVIEW_MAX_BATCH = 64      # 单卡最多导出的批次帧数（视频抽帧可能有几百张，别把临时目录写满）
+# 张量本身区分不了「批量出图」与「视频抽帧」，只有工作流里上游节点的类名能给出线索。
+_PREVIEW_FRAME_HINTS = ("video", "frame", "sequence", "gif", "webm", "mp4", "mov")
 
 
 def _pv_truncate(s, max_len=_PREVIEW_MAX_VALUE_LEN):
@@ -1485,6 +1488,13 @@ class PreviewAnyNode:
                 src = self._export_image_url(value)
                 if src:
                     entry["image_src"] = src
+                count = int(value.shape[0]) if isinstance(value, torch.Tensor) and value.dim() == 4 else 1
+                if count > 1:
+                    # 批次：逐帧导出临时文件（弹窗翻页 + 存档都要用）；batch_kind 只按上游节点类名猜来源。
+                    entry["images"] = [u for u in (self._export_image_url(value[i]) for i in range(min(count, _PREVIEW_MAX_BATCH))) if u]
+                    entry["batch_kind"] = self._image_batch_kind(upstream)
+                    if count > _PREVIEW_MAX_BATCH:
+                        entry["batch_total"] = count
                 val, full = self._image_summary(value)
                 entry["value"] = val
                 if full:
@@ -1832,14 +1842,21 @@ class PreviewAnyNode:
             return None
 
     @staticmethod
+    def _image_batch_kind(upstream):
+        """IMAGE 批次的来源只能从工作流上游节点类名猜：张量本身区分不了批量出图与视频抽帧。"""
+        t = (upstream.get("type") or "").lower() if isinstance(upstream, dict) else ""
+        return "frames" if any(h in t for h in _PREVIEW_FRAME_HINTS) else "images"
+
+    @staticmethod
     def _image_summary(tensor, max_len=_PREVIEW_MAX_VALUE_LEN):
         if isinstance(tensor, torch.Tensor):
             t = tensor
+            batch = int(t.shape[0]) if t.dim() == 4 else 1
             if t.dim() == 4:
                 t = t[0]
             if t.dim() == 3:
                 h, w = t.shape[0], t.shape[1]
-                return f"{w} x {h}", None
+                return (f"{w} x {h} × {batch}" if batch > 1 else f"{w} x {h}"), None
         return _pv_truncate(str(tensor), max_len)
 
     @staticmethod
@@ -3237,6 +3254,118 @@ class PreviewAnyNode:
         s = re.sub(r"[\\/:*?\"<>|]+", "_", str(name)).strip() or "preview"
         return s[:80]
 
+    @staticmethod
+    def _png_meta(extra_pnginfo):
+        """PNG 文本块：workflow / prompt（与内置 Save Image 同款，值序列化成字符串）。"""
+        if not isinstance(extra_pnginfo, dict) or not extra_pnginfo:
+            return None
+        meta = {}
+        for k, v in extra_pnginfo.items():
+            try:
+                meta[str(k)] = json.dumps(v)
+            except Exception:
+                pass
+        return meta or None
+
+    @staticmethod
+    def _src_file_of(url):
+        """entry 里的媒体 URL → 本机文件（/view?type=temp&filename=… 或 /preview_any/fs/…）；找不到返回 None。"""
+        if not isinstance(url, str):
+            return None
+        try:
+            from urllib.parse import urlparse, parse_qs, unquote
+            if url.startswith("/view?"):
+                q = parse_qs(urlparse(url).query)
+                fn = (q.get("filename") or [""])[0]
+                if q.get("type", ["temp"])[0] == "temp" and fn:
+                    cand = os.path.join(folder_paths.get_temp_directory(), os.path.basename(unquote(fn)))
+                    return cand if os.path.isfile(cand) else None
+            elif url.startswith("/preview_any/fs/"):
+                cand = unquote(url[len("/preview_any/fs/"):])
+                return cand if os.path.isfile(cand) else None
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _image_save_bytes(src_file, raw, fmt, quality, meta):
+        """一张图 → (存档 bytes, 扩展名)：优先原图文件，退回复预览 bytes；失败 (None, None)。"""
+        from io import BytesIO
+        from PIL import Image as _Im
+        if fmt == "png":
+            if src_file and not meta:
+                with open(src_file, "rb") as fh:
+                    return fh.read(), ".png"          # 原图直存：零重编码、零损失
+            if src_file:
+                png = _Im.open(src_file)
+                buf = BytesIO()
+                try:
+                    from PIL.PngImagePlugin import PngInfo
+                    info = PngInfo()
+                    for k, v in meta.items():
+                        info.add_text(k, v)
+                    png.save(buf, format="PNG", pnginfo=info)
+                except Exception:
+                    png.save(buf, format="PNG")
+                return buf.getvalue(), ".png"
+            if raw is None:
+                return None, None
+            return raw, ".png"
+        if src_file:
+            img = _Im.open(src_file)
+        elif raw is not None:
+            img = _Im.open(BytesIO(raw))
+        else:
+            return None, None
+        buf = BytesIO()
+        kwargs = {"quality": quality} if fmt in ("jpeg", "webp") else {}
+        if fmt == "jpeg" and img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        img.save(buf, format=fmt.upper(), **kwargs)
+        return buf.getvalue(), "." + fmt
+
+    def _save_target_dir(self, cfg):
+        """存档目录：相对路径落在 output 下；绝对路径只允许 output 或本机登记过的目录。"""
+        rel = cfg.get("savePath", "").strip()
+        base = _ez_real(PreviewAnyNode._output_dir())
+        if os.path.isabs(rel):
+            # 绝对路径只允许 output，或本机「选择文件夹」对话框登记过的目录（服务端状态）
+            dirpath = _ez_inside(rel, _pv_save_roots() + [base])
+        else:
+            dirpath = _ez_inside(os.path.join(base, rel), [base])
+        if not dirpath:
+            print(f"[PreviewAny] save path {rel!r} is outside the allowed save folders; saved under output instead")
+            dirpath = base
+        os.makedirs(dirpath, exist_ok=True)
+        return dirpath
+
+    def _save_image_batch(self, entry, cfg, name, sources, fmt, quality, meta):
+        """批次图片逐张存档：name_<ms>_NN.<ext>；saved_path 指向第一张，saved_paths 给全部。"""
+        try:
+            dirpath = self._save_target_dir(cfg)
+        except Exception:
+            return entry
+        import time
+        stamp = str(int(time.time() * 1000))
+        base = PreviewAnyNode._sanitize_filename(name)
+        written = []
+        for i, url in enumerate(sources):
+            data, ext = PreviewAnyNode._image_save_bytes(PreviewAnyNode._src_file_of(url), None, fmt, quality, meta)
+            if data is None or not ext or ext.lower() not in _SAVE_ALLOWED_EXTS:
+                continue
+            fname = f"{base}_{stamp}_{i + 1:02d}{ext}"
+            try:
+                with open(os.path.join(dirpath, fname), "wb") as fh:
+                    fh.write(data)
+            except Exception:
+                continue
+            written.append(os.path.abspath(os.path.join(dirpath, fname)))
+        if written:
+            entry["saved_path"] = written[0]
+            entry["saved_name"] = os.path.basename(written[0])
+            entry["saved_paths"] = written
+        return entry
+
     def _maybe_save(self, entry, cfg, name, extra_pnginfo=None):
         """存档开启时把卡片内容写到 <output>/<savePath>/，并回填 saved_path。
         图片存档用「原图」（与全屏同一份导出文件），不是预览缩图；PNG 会带上工作流/提示词元数据（对齐内置 Save Image）。"""
@@ -3247,67 +3376,20 @@ class PreviewAnyNode:
         sf = cfg.get("saveFormats") or {}
         if entry.get("preview"):
             try:
-                raw = base64.b64decode(entry["preview"])       # 兜底：预览图（MASK 等没有原图导出时）
                 img_cfg = sf.get("image")
                 fmt = "png"; quality = 95
                 if isinstance(img_cfg, dict):
                     fmt = img_cfg.get("fmt", "png") or "png"
                     try: quality = int(img_cfg.get("quality", 95))
                     except Exception: quality = 95
-                from io import BytesIO
-                from PIL import Image as _Im
+                meta = PreviewAnyNode._png_meta(extra_pnginfo)
+                sources = entry.get("images") or []
+                if len(sources) > 1:
+                    return self._save_image_batch(entry, cfg, name, sources, fmt, quality, meta)   # 批次逐张存档
+                raw = base64.b64decode(entry["preview"])       # 兜底：预览图（MASK 等没有原图导出时）
                 # 优先用原图文件（_export_image_url 导出的全分辨率 PNG，全屏看的就是它）
-                src_file = None
-                try:
-                    u = entry.get("image_src") or ""
-                    if u.startswith("/view?"):
-                        from urllib.parse import urlparse, parse_qs, unquote
-                        q = parse_qs(urlparse(u).query)
-                        fn = (q.get("filename") or [""])[0]
-                        if q.get("type", ["temp"])[0] == "temp" and fn:
-                            cand = os.path.join(folder_paths.get_temp_directory(), os.path.basename(unquote(fn)))
-                            if os.path.isfile(cand):
-                                src_file = cand
-                    elif u.startswith("/preview_any/fs/"):
-                        from urllib.parse import unquote
-                        cand = unquote(u[len("/preview_any/fs/"):])
-                        if os.path.isfile(cand):
-                            src_file = cand
-                except Exception:
-                    src_file = None
-                meta = None
-                if isinstance(extra_pnginfo, dict) and extra_pnginfo:
-                    meta = {}
-                    for k, v in extra_pnginfo.items():
-                        try:
-                            meta[str(k)] = json.dumps(v)
-                        except Exception:
-                            pass
-                if fmt == "png":
-                    if src_file and not meta:
-                        data = open(src_file, "rb").read(); ext = ".png"      # 原图直存：零重编码、零损失
-                    elif src_file:
-                        png = _Im.open(src_file)
-                        buf = BytesIO()
-                        try:
-                            from PIL.PngImagePlugin import PngInfo
-                            info = PngInfo()
-                            for k, v in meta.items():
-                                info.add_text(k, v)
-                            png.save(buf, format="PNG", pnginfo=info)
-                        except Exception:
-                            png.save(buf, format="PNG")
-                        data = buf.getvalue(); ext = ".png"
-                    else:
-                        data = raw; ext = ".png"
-                else:
-                    img = _Im.open(src_file) if src_file else _Im.open(BytesIO(raw))
-                    buf = BytesIO()
-                    kwargs = {"quality": quality} if fmt in ("jpeg", "webp") else {}
-                    if fmt == "jpeg" and img.mode not in ("RGB", "L"):
-                        img = img.convert("RGB")
-                    img.save(buf, format=fmt.upper(), **kwargs)
-                    data = buf.getvalue(); ext = "." + fmt
+                src_file = PreviewAnyNode._src_file_of(entry.get("image_src"))
+                data, ext = PreviewAnyNode._image_save_bytes(src_file, raw, fmt, quality, meta)
             except Exception:
                 data = None
         elif entry.get("audio") or entry.get("audio_src"):
@@ -3390,18 +3472,8 @@ class PreviewAnyNode:
         if not ext or ext.lower() not in _SAVE_ALLOWED_EXTS:
             return entry      # 只写媒体/文本文档后缀；未知格式（.bat/.desktop/.sh 等）不落盘
         try:
-            rel = cfg.get("savePath", "").strip()
-            base = _ez_real(PreviewAnyNode._output_dir())
-            if os.path.isabs(rel):
-                # 绝对路径只允许 output，或本机「选择文件夹」对话框登记过的目录（服务端状态）
-                dirpath = _ez_inside(rel, _pv_save_roots() + [base])
-            else:
-                dirpath = _ez_inside(os.path.join(base, rel), [base])
-            if not dirpath:
-                print(f"[PreviewAny] save path {rel!r} is outside the allowed save folders; saved under output instead")
-                dirpath = base
-            os.makedirs(dirpath, exist_ok=True)
             import time
+            dirpath = self._save_target_dir(cfg)
             fname = PreviewAnyNode._sanitize_filename(name) + "_" + str(int(time.time() * 1000)) + ext
             fpath = os.path.join(dirpath, fname)
             with open(fpath, "wb") as fh:

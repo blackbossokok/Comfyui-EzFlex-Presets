@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets (V1.2.7 stable)
+# Comfyui-EzFlex-Presets (V1.2.8 stable)
 
 [English](README.md) | **中文**
 
@@ -22,6 +22,7 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - **11 nodes in total**
 
 ## Version history:
+- V1.2.8: Preview Any (`EzFlex-PreviewAny`) supports batch image preview; the preview window behavior was improved.
 - V1.2.7: Fixed the preview-image disappearing bug, improved black-label text rendering, updated to align with official node features.
 - V1.2.6: Added the theme system, optimized the FreeLatent canvas, optimized tag previews, normalized data storage, cleaned up some redundant code, and fixed some bugs.
 - V1.2.5: The tag system gained random tags; the default tag library is now bundled (it was missed last time); preview generation gained a cleanup action. ModelsCombo can auto-generate the trigger words of a loaded LoRA (shown live in PromptHelper), and the browser gained a "loaded models" view. Fixed black tag sub-nodes not showing and residue after fast moves. Overall edit supports collapsing individual cards.
@@ -117,7 +118,7 @@ Search for "EzFlex" in the ComfyUI node list and click to use.
 
 | Type | Accepts | Preview | Formats |
 |---|---|---|---|
-| IMAGE | tensor `[B,H,W,C]` | thumbnail + full-screen original | PNG / JPEG / WebP / BMP / TIFF |
+| IMAGE | tensor `[B,H,W,C]` | thumbnail + full-screen original (batch: thumbnail strip in the popup, saved frame by frame) | PNG / JPEG / WebP / BMP / TIFF |
 | MASK | 2D/3D tensor | grayscale PNG | PNG |
 | AUDIO | `{waveform,sample_rate}` or `(waveform,sr)` or a file object | player | WAV / MP3 / FLAC / OGG / M4A / AAC |
 | VIDEO | `VideoFromFile` / `VideoFromComponents` object | first-frame cover + player | MP4 / WebM / MOV / GIF / AVI / MKV |
@@ -137,6 +138,7 @@ Search for "EzFlex" in the ComfyUI node list and click to use.
 | EMPTY | not connected | "(not connected)" | — |
 
 - Preview method: data preview popup / generation info.
+- Image batches: a card exports up to 64 frames (extra frames are counted only); saving writes one file per frame as `name_<timestamp>_NN`. Batches and video frame sequences are indistinguishable from the tensor, so the badge follows the upstream node class name (video/frame/sequence…) and shows images / frames.
 
 ### Prompt Helper (`EzFlex-PromptHelper`):
 
@@ -301,3 +303,4 @@ pip install gguf onnx
 ```
 
 > You can also install all optional dependencies at once with the pyproject extras: `pip install -e .[llama,metadata]`
+

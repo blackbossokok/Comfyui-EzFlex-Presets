@@ -1,18 +1,18 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。唯一交接入口：改动前先看 §5「避坑」，下一步看 §7「待办」。
-> **当前 V1.2.7**：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
+> **当前 V1.2.8**：预览任意（PreviewAny）批次图片——整批缩略图条（非全屏在弹窗底部、全屏也保留）+ 全屏左右悬停箭头/键盘翻页，存档逐张落盘（单卡上限 64 帧）；各弹窗全屏键统一移到 ✕ 左侧；英文 README 严格对齐中文并升版本号。V1.2.7：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
 > **⚠️ 强制要求：经典模式与 Nodes 2.0（Vue）必须分开写作用域**（`.ezfx-is-vue` / `:not(.ezfx-is-vue)`）。禁止写对两种模式同时生效的行为规则；改一种前先确认另一种不受影响，两种分别回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.2.7"`（`__init__.py` / `pyproject.toml` / README） |
+| 版本 | `__version__ = "1.2.8"`（`__init__.py` / `pyproject.toml` / README） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 生效方式 | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS → **Ctrl+F5 强刷** |
-| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-23-theme126`），控制台看 `[PromptHelper] module loaded · build …` |
+| 前端横幅 | 改前端时一并改 `web/prompt_helper.js` 的 `PH_BUILD`（当前 `2026-09-26-previewbatch128`），控制台看 `[PromptHelper] module loaded · build …` |
 | 依赖 | 必装 `mutagen>=1.46.0`；可选 `llama-cpp-python` / `gguf` / `onnx` / 外部 `ffprobe`（`shutil.which` 探测）；其余 torch/numpy/Pillow/safetensors/av 由 ComfyUI 自带 |
 
 ## 1. 节点清单（11 个，category 全 `EzFlex`）
@@ -59,6 +59,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - **文件直通（勿回退）**：来自文件的视频/音频不重新编码（`_video_file_source` / `_audio_file_src`）；内存型 `VideoFromComponents` 用 `get_stream_source()` 落 `ezpv_vid_<sha1>.mp4`（保留音轨/帧率/时长）。
 - 生成信息链：PIL 内嵌文本 → 同名 sidecar → 容器内嵌（ffprobe，回落 mutagen）。
 - **存档**：用 `entry["image_src"]` 原图，PNG 写 `PngInfo(workflow/prompt)`；**只允许白名单后缀**（`_SAVE_ALLOWED_EXTS`），**绝对 savePath 只允许 output 或本机「选择文件夹」登记过的目录**（`_pv_save_roots`），否则回落 output。
+- **批次图片（V1.2.8）**：IMAGE 是 `[B,H,W,C]`，整批都能看/存。卡片角标显示张数（`entry.images`/只读的 `entry.batch_kind`），点开 = MediaLoader 式弹窗：主图 + 底部缩略图条 + 左右翻页（键盘 ←/→；全屏同样保留底部缩略图条，另加左右悬停箭头；各弹窗全屏键统一挨在 ✕ 左边）；存档逐张落盘 `name_<ms>_NN`（`entry.saved_paths`；单张命名不变），仍用原图 + workflow/prompt 元数据。单卡最多导出 `_PREVIEW_MAX_BATCH = 64` 帧，超出的帧数记在 `entry.batch_total`（不落临时文件）。**「批量出图」与「视频抽帧」张量本身区分不了**：只按工作流上游节点类名（含 video/frame/sequence/gif/webm/mp4/mov → `frames`，否则 `images`）给角标文案；HTTP API 直连没有工作流时一律按 `images`。
 
 ### PromptHelper（持续开发中）
 - 输入：`config` + 动态 `media_in_1..16`(ANY) + `card_in_1..N`(STRING)。输出：固定「Merged prompt」+ 每卡一个 STRING；**类 `RETURN_TYPES` 固定 33 个 STRING，运行期不收缩**。
@@ -73,7 +74,7 @@ Add-Node 顺序：`MainControl → ModelsCombo → FreeLatent → NodeSwitchMast
 - **标签提示**：标签面板「标签提示」开关（localStorage `ezflex.tagHint`）→ 四个输入处打字弹候选（英文+中文），见 §10.6。
 - **画师写法**：面板「画师写法」按钮（在「标签提示」后）按库存 `libs[库].artist`（'' / '@' / 'artist:'）→ `tpFmt` 给画师标签（CSV category=1）加前缀，只在插入/已插入框显示，搜索和卡片不变。后端 `_ph_libs_clean` 已放行 `artist`（**要重启 ComfyUI 才持久化**）。
 - **面板布局**：工具栏行 = 标签库下拉（排第一、不写字只悬停提示、变窄时**先压它**）→ 搜索（`flex:0 1 130px`，尽量留着）→ 筛选/排序/+添加标签/标签提示/引用画师；四个小图标单独一行（收起分组栏只收这行）；标题栏只有「全屏 / ✕」。
-- 标签系统语义 / 规则 / 存储：完整口径见 §10（两套空间：库侧 `place/fav/meta`，我的侧 `mine` 副本；伪行 全部/已收藏/我的标签；固定真节点「未分类」；**临时分类已删除**）。当前 PH_BUILD = 2026-09-14-cards136。
+- 标签系统语义 / 规则 / 存储：完整口径见 §10（两套空间：库侧 `place/fav/meta`，我的侧 `mine` 副本；伪行 全部/已收藏/我的标签；固定真节点「未分类」；**临时分类已删除**）。当前 PH_BUILD = 2026-09-26-previewbatch128。
 - **总体编辑单卡折叠 / 标签批量移除预览图**：小标题行标题框后面加一颗 chevron（`.eph-all-fold`）单张收正文，状态按卡片 id 记在 `_allClosed`（重建块还原、删卡即清）；工具栏那颗仍是全局收起**小标题行**，两者靠 `.eph-all:not(.collapsed)` 隔开。标签批量栏加「移除预览图」（`tagRemoveSelPreviews`，按名字去重删记录 `preview`，二次确认）。生成预览图是**覆盖**（`t.preview = …`，非追加）；**删除标签时**预览 base64 随 `tpDropPreview` 一起清掉（清完没别的含义的空记录整个回收），其余操作不自动清，只落在 §10.9 的 `ezflex_prompt_tags.json`。
 - **随机 tag**：工具栏「排序 | 随机 | ＋新增标签」。弹窗每行 = [分类按钮（点开 = 与「移动至」同一套 `tpCatPickMenu` 右侧层叠菜单，树根 CSV 分类 / 细分大类）+ 数量（居中、无上下箭头）+ 开关 + 减号]，右上「恢复默认随机组 / ＋新增随机分类」，右下「保存随机设置 / 生成随机tag」。弹窗里改的是**草稿**，点「保存随机设置」或「生成随机tag」才写 localStorage `ezflex.randGroups`（键 `{cat,n,on}`；关闭不保存）。默认六组 = 画师(`c1`)/角色(`c4`)/人物/服饰/表情动作/场景。生成按组抽样；标签面板「生成随机tag」先清掉已插入的标签再生成（不再累加）。右键入口三处：卡片菜单（在「编辑标签」和「生成预览」之间）/ 卡片区空白 / 已插入芯片面板空白。卡片弹窗工具栏在**「合」前面**加了「自动随机tag」（绿 = 运行期每次排队按当前设置重写本卡内容、灰 = 不重写；按卡片记 `autoRand`）和「随机tag」（单点：清空本卡再生成一次）——两者都**先清空再生成**。运行期随机在 `api.queuePrompt` 包装里做（`phRandPatchPrompt`）：**既改本次提交的 prompt（执行用这一份，不动磁盘上的工作流），也写回画布上的卡片**（`card.content` 覆盖 + `syncToConfig` + `refreshUI`，打开着的卡片弹窗同步换掉），所以执行完能看到随机结果、也能接着编辑；抽不到 tag 时**不清空卡片**并在控制台 warn（提示检查随机组 / 标签库）。HTTP API 直连不经前端则保持原内容。
 - **实时接收卡**：卡片右键「实时接收文本卡（可编辑）」= 卡片 `liveIn`。接了 `card_in_i` 时**不变灰、正文可编辑**（其他卡照旧"覆盖 + 置灰"）；运行期**以卡片正文为准**（正文空才用外部输入兜底），并把收到的原文用 `ui.recv = [{id,text}]` 回传：前端在源变了时刷新卡片、源不变时**保留你在卡片里的临时编辑**（例如临时加个提升触发概率的词，不动 LoRA 本身的触发词）。**运行期三个自动优化一律不作用到实时卡**：只输出它的默认正文，不单独优化、不用优化槽，也不进整体优化的输入（整体优化结果里再把它的原文原样拼回去）。前端还会在 **ModelsCombo 配置变化 / 连线变化 / 载入**时直接按上游配置拉触发词（`phPullLiveCards`，metadata 按 file 缓存），**不用等运行**就能刷新。
@@ -139,7 +140,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - [ ] 综合媒体端口目前只计数/引用，不参与合并文本。
 - [ ] 图生图/视频生视频、图像缩放等后续节点。
 - [ ] 提示词规范缺官方条目（素材数量/时长上限、字幕/水印约束、Kling 长度上限、负面提示词处理等）。
-- [ ] 仓库待 `git push`（V1.2.7）。
+- [ ] 仓库待 `git push`（V1.2.8）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是 `None` 语义（README 已说明）。
 

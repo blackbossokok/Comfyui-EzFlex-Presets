@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.2.7 稳定版）
+# Comfyui-EzFlex-Presets（V1.2.8 稳定版）
 
 [English](README.md) | **中文**
 
@@ -22,6 +22,7 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - 共 **11 个节点**
 
 ## 版本更新内容：
+- V1.2.8:预览任意previewany节点支持批量图片预览，优化预览窗口表现。
 - V1.2.7:修复预览图消失bug，优化黑框文字表现，更新对齐官方节点功能。
 - V1.2.6:新增主题系统，优化FreeLatent画布，优化标签预览功能，规范数据保存，清理部分冗余代码，修复部分bug。
 - V1.2.5:标签系统新增随机tag功能，标签默认库加入（上次忘传了），生成预览图增加清理功能。ModelsCombo支持加载lora自动生成触发词功能(promptHelper内可实时显示),浏览增加查看已加载模型功能。修复黑色标签子节点不显示以及快速移动残留bug。总体编辑支持单个卡片折叠。
@@ -117,7 +118,7 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 
 | 类型 | 接受数据 | 预览方式 | 支持格式 |
 |---|---|---|---|
-| IMAGE | tensor `[B,H,W,C]` | 缩略图 + 全屏原图 | PNG / JPEG / WebP / BMP / TIFF |
+| IMAGE | tensor `[B,H,W,C]` | 缩略图 + 全屏原图（批次：弹窗缩略图条翻页、逐张保存） | PNG / JPEG / WebP / BMP / TIFF |
 | MASK | 2D/3D tensor | 灰度 PNG | PNG |
 | AUDIO | `{waveform,sample_rate}` 或 `(waveform,sr)` 或文件对象 | 播放器 | WAV / MP3 / FLAC / OGG / M4A / AAC |
 | VIDEO | `VideoFromFile` / `VideoFromComponents` 对象 | 首帧封面 + 播放器 | MP4 / WebM / MOV / GIF / AVI / MKV |
@@ -137,6 +138,7 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 | EMPTY | 未连接 | “(未连接)” | — |
 
 - 预览方式：数据预览弹窗/生成信息。
+- 批次图片：一张卡最多导出 64 帧（更多只记数量）；存档逐张写成 `名字_时间戳_NN`。批量出图与视频抽帧在张量上无法区分，角标按工作流上游节点类名（含 video/frame/sequence 等）显示 images / frames。
 
 ### 提示词助手（`EzFlex-PromptHelper`）：
 
