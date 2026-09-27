@@ -63,7 +63,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.10"
+__version__ = "1.2.11"
 
 WEB_DIRECTORY = "./web"
 
@@ -4334,8 +4334,18 @@ def _ph_compile_card(text, card):
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 
+def _ph_strip_thinking(generated, prompt):
+    """对齐官方 TextGenerate：开 thinking 时结果里带 <think>…</think> 推理段，插件输出的是提示词，
+    要把推理段去掉只留最终文本（与官方第二输出 thinking 的拆分规则一致）。"""
+    reasoning, sep, text = str(generated or "").partition("</think>")
+    if sep and (reasoning.lstrip().startswith("<think>") or str(prompt or "").rstrip().endswith("<think>")):
+        return text
+    return generated
+
+
 def _ph_clip_generate(clip, prompt, tg, media=None):
     """用已连接的 text-gen CLIP 按 TextGenerate 同款参数生成文本（供 run 期内自动优化）。
+    参数与官方 comfy_extras/nodes_textgen.py 的 TextGenerate 对齐：system_prompt / mtp / thinking。
     若连接的 CLIP 不支持文本生成（无 generate / tokenize 签名不兼容），抛清晰错误，便于排查。
     media 字典可带 image/video/audio（来自综合媒体输入），随 prompt 一起喂给 text-gen CLIP（如 Qwen-VL/Gemma 可看图反推/扩写）。"""
     if not hasattr(clip, "generate"):
@@ -4353,9 +4363,13 @@ def _ph_clip_generate(clip, prompt, tg, media=None):
     aud = media.get("audio")
     use_tpl = bool(tg.get("use_default_template", True))
     thinking = bool(tg.get("thinking", False))
+    system_prompt = str(tg.get("system_prompt") or "").strip() if use_tpl else ""
     vkw = {"fps": vfps} if (vid is not None and vfps) else {}   # 帧率告诉编码器（Gemma4 按 fps 抽 1fps）
+    tok_kwargs = {"skip_template": not use_tpl, "min_length": 1, "thinking": thinking, "image": img, "video": vid, "audio": aud, **vkw}
+    if system_prompt:
+        tok_kwargs["system_prompt"] = system_prompt   # 官方新增：替换模型内置 system turn（仅在用默认模板时）
     try:
-        tokens = clip.tokenize(prompt, skip_template=not use_tpl, min_length=1, thinking=thinking, image=img, video=vid, audio=aud, **vkw)
+        tokens = clip.tokenize(prompt, **tok_kwargs)
     except TypeError:
         try:
             tokens = clip.tokenize(prompt, skip_template=not use_tpl, min_length=1, thinking=thinking)
@@ -4366,8 +4380,10 @@ def _ph_clip_generate(clip, prompt, tg, media=None):
     seed = int(_ph_num(tg.get("seed"), 0))
     if do_sample and seed == 0:
         seed = random.randint(0, 0xffffffffffffffff)
-    gen = clip.generate(
-        tokens,
+    # 官方 TextGenerate 的 mtp：off=False / auto=True / 2-5 固定草稿深度（无 MTP 权重时无副作用）。
+    mtp_raw = str(tg.get("mtp") or "auto").strip().lower()
+    mtp = False if mtp_raw == "off" else (int(mtp_raw) if mtp_raw in ("2", "3", "4", "5") else True)
+    gen_kwargs = dict(
         do_sample=do_sample,
         max_length=int(_ph_num(tg.get("max_length"), 512)),
         temperature=_ph_num(tg.get("temperature"), 0.7),
@@ -4378,7 +4394,13 @@ def _ph_clip_generate(clip, prompt, tg, media=None):
         presence_penalty=_ph_num(tg.get("presence_penalty"), 0.0),
         seed=seed,
     )
-    return clip.decode(gen)
+    try:
+        if "mtp" in inspect.signature(clip.generate).parameters:
+            gen_kwargs["mtp"] = mtp   # 旧版 ComfyUI 没这个参数：有才发，避免 TypeError
+    except (TypeError, ValueError):
+        pass
+    gen = clip.generate(tokens, **gen_kwargs)
+    return _ph_strip_thinking(clip.decode(gen), prompt)
 
 
 # ===== 按「设置」里的 CLIP 路径+类型 自行加载 text-gen CLIP（点击即用，像 llama 一样）=====
@@ -5868,6 +5890,38 @@ async def _ph_tag_kind_get(req):
     return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
 
 
+async def _ph_tag_related_get(req):
+    """相关标签表 _related.csv（tag,相关1,相关2,…），卡片右键菜单与悬停提示用。"""
+    fp = os.path.join(_PH_LIB_DIR, '_related.csv')
+    if not os.path.isfile(fp):
+        return _web.json_response({"error": "no related tags table"}, status=404)
+    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
+
+
+async def _ph_tag_nsfw_get(req):
+    """NSFW 标签表 _nsfw.csv（一行一个），面板「隐藏 NSFW」筛选用。"""
+    fp = os.path.join(_PH_LIB_DIR, '_nsfw.csv')
+    if not os.path.isfile(fp):
+        return _web.json_response({"error": "no nsfw table"}, status=404)
+    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
+
+
+async def _ph_tag_desc_get(req):
+    """标签中文短描述 _tag_desc.csv（tag,desc），卡片悬停显示。"""
+    fp = os.path.join(_PH_LIB_DIR, '_tag_desc.csv')
+    if not os.path.isfile(fp):
+        return _web.json_response({"error": "no tag descriptions"}, status=404)
+    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
+
+
+async def _ph_tag_series_get(req):
+    """角色→系列表 _char_series.csv（character,copyright,score），供标签面板「系列」分组筛选。"""
+    fp = os.path.join(_PH_LIB_DIR, '_char_series.csv')
+    if not os.path.isfile(fp):
+        return _web.json_response({"error": "no character-series table"}, status=404)
+    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
+
+
 async def _ph_tag_furry_get(req):
     """兽类/物种词表：_e621_species.csv（e621 分类 5 的物种，去掉 Danbooru 已有的）+ _furry_extra.csv（可自己加）。"""
     names = []
@@ -6429,6 +6483,10 @@ try:
     PromptServer.instance.routes.get("/prompt_helper/tag_zh")(_ph_tag_zh_get)
     PromptServer.instance.routes.get("/prompt_helper/tag_furry")(_ph_tag_furry_get)
     PromptServer.instance.routes.get("/prompt_helper/tag_kind")(_ph_tag_kind_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_series")(_ph_tag_series_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_nsfw")(_ph_tag_nsfw_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_related")(_ph_tag_related_get)
+    PromptServer.instance.routes.get("/prompt_helper/tag_desc")(_ph_tag_desc_get)
     PromptServer.instance.routes.post("/prompt_helper/tag_import")(_ph_tag_import)
 except Exception:
     pass

@@ -1,6 +1,6 @@
-# Comfyui-EzFlex-Presets (V1.2.10 stable)
+# Comfyui-EzFlex-Presets (V1.2.11 stable)
 
-[English](README.md) | **中文**
+**English** | [中文](README_ZH.md)
 
 A flexible combo plugin for ComfyUI, built with AI; still being improved.
 
@@ -22,6 +22,7 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - **11 nodes in total**
 
 ## Version history:
+- V1.2.11: Fixed several PromptHelper frontend bugs and the API-call issue; added API-call error hints; overhauled the tag system: random match/exclude field filters, related tags, a "Hide NSFW" filter, finer in-library tag classification, and a new anima 2.9B tag library.
 - V1.2.10: Fixed the ModelsCombo first output port disconnecting after switching windows, refreshing, or restarting; fixed preset selections being lost after switching windows or refreshing.
 - V1.2.9: Fixed Preview Any reading incorrect image generation info (prompt text is now read through connected nodes); fixed Node Switch Group possibly failing to match nodes after being copied. ModelsCombo keeps the trigger-words output port whenever it has a config (empty without LoRA).
 - V1.2.8: Preview Any (`EzFlex-PreviewAny`) supports batch image preview; the preview window behavior was improved.
@@ -58,7 +59,7 @@ Search for "EzFlex" in the ComfyUI node list and click to use.
 
 - Control: drives the overall node behavior. The **card list** (preset dropdown + drag to reorder) = Models Combo Loader (`EzFlex-ModelsCombo`), Resolution / Latent Selector (`EzFlex-FreeLatent`), Node Switch Master (`NodeSwitchMaster`), Param Preset Control (`ParamPresetControl`). All four expose their own "preset" interface; a master preset records their current presets together and pushes them down when switched. **Node Switch Group is not listed here separately** — it is managed by Node Switch Master.
 - Presets: freely combine / save / delete overall node-behavior presets.
-- Quick load: load other EzFlex nodes. Load all: Models Combo Loader / Resolution-Latent Selector / Node Switch Master / Node Switch Group / Param Preset Control / Param Preset Output / **Prompt Helper** / **Media Loader** / **Preview Any**; **Media Out (`MediaOut`) is loaded by Media Loader (`EzFlex-MediaLoader`) separately.
+- Quick load: load other EzFlex nodes. Load all: Models Combo Loader / Resolution-Latent Selector / Node Switch Master / Node Switch Group / Param Preset Control / Param Preset Output / **Prompt Helper** / **Media Loader** / **Preview Any**; **Media Out (`MediaOut`) is loaded by Media Loader (`EzFlex-MediaLoader`) separately**.
 - Language: switch between Chinese and English.
 - Theme: one palette switches every EzFlex panel (Light = your original palette / Lilac / Sage / Nord / Minimal / Caramel / Mist Blue / Deep Space / Morandi / Mermaid / Chocolate / Klein Blue / Cloud / Banana / Burgundy / Deep Teal). Lilac and Sage take the Radix Colors steps (the base of shadcn/ui); the rest keep their own official schemes; there is also a base layer for native controls, so input boxes and system select popups follow the theme's light/dark and text color. Palettes live in the theme module and the panels only write CSS variables, so a switch repaints all open panels immediately.
 
