@@ -134,7 +134,7 @@ function bindOutsideClose(popup, closeFn) {
 
 // ===== 状态 / 配置 =====
 function stateFor(node) {
-  if (!node._ezPrev) node._ezPrev = { save: false, savePath: '', saveFormats: {}, entries: [] };
+  if (!node._ezPrev) node._ezPrev = { save: false, savePath: '', saveFormats: {}, batchModes: {}, entries: [] };
   return node._ezPrev;
 }
 function loadFromConfig(node) {
@@ -143,11 +143,12 @@ function loadFromConfig(node) {
   st.save = !!cfg.save;
   st.savePath = typeof cfg.savePath === 'string' ? cfg.savePath : '';
   st.saveFormats = (cfg.saveFormats && typeof cfg.saveFormats === 'object') ? cfg.saveFormats : {};
+  st.batchModes = (cfg.batchModes && typeof cfg.batchModes === 'object') ? cfg.batchModes : {};
   st.dirty = false;
 }
 function syncToConfig(node) {
   const st = stateFor(node);
-  writeConfig(node, { save: st.save, savePath: st.savePath, saveFormats: st.saveFormats });
+  writeConfig(node, { save: st.save, savePath: st.savePath, saveFormats: st.saveFormats, batchModes: st.batchModes || {} });
 }
 
 // ===== socket：动态「连一个加一个」= 已连接输入前置 + 末尾 1 个空槽；输出与卡片 1:1。
@@ -1021,13 +1022,13 @@ function renderEntries(node) {
   const conn = linked.length;
   list.innerHTML = '';
   if (!conn) { list.appendChild(el('div', 'ezpv-empty')).textContent = ezT('Drag a wire from an input port on the left to auto-create preview cards'); return; }
-  for (let i = 0; i < conn; i++) list.appendChild(renderCard(node, i, (st.entries || [])[i]));
+  for (let i = 0; i < conn; i++) list.appendChild(renderCard(node, i, (st.entries || [])[i], linked[i]));
   attachDnD(list, '.ezpv-card', '.ezpv-handle', (from, to) => reorderCard(node, from, to));
   fitNode(node);
   try { ezRelabel(root); } catch (_) {}   // 后端返回的是英文源串，按当前语言就地译一次（切语言时各面板重画后再走这里）
 }
 
-function renderCard(node, index, entry) {
+function renderCard(node, index, entry, input) {
   const row = el('div', 'ezpv-card');
   const handle = el('span', 'ezpv-handle'); handle.textContent = '⠿';
   const body = el('div', 'ezpv-body');
@@ -1037,7 +1038,21 @@ function renderCard(node, index, entry) {
   const fldr = el('button', 'ezpv-fldr'); fldr.title = ezT('Open the save location and select the file');
   fldr.innerHTML = '<svg width="14" height="12" viewBox="0 0 24 20" fill="currentColor"><path d="M2 3h7l2 2h11v12H2z"/></svg>';
   fldr.addEventListener('click', () => { if (entry && entry.saved_path) openSavedFile(entry.saved_path); });
-  crow.appendChild(name); crow.appendChild(badge); crow.appendChild(fldr);
+  crow.appendChild(name); crow.appendChild(badge);
+  // 「多图」存档方式：和 ANY 同一行，夹在它和「打开位置」之间。按输入名存在节点 config 里。
+  // 没跑过时不知道类型，也在卡片上给出来（先配好再跑）；跑过以后只在 IMAGE 卡片上显示。
+  if (!entry || entry.type === 'IMAGE') {
+    const st = stateFor(node);
+    const key = (entry && entry.input) || (input && input.name) || String(index);
+    const msel = el('select'); msel.title = ezT('Multi-image save type'); msel.style.cssText = 'flex:0 1 auto;max-width:92px;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:100px;padding:0 6px;height:16px;font-size:10px;font-family:inherit;color:var(--ez-fg);';
+    [['auto', ezT('Auto')], ['images', ezT('Image sequence')], ['video', ezT('Video')], ['animation', ezT('Animated')]].forEach(([v, t]) => {
+      const o = document.createElement('option'); o.value = v; o.textContent = t; msel.appendChild(o);
+    });
+    msel.value = (st.batchModes && st.batchModes[key]) || 'auto';
+    msel.addEventListener('change', () => { if (!st.batchModes) st.batchModes = {}; st.batchModes[key] = msel.value; syncToConfig(node); });
+    crow.appendChild(msel);
+  }
+  crow.appendChild(fldr);
   body.appendChild(crow);
   const prev = renderPreview(entry);
   if (prev) body.appendChild(prev);
@@ -1066,22 +1081,29 @@ function formatModalEl() {
   const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const fields = document.createElement('div'); fields.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto;';
-  const opts = { image: ['png', 'jpeg', 'webp', 'bmp', 'tiff'], audio: ['wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac'], video: ['mp4', 'webm', 'mov', 'gif', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'] };
-  const labels = { image: ezT('Image'), audio: ezT('Audio'), video: ezT('Video'), text: ezT('Text') };
+  const opts = { image: ['', 'png', 'jpeg', 'webp', 'bmp', 'tiff'], audio: ['', 'wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac'], video: ['', 'mp4', 'webm', 'mov', 'gif', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'], model3d: ['', 'glb', 'gltf', 'obj', 'fbx'] };
+  const labels = { image: ezT('Image'), audio: ezT('Audio'), video: ezT('Video'), text: ezT('Text'), model3d: ezT('3D model') };
+  // 只有有损格式才显示「质量 / 码率」：png/bmp/tiff 无损、wav/flac 无损（码率由内容决定）、gif 没有 CRF。
+  // 音频不再单独选编码器 —— 后端按容器自己映射（选 mp3 就是 libmp3lame，原先那个 Encoder 是多余的。
   const subDefs = {
-    image: [{ key: 'quality', label: ezT('Quality'), values: ['90', '95', '100'] }],
-    audio: [{ key: 'codec', label: ezT('Encoder'), values: ['aac', 'mp3', 'flac', 'opus'] }, { key: 'bitrate', label: ezT('Bitrate'), values: ['128k', '192k', '320k'] }, { key: 'sr', label: ezT('Sample rate (Hz)'), values: ['44100', '48000', '22050'] }],
-    video: [{ key: 'codec', label: ezT('Encoder'), values: ['h264', 'vp9', 'av1'] }, { key: 'crf', label: ezT('Quality CRF'), values: ['18', '23', '28'] }, { key: 'fps', label: ezT('Frame rate'), values: ['24', '30'] }],
-    text: []
+    image: [
+      { key: 'animfmt', label: ezT('Animated format'), values: ['webp', 'png', 'gif'] },
+      { key: 'afps', label: ezT('Frame rate'), values: ['', '6', '12', '24', '30'] },
+      { key: 'alossless', label: ezT('Lossless'), values: ['', 'no'], labels: { '': ezT('Yes'), no: ezT('No') } },
+      { key: 'quality', label: ezT('Quality'), values: ['90', '95', '100'], when: (f) => f === 'jpeg' || f === 'webp' },
+    ],
+    audio: [{ key: 'bitrate', label: ezT('Bitrate'), values: ['128k', '192k', '320k'], when: (f) => f !== 'wav' && f !== 'flac' }, { key: 'sr', label: ezT('Sample rate (Hz)'), values: ['', '44100', '48000', '22050'] }],
+    video: [{ key: 'codec', label: ezT('Encoder'), values: ['', 'h264', 'vp9', 'av1'], when: (f) => f !== 'gif' }, { key: 'crf', label: ezT('Quality CRF'), values: ['', '18', '23', '28'], when: (f) => f !== 'gif' }, { key: 'fps', label: ezT('Frame rate'), values: ['', '24', '30'] }],
+    text: [], model3d: []
   };
-  const selects = {}; const subSelects = {};
+  const selects = {}; const subSelects = {}; const subRows = [];
   Object.keys(opts).forEach((cat) => {
     const wrap = document.createElement('div'); wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;border:1px solid var(--ez-border-2);border-radius:10px;padding:6px 8px;';
     const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:center;gap:8px;';
     const tog = document.createElement('span'); tog.textContent = '▸'; tog.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:var(--ez-fg-3);flex:0 0 auto;';
     const lab = document.createElement('span'); lab.textContent = labels[cat]; lab.style.cssText = 'flex:0 0 48px;font-size:12px;color:var(--ez-fg);';
     const sel = document.createElement('select'); sel.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:5px 10px;font-size:12px;font-family:inherit;';
-    opts[cat].forEach((f) => { const o = document.createElement('option'); o.value = f; o.textContent = f; sel.appendChild(o); });
+    opts[cat].forEach((f) => { const o = document.createElement('option'); o.value = f; o.textContent = f || ezT('Keep source'); sel.appendChild(o); });
     row.appendChild(tog); row.appendChild(lab); row.appendChild(sel);
     wrap.appendChild(row);
     const sub = document.createElement('div'); sub.style.cssText = 'display:none;flex-direction:column;gap:6px;padding-left:18px;';
@@ -1089,7 +1111,8 @@ function formatModalEl() {
       const srow = document.createElement('div'); srow.style.cssText = 'display:flex;align-items:center;gap:8px;';
       const sl = document.createElement('span'); sl.textContent = sd.label; sl.style.cssText = 'flex:0 0 62px;font-size:11px;color:var(--ez-fg-3);';
       const ss = document.createElement('select'); ss.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:3px 8px;font-size:11px;font-family:inherit;';
-      sd.values.forEach((v) => { const o = document.createElement('option'); o.value = v; o.textContent = v; ss.appendChild(o); });
+      sd.values.forEach((v) => { const o = document.createElement('option'); o.value = v; o.textContent = (sd.labels && sd.labels[v]) || v || ezT('Keep original'); ss.appendChild(o); });
+      if (sd.when) { srow._when = sd.when; subRows.push({ cat: cat, row: srow, when: sd.when }); }
       srow.appendChild(sl); srow.appendChild(ss); sub.appendChild(srow);
       subSelects[cat + '.' + sd.key] = ss;
     });
@@ -1098,21 +1121,34 @@ function formatModalEl() {
     fields.appendChild(wrap);
     selects[cat] = sel;
   });
+  const subVals = (cat) => { const o = {}; (subDefs[cat] || []).forEach((sd) => { const ss = subSelects[cat + '.' + sd.key]; if (ss) o[sd.key] = ss.value; }); return o; };
+  const applySubs = () => { subRows.forEach((g) => { g.row.style.display = (!g.when || g.when(selects[g.cat].value, subVals(g.cat))) ? 'flex' : 'none'; }); };
+  Object.keys(selects).forEach((cat) => selects[cat].addEventListener('change', applySubs));
+  Object.keys(subSelects).forEach((k) => subSelects[k].addEventListener('change', applySubs));
+  applySubs();
+  // 文件名模板（%year% %month% %day% %hour% %minute% %second%），空 = 用卡片名
+  const nameRow = document.createElement('div'); nameRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+  const nameLab = document.createElement('span'); nameLab.textContent = ezT('File name'); nameLab.style.cssText = 'flex:0 0 62px;font-size:11px;color:var(--ez-fg-3);';
+  const nameInput = document.createElement('input'); nameInput.type = 'text'; nameInput.placeholder = '%year% %month% %day% ...';
+  nameInput.style.cssText = 'flex:1 1 auto;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:4px 8px;font-size:11px;font-family:inherit;';
+  nameRow.appendChild(nameLab); nameRow.appendChild(nameInput);
   const ft = document.createElement('div'); ft.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--ez-border-2);padding-top:10px;';
   const save = document.createElement('button'); save.textContent = ezT('OK'); save.style.cssText = 'background:var(--ez-strong);color:var(--ez-on-strong);border:1px solid var(--ez-strong);border-radius:9px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
   ft.appendChild(save);
-  box.appendChild(hd); box.appendChild(fields); box.appendChild(ft);
+  box.appendChild(hd); box.appendChild(fields); box.appendChild(nameRow); box.appendChild(ft);
   _fmtModal.appendChild(box); document.body.appendChild(_fmtModal);
   attachFullscreen(box, () => { _fmtModal.style.display = 'none'; }, close);
-  _fmtModal._selects = selects; _fmtModal._subSelects = subSelects; _fmtModal._subDefs = subDefs; _fmtModal._node = null;
+  _fmtModal._selects = selects; _fmtModal._subSelects = subSelects; _fmtModal._subDefs = subDefs; _fmtModal._subVals = subVals; _fmtModal._applySubs = applySubs; _fmtModal._nameInput = nameInput; _fmtModal._node = null;
   close.addEventListener('click', () => { _fmtModal.style.display = 'none'; });
   _fmtModal.addEventListener('click', (e) => { if (e.target === _fmtModal) _fmtModal.style.display = 'none'; });
   save.addEventListener('click', () => {
     if (!_fmtModal._node) return;
     const st = stateFor(_fmtModal._node);
+    st.saveFormats._name = _fmtModal._nameInput.value.trim();
     Object.keys(_fmtModal._selects).forEach((cat) => {
       const o = { fmt: _fmtModal._selects[cat].value };
-      (_fmtModal._subDefs[cat] || []).forEach((sd) => { const ss = _fmtModal._subSelects[cat + '.' + sd.key]; if (ss) o[sd.key] = ss.value; });
+      const sv = _fmtModal._subVals(cat);
+      (_fmtModal._subDefs[cat] || []).forEach((sd) => { const ss = _fmtModal._subSelects[cat + '.' + sd.key]; if (ss && (!sd.when || sd.when(_fmtModal._selects[cat].value, sv))) o[sd.key] = ss.value; });
       st.saveFormats[cat] = o;
     });
     syncToConfig(_fmtModal._node);
@@ -1129,6 +1165,8 @@ function openFormatModal(node) {
     if (v && typeof v === 'object') { if (v.fmt) m._selects[cat].value = v.fmt; (m._subDefs[cat] || []).forEach((sd) => { const ss = m._subSelects[cat + '.' + sd.key]; if (ss && v[sd.key]) ss.value = v[sd.key]; }); }
     else if (typeof v === 'string') m._selects[cat].value = v;
   });
+  if (m._nameInput) m._nameInput.value = st.saveFormats._name || '';
+  if (m._applySubs) m._applySubs();   // 按当前格式显示/隐藏质量、码率等
   m.style.display = 'flex';
 }
 let _dpModal = null;
@@ -1143,7 +1181,7 @@ function openDataPreviewModal() {
   const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(t); hd.appendChild(close);
   const rows = [
-    ['IMAGE', ezT('PNG / JPEG / WebP / BMP / TIFF (zoom to view)')],
+    ['IMAGE', ezT('PNG / JPEG / WebP / BMP / TIFF (zoom to view); batches can save as image sequence / video / animated WebP-PNG-GIF')],
     ['MASK', ezT('Grayscale PNG')],
     ['AUDIO', ezT('WAV / MP3 / FLAC / OGG / M4A / AAC (play)')],
     ['VIDEO', ezT('MP4 / WebM / MOV / GIF / AVI / MKV (poster + playback)')],

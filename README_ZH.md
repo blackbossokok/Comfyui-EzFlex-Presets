@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.2.11 稳定版）
+# Comfyui-EzFlex-Presets（V1.2.12 稳定版）
 
 [English](README.md) | **中文**
 
@@ -22,6 +22,7 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - 共 **11 个节点**
 
 ## 版本更新内容：
+- V1.2.12:标签系统性能优化、修复卡片内容无法填充的bug，优化标签提示与引用媒体冲突的显示问题、修复previewany无法保存某些类型媒体的bug,优化保存逻辑。
 - V1.2.11:修复prompthelper若干前端bug，修复api调用bug，新增api调用错误提示，全面优化标签系统：新增随机匹配/排除字段功能、相关标签功能、筛选增加隐藏nsfw、细化库内标签分类，新增anima2.9B标签库。
 - V1.2.10:修复模型组合加载器modelscombo第一个端口切换窗口/刷新/重启会断连的问题；修复预设选项切换窗口/刷新会丢失的bug。
 - V1.2.9:修复previewany读取图片生成信息不对的问题（提示词支持穿透连线读取），修复开关组nodeswitchgroup复制后可能匹配不到节点的问题。ModelsCombo 有配置时触发词端口常驻（无 LoRA 为空串）。
@@ -117,11 +118,12 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 
 - 预览类型：自动识别任意输入类型，渲染对应预览卡片（可拖拽排序，随连接自动增删）。
 - 保存设置：自动保存点击后可保存否则仅预览，可选择保存位置、保存选项。
+- 保存选项：类型/质量随所选格式变化（无损格式不出码率、无损图不出质量）；IMAGE / AUDIO / VIDEO 有「保持原样」（从文件加载的直接复制原文件、不重编码）；文件名支持 `%year% %month% %day% %hour% %minute% %second%`，留空用卡片名并自动编号；MODEL / CLIP / VAE / LORA_MODEL 只存信息文本（摘要 + 元数据），不复制模型文件。
 - 保存类型：
 
 | 类型 | 接受数据 | 预览方式 | 支持格式 |
 |---|---|---|---|
-| IMAGE | tensor `[B,H,W,C]` | 缩略图 + 全屏原图（批次：弹窗缩略图条翻页、逐张保存） | PNG / JPEG / WebP / BMP / TIFF |
+| IMAGE | tensor `[B,H,W,C]` | 缩略图 + 全屏原图（批次：弹窗缩略图条翻页；可存图片序列 / 视频 / 动图） | PNG / JPEG / WebP / BMP / TIFF / 动图（WebP / PNG / GIF） |
 | MASK | 2D/3D tensor | 灰度 PNG | PNG |
 | AUDIO | `{waveform,sample_rate}` 或 `(waveform,sr)` 或文件对象 | 播放器 | WAV / MP3 / FLAC / OGG / M4A / AAC |
 | VIDEO | `VideoFromFile` / `VideoFromComponents` 对象 | 首帧封面 + 播放器 | MP4 / WebM / MOV / GIF / AVI / MKV |
@@ -141,7 +143,7 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 | EMPTY | 未连接 | “(未连接)” | — |
 
 - 预览方式：数据预览弹窗/生成信息。
-- 批次图片：一张卡最多导出 64 帧（更多只记数量）；存档逐张写成 `名字_时间戳_NN`。批量出图与视频抽帧在张量上无法区分，角标按工作流上游节点类名（含 video/frame/sequence 等）显示 images / frames。
+- 批次图片：一张卡最多导出 64 帧（更多只记数量）；角标按工作流上游节点类名（含 video/frame/sequence 等）显示 images / frames——批量出图与视频抽帧在张量上无法区分。存档方式由**卡片上的「多图保存类型」**单独选（自动 / 批量图片 / 视频 / 动图，默认自动，只对多图卡片生效）：自动＝抽帧→合成视频、批量出图→逐张；动图格式 / 帧率 / 无损在「保存类型」里设。文件名为 `名字_编号_NN`。非多图卡片按类型正常保存。
 
 ### 提示词助手（`EzFlex-PromptHelper`）：
 

@@ -1,14 +1,14 @@
 # EzFlex 插件套件 · 项目交接文档
 
 > 硬数据，无闲聊。唯一交接入口：改动前先看 §5「避坑」，下一步看 §7「待办」。
-> **当前 V1.2.11**：修复 PromptHelper 若干前端 bug / API 调用 bug，补 API 调用错误提示，随机设置新增「匹配/排除字段」；V1.2.10：ModelsCombo 第一个输出口在切窗口/刷新/重启后断连——`trigger_words` 只在 `loaders` 非空时追加，空载瞬态回到旧路径（空 `want`）；V1.2.9：生成信息兜底修（放大/检测/控制权重不再混进 Model，放大模型单列 Upscale model；EzFlex-ModelsCombo 的 config JSON 解出 model/clip/vae/lora；config JSON 不再污染 Prompt）+ NSG 分组发现以节点自己的图为基准 + 标题正则不中退回字面匹配 + 复制/载入后同步过滤器重扫行（修复制后偶发匹配不到分组）。V1.2.8：预览任意（PreviewAny）批次图片——整批缩略图条（非全屏在弹窗底部、全屏也保留）+ 全屏左右悬停箭头/键盘翻页，存档逐张落盘（单卡上限 64 帧）；各弹窗全屏键统一移到 ✕ 左侧；NSG 分组发现改为以节点自己的图为基准（不用 getCurrentGraph）+ 标题正则不中退回字面匹配 + 复制/载入后同步过滤器并重扫行（修「复制后偶发匹配不到分组」）；生成信息兜底修：放大/检测等权重不再顶替底模（放大模型单列 `Upscale model`），`EzFlex-ModelsCombo` config 里的 model/clip/vae/lora 能解出，config JSON 不再污染 `Prompt`；英文 README 严格对齐中文并升版本号。V1.2.7：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
+> **当前 V1.2.12**：标签系统性能优化、修卡片内容无法填充、标签提示与 @ 引用媒体冲突显示、PreviewAny 无法保存某些媒体类型的 bug，优化保存逻辑（保持原样 / 文件名模板 / 批量方式 / 动图）；V1.2.11：修复 PromptHelper 若干前端 bug / API 调用 bug，补 API 调用错误提示，随机设置新增「匹配/排除字段」；V1.2.10：ModelsCombo 第一个输出口在切窗口/刷新/重启后断连——`trigger_words` 只在 `loaders` 非空时追加，空载瞬态回到旧路径（空 `want`）；V1.2.9：生成信息兜底修（放大/检测/控制权重不再混进 Model，放大模型单列 Upscale model；EzFlex-ModelsCombo 的 config JSON 解出 model/clip/vae/lora；config JSON 不再污染 Prompt）+ NSG 分组发现以节点自己的图为基准 + 标题正则不中退回字面匹配 + 复制/载入后同步过滤器重扫行（修复制后偶发匹配不到分组）。V1.2.8：预览任意（PreviewAny）批次图片——整批缩略图条（非全屏在弹窗底部、全屏也保留）+ 全屏左右悬停箭头/键盘翻页，存档逐张落盘（单卡上限 64 帧）；各弹窗全屏键统一移到 ✕ 左侧；NSG 分组发现改为以节点自己的图为基准（不用 getCurrentGraph）+ 标题正则不中退回字面匹配 + 复制/载入后同步过滤器并重扫行（修「复制后偶发匹配不到分组」）；生成信息兜底修：放大/检测等权重不再顶替底模（放大模型单列 `Upscale model`），`EzFlex-ModelsCombo` config 里的 model/clip/vae/lora 能解出，config JSON 不再污染 `Prompt`；英文 README 严格对齐中文并升版本号。V1.2.7：预览图消失修复（标签库读失败不再当空存回；卡片管理只改内容时保留预览图）+ 黑框端口标签（PromptHelper 去圆点；ModelsCombo / MediaLoader / MediaOut / FreeLatent 纵向间距不再随节点高度压缩；新增 ParamPresetControl / ParamPresetOutput / PreviewAny 三个节点）+ 对齐官方节点（CLIP `yue2`、LoRA `safe_load`+`lora_metadata`、`intermediate_dtype/device`、`downscale_ratio_spacial`、3D `.spz/.splat/.ksplat`）+ 刷新 API 厂商与模型 ID。V1.2.6：主题系统（`web/ezflex_theme.js` 16 套配色 → 共享 `--ez-*` 变量，切主题全画布即时生效；原生控件 `color-scheme` 兜底；2D canvas 走 `ezThemeColor()`）+ FreeLatent 画布（跟主题上色、网格按需抽稀不再整块消失、边界四边等宽、预设下拉固定向下并跟随节点）+ 标签预览只保存一次（不再被旧内容覆盖）+ 标签面板翻页栏修复 + 全部 EzFlex 数据收进 `user/EzFlex/`（旧文件自动迁移）+ 清理不可达 canvas 子系统 / 调试日志 / 冗余 CSS。发布相关看 §9，标签系统（规范 + 状态）看 §10。
 > **⚠️ 强制要求：经典模式与 Nodes 2.0（Vue）必须分开写作用域**（`.ezfx-is-vue` / `:not(.ezfx-is-vue)`）。禁止写对两种模式同时生效的行为规则；改一种前先确认另一种不受影响，两种分别回归。历史教训：把「面板根穿透」写成全模式通用后，经典模式的滚动条与空白拖动一起被带坏。
 
 ## 0. 环境与生效方式
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | `__version__ = "1.2.11"`（`__init__.py` / `pyproject.toml` / README） |
+| 版本 | `__version__ = "1.2.12"`（`__init__.py` / `pyproject.toml` / README） |
 | ComfyUI | `0.30.x`；前端 `comfyui_frontend_package`（Vue / Nodes 2.0，`addDOMWidget`） |
 | venv python | `<ComfyUI>\.venv\Scripts\python.exe` |
 | 生效方式 | Python（节点类 / 路由）改动 → **完整重启 ComfyUI**；前端 JS → **Ctrl+F5 强刷** |
@@ -143,7 +143,7 @@ IMAGE `[1,H,W,3]` float32；VIDEO `VideoFromFile`；AUDIO `[1,C,T]` + `sample_ra
 - [ ] 综合媒体端口目前只计数/引用，不参与合并文本。
 - [ ] 图生图/视频生视频、图像缩放等后续节点。
 - [ ] 提示词规范缺官方条目（素材数量/时长上限、字幕/水印约束、Kling 长度上限、负面提示词处理等）。
-- [ ] 仓库待 `git push`（V1.2.11）。
+- [ ] 仓库待 `git push`（V1.2.12）。
 - [ ] 富文本仍用 `document.execCommand`（弃用但可用）。
 - [ ] 从 HTTP API 直接排队（不经前端）时，MediaOut 禁用端口仍是 `None` 语义（README 已说明）。
 

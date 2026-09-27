@@ -63,7 +63,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.11"
+__version__ = "1.2.12"
 
 WEB_DIRECTORY = "./web"
 
@@ -1402,6 +1402,7 @@ class PreviewAnyNode:
         entries, outputs = [], []
         for i, (name, label, upstream) in enumerate(connected):
             entry = self._entry(label or f"Input {i + 1}", kwargs.get(name), upstream, wf_meta)
+            entry["input"] = name      # 卡片上的「多图保存类型」按这个名称存在节点 config 里
             entry = self._maybe_save(entry, cfg, label or f"card_{i + 1}", extra_pnginfo)
             entries.append(entry)
             outputs.append(kwargs.get(name))   # 透传原始值（不是卡文字），供工作流中间连接继续传递
@@ -1590,8 +1591,9 @@ class PreviewAnyNode:
                 url = self._export_3d_url(value)
                 if url:
                     entry["model3d"] = url
-                p3d = getattr(value, "path", None) or getattr(value, "file", None)
+                p3d = getattr(value, "path", None) or getattr(value, "file", None) or _file3d_source(value)
                 if isinstance(p3d, str) and os.path.isfile(p3d):
+                    entry["save_src"] = p3d       # 存不存由 save_skip（来源）决定
                     gm = self._file_gen_meta(p3d)
                     if gm:
                         entry["gen_meta"] = json.dumps(gm, ensure_ascii=False, default=str)
@@ -1602,11 +1604,16 @@ class PreviewAnyNode:
                     url = PreviewAnyNode._mesh_obj_url(value)   # 顶点/面张量 → 临时 OBJ，交给内置 3D 查看器
                     if url:
                         entry["model3d"] = url
+                        from urllib.parse import urlparse, parse_qs
+                        _fn = (parse_qs(urlparse(url).query).get("filename") or [""])[0]
+                        _mp = os.path.join(folder_paths.get_temp_directory(), _fn) if _fn else ""
+                        if _mp and os.path.isfile(_mp):
+                            entry["save_src"] = _mp
             elif type_name in ("MODEL", "CLIP", "VAE", "CONTROL_NET", "CLIP_VISION", "STYLE_MODEL",
                                "UPSCALE_MODEL", "LORA_MODEL", "GLIGEN", "SAMPLER", "SIGMAS", "GUIDER",
                                "NOISE", "SEGS"):
                 entry["value"] = self._object_summary(value, type_name)
-                if type_name in ("MODEL", "CLIP", "VAE"):
+                if type_name in ("MODEL", "CLIP", "VAE", "LORA_MODEL"):
                     meta = self._model_meta(value, type_name, upstream)
                     if meta:
                         entry["meta"] = meta
@@ -1682,6 +1689,7 @@ class PreviewAnyNode:
         # 不能用当前工作流参数冒充，避免误导。
         _up_type = (upstream.get("type") or "") if isinstance(upstream, dict) else ""
         _is_file_src = ("Load" in _up_type or "FromFile" in _up_type) and "Save" not in _up_type and "Sampler" not in _up_type
+        entry["save_skip"] = _is_file_src   # 来源就是文件 → 自动存档直接跳过（加载物本来就在硬盘上）
         if not entry.get("gen_meta") and not entry.get("meta") and wf_meta and not _is_file_src:
             entry["gen_meta"] = json.dumps(wf_meta, ensure_ascii=False, default=str)
         return entry
@@ -3371,6 +3379,31 @@ class PreviewAnyNode:
         return s[:80]
 
     @staticmethod
+    def _save_base(cfg, dirpath, name):
+        """存档文件名基名：用「保存类型」里写的模板（支持 %year% %month% %day% %hour% %minute% %second%），
+        空则用卡片名。返回 (base, counter)，counter 按目录里已有的 <base>_NNNNN_ 递增（与内置 Save Image 同款）。"""
+        import time as _t
+        pat = str((cfg.get("saveFormats") or {}).get("_name") or "").strip()
+        if not pat:
+            return PreviewAnyNode._sanitize_filename(name), 0
+        if "%" in pat:
+            now = _t.localtime()
+            for k, v in (("%year%", f"{now.tm_year}"), ("%month%", f"{now.tm_mon:02d}"), ("%day%", f"{now.tm_mday:02d}"),
+                         ("%hour%", f"{now.tm_hour:02d}"), ("%minute%", f"{now.tm_min:02d}"), ("%second%", f"{now.tm_sec:02d}")):
+                pat = pat.replace(k, v)
+        base = PreviewAnyNode._sanitize_filename(os.path.basename(pat.replace("\\", "/")))
+        counter = 0
+        try:
+            for fn in os.listdir(dirpath):
+                if fn.startswith(base + "_"):
+                    head = fn[len(base) + 1:].split("_")[0]
+                    if head.isdigit():
+                        counter = max(counter, int(head))
+        except Exception:
+            pass
+        return base, counter
+
+    @staticmethod
     def _png_meta(extra_pnginfo):
         """PNG 文本块：workflow / prompt（与内置 Save Image 同款，值序列化成字符串）。"""
         if not isinstance(extra_pnginfo, dict) or not extra_pnginfo:
@@ -3456,20 +3489,62 @@ class PreviewAnyNode:
         return dirpath
 
     def _save_image_batch(self, entry, cfg, name, sources, fmt, quality, meta):
-        """批次图片逐张存档：name_<ms>_NN.<ext>；saved_path 指向第一张，saved_paths 给全部。"""
+        """批次图片存档：默认逐张存图片序列；选「合成视频」或判定为抽帧时，编成一个视频。
+        name_<counter>_NN.<ext>；saved_path 指向第一张，saved_paths 给全部。"""
         try:
             dirpath = self._save_target_dir(cfg)
         except Exception:
             return entry
-        import time
-        stamp = str(int(time.time() * 1000))
-        base = PreviewAnyNode._sanitize_filename(name)
+        base, counter = PreviewAnyNode._save_base(cfg, dirpath, name)
+        sf = cfg.get("saveFormats") or {}
+        icfg = sf.get("image") if isinstance(sf.get("image"), dict) else {}
+        # 多图保存类型是「卡片级」的（节点 config 的 batchModes[input]），格式参数才在保存类型弹窗里
+        mode = str((cfg.get("batchModes") or {}).get(entry.get("input") or "") or "auto")
+        if mode == "auto":
+            mode = "video" if entry.get("batch_kind") == "frames" else "images"   # 抽帧 → 视频；批量出图 → 序列
+        if mode == "animation":
+            afmt = str(icfg.get("animfmt") or "webp")
+            afps = icfg.get("afps") or 6
+            aloss = str(icfg.get("alossless") or "") != "no"
+            paths = [p for p in (PreviewAnyNode._src_file_of(u) for u in sources) if p and os.path.isfile(p)]
+            res = _encode_frames_animated(paths, afmt, afps, quality, aloss)
+            if res and res[1].lower() in _SAVE_ALLOWED_EXTS:
+                data, ext = res
+                fname = f"{base}_{counter + 1:05}{ext}"
+                try:
+                    with open(os.path.join(dirpath, fname), "wb") as fh:
+                        fh.write(data)
+                    p = os.path.abspath(os.path.join(dirpath, fname))
+                    entry["saved_path"] = p; entry["saved_name"] = os.path.basename(p); entry["saved_paths"] = [p]
+                    return entry
+                except Exception:
+                    pass
+            # 编不出来就退回图片序列
+        if mode == "video":
+            vcfg = sf.get("video") if isinstance(sf.get("video"), dict) else {}
+            vfmt = str(vcfg.get("fmt") or "") or "mp4"
+            if vfmt not in ("mp4", "webm", "mov", "mkv", "avi"):
+                vfmt = "mp4"
+            paths = [p for p in (PreviewAnyNode._src_file_of(u) for u in sources) if p and os.path.isfile(p)]
+            res = _encode_frames_to_video(paths, entry.get("fps") or vcfg.get("fps") or 24, vfmt, vcfg.get("codec") or "", vcfg.get("crf"))
+            if res and res[1].lower() in _SAVE_ALLOWED_EXTS:
+                data, ext = res
+                fname = f"{base}_{counter + 1:05}{ext}"
+                try:
+                    with open(os.path.join(dirpath, fname), "wb") as fh:
+                        fh.write(data)
+                    p = os.path.abspath(os.path.join(dirpath, fname))
+                    entry["saved_path"] = p; entry["saved_name"] = os.path.basename(p); entry["saved_paths"] = [p]
+                    return entry
+                except Exception:
+                    pass
+            # 编不出来就退回图片序列
         written = []
         for i, url in enumerate(sources):
             data, ext = PreviewAnyNode._image_save_bytes(PreviewAnyNode._src_file_of(url), None, fmt, quality, meta)
             if data is None or not ext or ext.lower() not in _SAVE_ALLOWED_EXTS:
                 continue
-            fname = f"{base}_{stamp}_{i + 1:02d}{ext}"
+            fname = f"{base}_{counter + 1:05}_{i + 1:02d}{ext}"
             try:
                 with open(os.path.join(dirpath, fname), "wb") as fh:
                     fh.write(data)
@@ -3485,27 +3560,33 @@ class PreviewAnyNode:
     def _maybe_save(self, entry, cfg, name, extra_pnginfo=None):
         """存档开启时把卡片内容写到 <output>/<savePath>/，并回填 saved_path。
         图片存档用「原图」（与全屏同一份导出文件），不是预览缩图；PNG 会带上工作流/提示词元数据（对齐内置 Save Image）。"""
-        if not cfg.get("save"):
-            return entry
+        if not cfg.get("save") or entry.get("save_skip"):
+            return entry      # save_skip：值是从文件加载来的（LoadImage/LoadVideo/LoadAudio/Load3D…），不是本次生成物，无需再存一份
         data = None
         ext = None
         sf = cfg.get("saveFormats") or {}
-        if entry.get("preview"):
+        # 视频/音频卡片也带 preview（视频是封面图）：先让它们走各自的媒体分支，别把封面当图片存了
+        if entry.get("preview") and not entry.get("audio") and not entry.get("audio_src") and not entry.get("video") and not entry.get("video_src"):
             try:
                 img_cfg = sf.get("image")
-                fmt = "png"; quality = 95
+                fmt = ""; quality = 95
                 if isinstance(img_cfg, dict):
-                    fmt = img_cfg.get("fmt", "png") or "png"
-                    try: quality = int(img_cfg.get("quality", 95))
+                    fmt = str(img_cfg.get("fmt") or "")
+                    try: quality = int(img_cfg.get("quality") or 95)
                     except Exception: quality = 95
                 meta = PreviewAnyNode._png_meta(extra_pnginfo)
                 sources = entry.get("images") or []
                 if len(sources) > 1:
-                    return self._save_image_batch(entry, cfg, name, sources, fmt, quality, meta)   # 批次逐张存档
+                    return self._save_image_batch(entry, cfg, name, sources, fmt or "png", quality, meta)   # 批次逐张存档
                 raw = base64.b64decode(entry["preview"])       # 兜底：预览图（MASK 等没有原图导出时）
                 # 优先用原图文件（_export_image_url 导出的全分辨率 PNG，全屏看的就是它）
                 src_file = PreviewAnyNode._src_file_of(entry.get("image_src"))
-                data, ext = PreviewAnyNode._image_save_bytes(src_file, raw, fmt, quality, meta)
+                if not fmt and src_file:      # 「保持原样」：加载进来的原图直接复制，不重编码
+                    with open(src_file, "rb") as fh:
+                        data = fh.read()
+                    ext = os.path.splitext(src_file)[1].lower()
+                else:
+                    data, ext = PreviewAnyNode._image_save_bytes(src_file, raw, fmt or "png", quality, meta)
             except Exception:
                 data = None
         elif entry.get("audio") or entry.get("audio_src"):
@@ -3514,7 +3595,10 @@ class PreviewAnyNode:
                 src_path = None
                 if entry.get("audio_src"):
                     from urllib.parse import urlparse, parse_qs
-                    p = (parse_qs(urlparse(entry["audio_src"]).query).get("path") or [None])[0]
+                    _q = parse_qs(urlparse(entry["audio_src"]).query)
+                    p = (_q.get("path") or [None])[0]
+                    if not p and _q.get("filename"):     # /view?type=temp&filename=… → 到临时目录取原文件
+                        p = os.path.join(folder_paths.get_temp_directory(), _q["filename"][0])
                     if p and os.path.exists(p):
                         src_path = p
                         with open(p, "rb") as fh:
@@ -3525,14 +3609,16 @@ class PreviewAnyNode:
                         raw = base64.b64decode(uri.split(",", 1)[1])
                 if raw:
                     acfg = sf.get("audio")
-                    afmt = "wav"; bitrate = "192k"; sr = None
+                    afmt = ""; bitrate = "192k"; sr = None
                     if isinstance(acfg, dict):
-                        afmt = acfg.get("fmt", "wav") or "wav"
+                        afmt = str(acfg.get("fmt") or "")
                         bitrate = acfg.get("bitrate") or "192k"
                         sr = acfg.get("sr")
                     src_ext = os.path.splitext(src_path)[1].lower() if src_path else ""
-                    if src_path and src_ext == ("." + str(afmt).lower().lstrip(".")):
-                        data, ext = raw, src_ext          # 存档格式与源文件一致 → 直接落盘，不重新编码
+                    if not afmt:
+                        afmt = src_ext.lstrip(".") if src_path else "wav"   # 保持原样：加载进来的音频不重编码
+                    if src_path and src_ext == ("." + str(afmt).lower().lstrip(".")) and not sr:
+                        data, ext = raw, src_ext          # 格式一致且没改采样率 → 直接落盘，不重新编码
                     else:
                         res = _encode_audio(raw, afmt, bitrate, sr)
                         if res:
@@ -3545,10 +3631,10 @@ class PreviewAnyNode:
                 if uri.startswith("data:video/") and "base64," in uri:
                     raw = base64.b64decode(uri.split(",", 1)[1])
                     vcfg = sf.get("video")
-                    vfmt = "webm"; vcodec = "vp9"; crf = None; fps = None
+                    vfmt = ""; vcodec = ""; crf = None; fps = None
                     if isinstance(vcfg, dict):
-                        vfmt = vcfg.get("fmt", "webm") or "webm"
-                        vcodec = vcfg.get("codec", "vp9") or "vp9"
+                        vfmt = str(vcfg.get("fmt") or "")
+                        vcodec = vcfg.get("codec") or ""
                         crf = vcfg.get("crf"); fps = vcfg.get("fps")
                     res = _encode_video(raw, vfmt, vcodec, crf, fps)
                     if res:
@@ -3564,22 +3650,47 @@ class PreviewAnyNode:
                     with open(src, "rb") as fh:
                         raw = fh.read()
                     vcfg = sf.get("video")
-                    vfmt = "webm"; vcodec = "vp9"; crf = None; fps = None
+                    vfmt = ""; vcodec = ""; crf = None; fps = None
                     if isinstance(vcfg, dict):
-                        vfmt = vcfg.get("fmt", "webm") or "webm"
-                        vcodec = vcfg.get("codec", "vp9") or "vp9"
+                        vfmt = str(vcfg.get("fmt") or "")
+                        vcodec = vcfg.get("codec") or ""
                         crf = vcfg.get("crf"); fps = vcfg.get("fps")
                     src_ext = os.path.splitext(src)[1].lower()
-                    if src_ext == ("." + str(vfmt).lower().lstrip(".")):
-                        data, ext = raw, src_ext          # 存档格式与源文件一致 → 直接落盘，不重新编码
+                    if not vfmt:
+                        vfmt = src_ext.lstrip(".")      # 保持原样：加载进来的视频不重编码（容器相同就直接复制，保音轨）
+                    if src_ext == ("." + str(vfmt).lower().lstrip(".")) and not vcodec and not crf and not fps:
+                        data, ext = raw, src_ext          # 格式一致且没改编码/画质/帧率 → 直接落盘（保留音轨）
                     else:
                         res = _encode_video(raw, vfmt, vcodec, crf, fps)
                         if res:
                             data, ext = res
             except Exception:
                 data = None
+        elif entry.get("save_src"):
+            # 3D / MESH：源文件直接复制到存档目录（生成的 3D 跟着自动存档走）。
+            # 不做格式转换（safetensors→gguf 那种要重新导出），
+            # 选了别的扩展名时按源文件格式落盘，避免写出一个名不副实的文件。
+            try:
+                src = entry["save_src"]
+                if os.path.isfile(src):
+                    with open(src, "rb") as fh:
+                        raw = fh.read()
+                    src_ext = os.path.splitext(src)[1].lower()
+                    mcfg = sf.get("model3d") if entry.get("type") in ("MODEL_3D", "FILE_3D") else sf.get("model")
+                    want = ""
+                    if isinstance(mcfg, dict):
+                        want = str(mcfg.get("fmt") or "").lower().lstrip(".")
+                    ext = ("." + want) if want else src_ext
+                    if want and ext != src_ext:
+                        ext = src_ext
+                    data = raw
+            except Exception:
+                data = None
         elif entry.get("value"):
-            data = (entry.get("full_value") or entry["value"]).encode("utf-8")
+            _txt = str(entry.get("full_value") or entry["value"])
+            if entry.get("meta"):                     # 模型卡片：摘要正文 + 元数据 JSON，都写进信息文本
+                _txt += "\n\n" + str(entry["meta"])
+            data = _txt.encode("utf-8")
             tf = sf.get("text")
             text_fmt = tf.get("fmt", "txt") if isinstance(tf, dict) else (tf if isinstance(tf, str) else "txt")
             ext = "." + (text_fmt if text_fmt in ("txt", "md", "json", "csv", "log", "html") else "txt")
@@ -3588,9 +3699,9 @@ class PreviewAnyNode:
         if not ext or ext.lower() not in _SAVE_ALLOWED_EXTS:
             return entry      # 只写媒体/文本文档后缀；未知格式（.bat/.desktop/.sh 等）不落盘
         try:
-            import time
             dirpath = self._save_target_dir(cfg)
-            fname = PreviewAnyNode._sanitize_filename(name) + "_" + str(int(time.time() * 1000)) + ext
+            base, counter = PreviewAnyNode._save_base(cfg, dirpath, name)
+            fname = f"{base}_{counter + 1:05}{ext}"
             fpath = os.path.join(dirpath, fname)
             with open(fpath, "wb") as fh:
                 fh.write(data)
@@ -3730,19 +3841,19 @@ def _encode_audio(data_bytes, fmt, bitrate=None, sample_rate=None):
         import av
         from io import BytesIO
         fmt = (fmt or "wav").lower()
-        if fmt == "wav":
-            return data_bytes, ".wav"
-        codec = {"mp3": "libmp3lame", "flac": "flac", "ogg": "libvorbis", "m4a": "aac", "aac": "aac"}.get(fmt)
+        codec = {"wav": "pcm_s16le", "mp3": "libmp3lame", "flac": "flac", "ogg": "libvorbis", "m4a": "aac", "aac": "aac", "opus": "libopus"}.get(fmt)
         if not codec:
             return data_bytes, "." + fmt
+        container = {"m4a": "mp4", "aac": "adts", "opus": "ogg"}.get(fmt, fmt)   # pyav 的容器名和扩展名不总一样
         oidx = BytesIO()
         fsrc = BytesIO(data_bytes); fsrc.seek(0)
         with av.open(fsrc, mode="r") as inp:
-            with av.open(oidx, mode="w", format=fmt) as out:
+            with av.open(oidx, mode="w", format=container) as out:
                 ostream = out.add_stream(codec)
-                br = _bitrate_int(bitrate)
-                if br:
-                    ostream.bit_rate = br
+                if fmt not in ("wav", "flac"):   # 无损格式码率由内容决定，设了也没用
+                    br = _bitrate_int(bitrate)
+                    if br:
+                        ostream.bit_rate = br
                 if sample_rate:
                     try:
                         ostream.sample_rate = int(sample_rate)
@@ -3759,21 +3870,92 @@ def _encode_audio(data_bytes, fmt, bitrate=None, sample_rate=None):
         return None
 
 
+def _encode_frames_animated(paths, fmt, fps, quality=None, lossless=True):
+    """一批帧 → 动图（webp / png / gif），参数对齐内置 SaveAnimatedWEBP / SaveAnimatedPNG。"""
+    try:
+        if not paths:
+            return None
+        from io import BytesIO
+        from PIL import Image
+        fmt = (fmt or "webp").lower()
+        if fmt not in ("webp", "png", "gif"):
+            fmt = "webp"
+        imgs = []
+        for p in paths:
+            im = Image.open(p)
+            imgs.append(im.convert("RGB" if fmt == "gif" else "RGBA"))
+        if not imgs:
+            return None
+        dur = max(10, int(round(1000.0 / (float(fps) or 6.0))))
+        buf = BytesIO()
+        kw = {"save_all": True, "append_images": imgs[1:], "duration": dur, "loop": 0}
+        if fmt == "webp":
+            kw["lossless"] = bool(lossless)
+            if not lossless and quality:
+                kw["quality"] = int(quality)
+            imgs[0].save(buf, format="WEBP", **kw)
+            return buf.getvalue(), ".webp"
+        if fmt == "png":
+            imgs[0].save(buf, format="PNG", **kw)
+            return buf.getvalue(), ".png"
+        imgs[0].save(buf, format="GIF", **kw)
+        return buf.getvalue(), ".gif"
+    except Exception:
+        return None
+
+
+def _encode_frames_to_video(paths, fps, fmt="mp4", codec="", crf=None):
+    """一串图片帧 → 一个视频（内置 SaveVideo / SaveWEBM 做的事，PreviewAny 抽帧存档用）。"""
+    try:
+        if not paths:
+            return None
+        import av
+        from io import BytesIO
+        fmt = (fmt or "mp4").lower()
+        codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec, "libx264")
+        container = {"mkv": "matroska", "mov": "mov", "avi": "avi"}.get(fmt, fmt)
+        rate = float(fps) if fps else 24
+        oidx = BytesIO()
+        with av.open(oidx, mode="w", format=container) as out:
+            stream = out.add_stream(codec_name, rate=rate)
+            stream.pix_fmt = "yuv420p"
+            if crf:
+                try:
+                    stream.options = {"crf": str(int(crf))}
+                except Exception:
+                    pass
+            for p in paths:
+                with av.open(p, mode="r") as im:
+                    for frame in im.decode(video=0):
+                        frame.pts = None
+                        for pkt in stream.encode(frame):
+                            out.mux(pkt)
+            for pkt in stream.encode():
+                out.mux(pkt)
+        oidx.seek(0)
+        return oidx.getvalue(), "." + fmt
+    except Exception:
+        return None
+
+
 def _encode_video(data_bytes, fmt, codec="h264", crf=None, fps=None):
-    """把视频字节按所选容器/编码器/CRF/帧率重编码（av）。"""
+    """按所选容器/编码器/CRF/帧率重编码视频。**音轨跟着一起走**（内置 Save Video 也是这么做的）：
+    优先原样复制音轨（不重编码），容器不吃这个音频编码时再转码；实在不行才退回纯视频。"""
     try:
         import av
         from io import BytesIO
         fmt = (fmt or "webm").lower()
         codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec, "libvpx-vp9")
+        container = {"mkv": "matroska", "mov": "mov", "avi": "avi"}.get(fmt, fmt)
         oidx = BytesIO()
         fsrc = BytesIO(data_bytes); fsrc.seek(0)
         with av.open(fsrc, mode="r") as inp:
             vstream = next((s for s in inp.streams if s.type == "video"), None)
             if vstream is None:
                 return None
+            astream = next((s for s in inp.streams if s.type == "audio"), None)
             rate = float(fps) if fps else (float(vstream.average_rate) if vstream.average_rate else 24)
-            with av.open(oidx, mode="w", format=fmt) as out:
+            with av.open(oidx, mode="w", format=container) as out:
                 ostream = out.add_stream(codec_name, rate=rate)
                 ostream.pix_fmt = "yuv420p"
                 if crf:
@@ -3781,11 +3963,36 @@ def _encode_video(data_bytes, fmt, codec="h264", crf=None, fps=None):
                         ostream.options = {"crf": str(int(crf))}
                     except Exception:
                         pass
-                for frame in inp.decode(vstream):
-                    for p in ostream.encode(frame):
-                        out.mux(p)
+                oaudio = None
+                if astream is not None:
+                    try:
+                        oaudio = out.add_stream_from_template(astream)   # 直接复制音轨（不重编码）
+                    except Exception:
+                        try:
+                            acodec = "libopus" if fmt in ("webm", "ogg") else ("libmp3lame" if fmt == "avi" else "aac")
+                            oaudio = out.add_stream(acodec, rate=astream.rate)
+                        except Exception:
+                            oaudio = None
+                streams = [vstream] + ([astream] if astream is not None else [])
+                for packet in inp.demux(*streams):
+                    if packet.stream is vstream:
+                        for frame in packet.decode():
+                            for p in ostream.encode(frame):
+                                out.mux(p)
+                    elif astream is not None and packet.stream is astream and oaudio is not None:
+                        try:
+                            packet.stream = oaudio
+                            out.mux(packet)
+                        except Exception:
+                            pass
                 for p in ostream.encode():
                     out.mux(p)
+                if astream is not None and oaudio is not None:
+                    try:
+                        for p in oaudio.encode():
+                            out.mux(p)
+                    except Exception:
+                        pass
         oidx.seek(0)
         return oidx.getvalue(), "." + fmt
     except Exception:
@@ -6627,7 +6834,7 @@ _MEDIA_VID_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
 _MEDIA_AUD_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma"}
 _MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".spz", ".splat", ".ksplat", ".3ds", ".dae", ".blend"}
 # PreviewAny 存档允许的扩展名：只写媒体/文本文档，未知后缀（.bat/.desktop/.sh 等）一律不落盘。
-_SAVE_ALLOWED_EXTS = _MEDIA_IMG_EXTS | _MEDIA_VID_EXTS | _MEDIA_AUD_EXTS | {".txt", ".md", ".json", ".csv", ".log", ".html"}
+_SAVE_ALLOWED_EXTS = _MEDIA_IMG_EXTS | _MEDIA_VID_EXTS | _MEDIA_AUD_EXTS | {".txt", ".md", ".json", ".csv", ".log", ".html"} | {".safetensors", ".gguf", ".onnx", ".ckpt", ".pt", ".bin", ".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply"}
 
 
 def _media_kind(name):

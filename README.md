@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets (V1.2.11 stable)
+# Comfyui-EzFlex-Presets (V1.2.12 stable)
 
 **English** | [中文](README_ZH.md)
 
@@ -22,6 +22,7 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - **11 nodes in total**
 
 ## Version history:
+- V1.2.12: Tag-system performance improvements; fixed cards failing to fill content; fixed the display conflict between the tag hint and "@" media reference; fixed PreviewAny failing to save some media types; improved the save logic.
 - V1.2.11: Fixed several PromptHelper frontend bugs and the API-call issue; added API-call error hints; overhauled the tag system: random match/exclude field filters, related tags, a "Hide NSFW" filter, finer in-library tag classification, and a new anima 2.9B tag library.
 - V1.2.10: Fixed the ModelsCombo first output port disconnecting after switching windows, refreshing, or restarting; fixed preset selections being lost after switching windows or refreshing.
 - V1.2.9: Fixed Preview Any reading incorrect image generation info (prompt text is now read through connected nodes); fixed Node Switch Group possibly failing to match nodes after being copied. ModelsCombo keeps the trigger-words output port whenever it has a config (empty without LoRA).
@@ -117,11 +118,12 @@ Search for "EzFlex" in the ComfyUI node list and click to use.
 
 - Preview types: auto-detects any input type and renders the matching preview card (drag to reorder, cards are added/removed with connections).
 - Save settings: when enabled, clicking saves, otherwise preview only; choose the save location and save options.
+- Save options: type/quality follows the chosen format (lossless formats take no bitrate, lossless images take no quality); IMAGE / AUDIO / VIDEO offer "Keep source" (copy the loaded file as-is, no re-encode); the file name supports `%year% %month% %day% %hour% %minute% %second%` and falls back to the card name with an auto counter; MODEL / CLIP / VAE / LORA_MODEL save info text only (summary + metadata) and do not copy the model file.
 - Save types:
 
 | Type | Accepts | Preview | Formats |
 |---|---|---|---|
-| IMAGE | tensor `[B,H,W,C]` | thumbnail + full-screen original (batch: thumbnail strip in the popup, saved frame by frame) | PNG / JPEG / WebP / BMP / TIFF |
+| IMAGE | tensor `[B,H,W,C]` | thumbnail + full-screen original (batch: thumbnail strip in the popup; can save as image sequence / video / animated) | PNG / JPEG / WebP / BMP / TIFF / animated (WebP / PNG / GIF) |
 | MASK | 2D/3D tensor | grayscale PNG | PNG |
 | AUDIO | `{waveform,sample_rate}` or `(waveform,sr)` or a file object | player | WAV / MP3 / FLAC / OGG / M4A / AAC |
 | VIDEO | `VideoFromFile` / `VideoFromComponents` object | first-frame cover + player | MP4 / WebM / MOV / GIF / AVI / MKV |
@@ -141,7 +143,7 @@ Search for "EzFlex" in the ComfyUI node list and click to use.
 | EMPTY | not connected | "(not connected)" | — |
 
 - Preview method: data preview popup / generation info.
-- Image batches: a card exports up to 64 frames (extra frames are counted only); saving writes one file per frame as `name_<timestamp>_NN`. Batches and video frame sequences are indistinguishable from the tensor, so the badge follows the upstream node class name (video/frame/sequence…) and shows images / frames.
+- Image batches: a card exports up to 64 frames (extra frames are counted only); the badge follows the upstream node class name (video/frame/sequence…) and shows images / frames — a text-to-image batch and video frames are indistinguishable as tensors. The save mode is chosen per card via "Multi-image save type" on the card (Auto / Image sequence / Video / Animated, default Auto, only applies to multi-image cards): Auto = frames → video, batch images → one by one; the animated format / frame rate / lossless live in "Save types". Files are named `name_counter_NN`. Non-multi-image cards save normally by type.
 
 ### Prompt Helper (`EzFlex-PromptHelper`):
 
