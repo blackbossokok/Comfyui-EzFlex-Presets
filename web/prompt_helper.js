@@ -37,7 +37,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-09-27-v146';
+const PH_BUILD = '2026-09-27-v149';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -2322,7 +2322,8 @@ function insertMediaRefOnce(ed, m, targetId) {
   // （用 execCommand('insertHTML') 时，不可编辑的芯片会把光标留在芯片前面，还可能多包一层块导致自动换行）
   let range = null;
   try { if (_editorRange && ed.contains(_editorRange.commonAncestorContainer)) { range = _editorRange.cloneRange(); range.collapse(false); } } catch (_) { range = null; }
-  if (!range) { range = document.createRange(); range.selectNodeContents(ed); range.collapse(false); }
+  // 落点收进最后一个块里（缩进重建留下的块 / 占位 <br>），否则芯片会另起一行
+  if (!range || range.startContainer === ed) range = phEndRange(ed);
   const comma = document.createTextNode(',');
   try {
     range.insertNode(sp); range.setStartAfter(sp); range.collapse(true);
@@ -2730,6 +2731,7 @@ function attachMention(ed, ctxGetter) {
     if (at < 0) return hideMention();
     const q = before.slice(at + 1);
     if (/[\s\n\u200b\u3000]/.test(q)) return hideMention();   // 搜索词里出现空白 → 已经不是在打 @ 引用了
+    if (tgState()) { hideMention(); return; }   // 标签提示开着时「@」归标签候选，不弹媒体引用菜单
     const startPos = _frLocateChar(ed, at);
     if (!startPos || !startPos.node) return hideMention();
     mentionShow(ctxGetter ? ctxGetter() : null, q, startPos.node, startPos.offset, rng, ed);
@@ -5127,7 +5129,7 @@ function cmEntryMenu(x, y, entry) {
   cmMenu(x, y, [
     [ezT('Add cards'), () => cmAppend(names)],
     [ezT('Use cards'), () => cmUse(names)],
-    [ezT('Add as content'), () => cmInsertAsContent(x.name)],
+    [ezT('Add as content'), () => cmInsertAsContent(entry.name)],
     [ezT('Edit card'), () => cmEditEntry(entry.name)],
     [ezT('Quick split'), () => cmSplitEntry(entry.name)],
     [ezT('Batch manage'), () => cmBatchToggle(true)],
@@ -5217,7 +5219,8 @@ async function cmInsertAsContent(name) {
   ed.focus();
   let range = null;
   try { if (_editorRange && ed.contains(_editorRange.commonAncestorContainer)) { range = _editorRange.cloneRange(); range.collapse(false); } } catch (_) {}
-  if (!range) { range = document.createRange(); range.selectNodeContents(ed); range.collapse(false); }
+  // 落点收进最后一个块里（缩进重建留下的块 / 占位 <br>），否则插入的内容会另起一行
+  if (!range || range.startContainer === ed) range = phEndRange(ed);
   let pre = '';
   try { pre = (range.startOffset > 0 && (ed.textContent || '').length) ? ', ' : ''; } catch (_) {}
   try { range.insertNode(document.createTextNode(pre + text)); } catch (_) {}
@@ -5240,7 +5243,8 @@ async function cmInsertSaved(ed, name) {
   try { restoreSelection(); } catch (_) {}
   let range = null;
   try { if (_editorRange && ed.contains(_editorRange.commonAncestorContainer)) { range = _editorRange.cloneRange(); range.collapse(false); } } catch (_) {}
-  if (!range) { range = document.createRange(); range.selectNodeContents(ed); range.collapse(false); }
+  // 落点收进最后一个块里（缩进重建留下的块 / 占位 <br>），否则插入的内容会另起一行
+  if (!range || range.startContainer === ed) range = phEndRange(ed);
   const wrap = document.createElement('span');
   wrap.innerHTML = parts.join(join);
   while (wrap.firstChild) range.insertNode(wrap.firstChild);   // 插进光标处（insertNode 会顺序往后推，顺序不变）
@@ -5809,7 +5813,8 @@ function phInsertPlain(ed, name) {
   try { restoreSelection(); } catch (_) {}
   let range = null;
   try { if (_editorRange && ed.contains(_editorRange.commonAncestorContainer)) { range = _editorRange.cloneRange(); range.collapse(false); } } catch (_) {}
-  if (!range) { range = document.createRange(); range.selectNodeContents(ed); range.collapse(false); }
+  // 落点收进最后一个块里（缩进重建留下的块 / 占位 <br>），否则插入的内容会另起一行
+  if (!range || range.startContainer === ed) range = phEndRange(ed);
   // 末尾那个空块里的 <br> 是缩进占位用的：插入时顶掉它，否则标签会掉到下一行
   try {
     const last = ed.lastChild;
