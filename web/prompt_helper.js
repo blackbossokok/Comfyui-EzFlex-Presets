@@ -37,7 +37,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-09-27-v144';
+const PH_BUILD = '2026-09-27-v146';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -704,8 +704,12 @@ const CSS = `
 .eph-settings-sub input,.eph-settings-sub textarea,.eph-settings-sub select,.eph-settings-sub .eph-dd-trigger{pointer-events:auto;user-select:auto;-webkit-user-select:auto;}
 .eph-settings-grid label[data-tip]>span:first-child,.eph-settings-grid label.eph-switch[data-tip]>.eph-sw-label{border-bottom:1px dotted var(--ez-border-strong);}
 /* 参数说明浮层：鼠标在 [data-tip] 元素上停留 2 秒才显示（原生 title 延迟太长且不能换行）；只给 TextGenerate / llama 参数用 */
-.eph-tip{position:fixed;left:0;top:0;z-index:100100;max-width:330px;background:var(--ez-strong);color:var(--ez-on-strong);font-family:Inter,sans-serif;font-size:11px;line-height:1.65;padding:7px 10px;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.28);white-space:pre-line;display:none;pointer-events:none;}
+.eph-tip{position:fixed;left:0;top:0;z-index:100100;max-width:330px;background:rgba(255,255,255,.92);color:#111;font-family:Inter,sans-serif;font-size:11px;line-height:1.65;padding:7px 10px;border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.28);white-space:pre-line;display:none;pointer-events:none;}
 .eph-tip.active{display:block;}
+/* 相关标签：换行、换字体/颜色、一列一个 */
+.eph-tip-rel{margin-top:6px;padding-top:5px;border-top:1px solid rgba(0,0,0,.15);color:#333;font-family:Consolas,"JetBrains Mono",monospace;font-size:10.5px;line-height:1.5;max-height:240px;overflow:auto;}
+.eph-tip-rel-t{opacity:.65;margin-bottom:2px;}
+.eph-tip-rel-i{white-space:nowrap;}
 
 /* 总体编辑弹窗 */
 .eph-all{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:100005;background:rgba(0,0,0,.35);}
@@ -1232,7 +1236,21 @@ let _tipEl = null, _tipTimer = null, _tipFor = null;
 function setTip(node, text, fast) { if (node && text) { node.dataset.tip = text; if (fast) node.setAttribute('data-tip-fast', ''); } return node; }
 function placeTip(t) {
   if (!_tipEl || !_tipEl.parentNode) { _tipEl = el('div', 'eph-tip'); document.body.appendChild(_tipEl); }
-  _tipEl.textContent = t.dataset.tip; _tipEl.classList.add('active');
+  let text = t.dataset.tip || '', rel = null;
+  if (t.hasAttribute('data-tip-lazy') && t.dataset.tipTag) {   // 标签卡片：描述/相关悬停时才查
+    text = tpDescOf(t.dataset.tipTag) || '';
+    rel = tpRelatedOf(t.dataset.tipTag);
+  }
+  _tipEl.textContent = '';
+  if (text) { const d = el('div'); d.textContent = text; _tipEl.appendChild(d); }
+  if (rel && rel.length) {
+    const box = el('div', 'eph-tip-rel');
+    const hd = el('div', 'eph-tip-rel-t'); hd.textContent = ezT('Related'); box.appendChild(hd);
+    rel.forEach((nm) => { const li = el('div', 'eph-tip-rel-i'); li.textContent = tpZhOf(nm) ? (tpZhOf(nm) + '  ' + nm) : nm; box.appendChild(li); });
+    _tipEl.appendChild(box);
+  }
+  if (!text && !(rel && rel.length)) { hideTip(); return; }   // 没描述也没相关：不弹空泡
+  _tipEl.classList.add('active');
   const r = t.getBoundingClientRect(); const b = _tipEl.getBoundingClientRect();
   _tipEl.style.left = Math.min(Math.max(8, r.left), Math.max(8, window.innerWidth - b.width - 8)) + 'px';
   const below = r.bottom + 8;
@@ -1247,15 +1265,23 @@ document.addEventListener('mouseover', (e) => {
   const t = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
   if (t === _tipFor) return;              // 还在同一个字段内部移动：既不重计时也不隐藏
   if (!t) return;
+  if (t.hasAttribute('data-tip-suppress')) return;   // 刚右键过：鼠标还停在上面也不弹
   _tipFor = t;
   const _tipD = t.hasAttribute('data-tip-fast') ? 350 : _TIP_DELAY;   // 标签卡片用短延时，设置项保持长延时
-  _tipTimer = setTimeout(() => { _tipTimer = null; if (_tipFor === t) placeTip(t); }, _tipD);
+  _tipTimer = setTimeout(async () => {
+    _tipTimer = null;
+    if (_tipFor !== t) return;
+    if (t.hasAttribute('data-tip-lazy')) { try { await tpLoadDesc(); await tpLoadRelated(); } catch (_) {} if (_tipFor !== t) return; }
+    placeTip(t);
+  }, _tipD);
 });
 document.addEventListener('mouseout', (e) => {
   const t = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
-  if (!t || t !== _tipFor) return;
+  if (!t) return;
   const to = e.relatedTarget;
   if (to && to.nodeType === 1 && t.contains(to)) return;   // 字段内的子元素之间移动，不算移出
+  if (t.hasAttribute('data-tip-suppress')) t.removeAttribute('data-tip-suppress');   // 离开卡片后恢复悬停提示
+  if (t !== _tipFor) return;
   hideTip();
 });
 window.addEventListener('scroll', hideTip, true);
@@ -5362,7 +5388,7 @@ function tagBatchToggle(on) {
   renderTagPanel();
 }
 function tagSelAll(invert) {
-  const cur = _tpView.map((r) => r.key);   // 以当前显示的卡片为准（筛选/搜索/上限都算进去）
+  const cur = mergedRows(_tpLibId, _tpCat, _tpQ, 0, 0).rows.map((r) => r.key);   // 全选 = 整个匹配集，按需扫一遍
   _tpSel = invert ? new Set(cur.filter((n) => !_tpSel.has(n))) : new Set(cur);
   renderTagPanel();
 }
@@ -6088,13 +6114,15 @@ async function tpLoadLib(id) {
   if (_tpCache.has(id)) { _tpLib = _tpCache.get(id); return; }
   const r = await fetchApi(LIB_RAW_API + '?id=' + encodeURIComponent(id));
   const names = [], cats = [], alias = [], cnt = [];
+  const seen = new Set();
   if (r.ok) {
     (await r.text()).split('\uFEFF').join('').split('\n').forEach((line) => {
       if (!line) return;
       const f = tpFields(line);
       const nm = (f[0] || '').trim();
-      if (!nm) return;
-      names.push(nm); cats.push((f[1] || '').trim()); alias.push((f[3] || '').trim()); cnt.push(Number(f[2]) || 0);
+      if (!nm || seen.has(nm)) return;                 // 名字去重：后面的计数/搜索省掉一层去重表
+      seen.add(nm);
+      names.push(nm); cats.push((f[1] || '').trim()); alias.push((f[3] || '').trim().toLowerCase()); cnt.push(Number(f[2]) || 0);
     });
   }
   _tpLib = { names, cats, alias, cnt, set: new Set(names) };
@@ -6229,7 +6257,6 @@ function libCounts(libId, hideFurry) {
   const place = st.place || {};
   const favs = new Set(st.fav || []);
   c = {};
-  const seen = new Set();
   // 细分是任意深度的路径（person/body_parts/head_face）：每个祖先层都要计数，父层才显示得出总数
   const bumpAnc = (k) => {
     const parts = String(k).split('/');
@@ -6255,8 +6282,7 @@ function libCounts(libId, hideFurry) {
   if (lib) {
     for (let i = 0; i < lib.names.length; i++) {
       const nm = lib.names[i];
-      if (hiddenSet.has(nm) || seen.has(nm)) continue;
-      seen.add(nm);
+      if (hiddenSet.has(nm)) continue;
       if (hideFurry && tpFurry(lib.cats[i], nm)) continue;
       if (_tpHideNsfw && tpNsfwHas(nm)) continue;
       if (_tpFav && !favs.has(nm)) continue;
@@ -6271,9 +6297,8 @@ function libCounts(libId, hideFurry) {
   }
   // 我加进这个库的标签（CSV 里没有，但有库侧归类）
   Object.keys(place).forEach((nm) => {
-    if (seen.has(nm) || hiddenSet.has(nm)) return;
+    if (hiddenSet.has(nm)) return;
     if (lib && lib.set && lib.set.has(nm)) return;
-    seen.add(nm);
     if (_tpFav && !favs.has(nm)) return;
     if (_tpHideNsfw && tpNsfwHas(nm)) return;
     cnt(nm, place[nm], '');
@@ -6402,7 +6427,7 @@ function mineHitRec(cat, rec, ids) {
   return ids ? ids.has(c) : c === String(cat);
 }
 // 库 + 我的合并成一张卡片表；同一标签两侧各出一张（side 区分）
-function mergedRows(libId, cat, q, limit) {
+function tpEachMatch(libId, cat, q, onRow) {
   const lib = libId ? _tpCache.get(libId) : null;
   const hiddenSet = new Set(tpLibHidden());
   const st = (_tagDoc.libs || {})[libId] || {};
@@ -6412,7 +6437,8 @@ function mergedRows(libId, cat, q, limit) {
   const mineMap = tagMineOf();                 // 名字表只建一次（大库时别每条都重建）
   const catIds = (cat && cat !== CM_ALL && cat !== '__fav__' && cat !== '__mine__' && cat !== '__lib__') ? tpSubIds(cat) : null;
   const qq = String(q || '').trim().toLowerCase();
-  const out = [];
+  let n = 0;
+  const emit = (row) => { onRow(row, n); n++; };
   const libHit = (en, libCat) => {
     if (cat === CM_ALL || cat === '__lib__') return true;
     if (cat === '__fav__') return favSet.has(en);
@@ -6442,11 +6468,12 @@ function mergedRows(libId, cat, q, limit) {
       if (_tpHideNsfw && tpNsfwHas(en)) continue;
       if (_tpExword && _tpExword.length && _tpExword.some((w) => (en + ' ' + aliases + ' ' + zh).toLowerCase().indexOf(w) >= 0)) continue;
       if (qq) {
+        // 库里的英文名/别名/系列都是小写（别名在加载时已转小写），中文没有大小写 —— 直接 indexOf，
+        // 省掉每次搜索 30 万次 toLowerCase（实测 154ms → 24ms）
         const ser = (lib.cats[i] === '4') ? tpSeriesOf(en) : '';
-        if (en.toLowerCase().indexOf(qq) < 0 && String(zh || '').toLowerCase().indexOf(qq) < 0 && aliases.toLowerCase().indexOf(qq) < 0 && (!ser || ser.toLowerCase().indexOf(qq) < 0)) continue;
+        if (en.indexOf(qq) < 0 && String(zh || '').indexOf(qq) < 0 && aliases.indexOf(qq) < 0 && (!ser || ser.indexOf(qq) < 0)) continue;
       }
-      out.push({ en, zh: zh || '', color: (lm && lm.color) || '', weight: (lm && lm.weight) || '', preview: (rec && rec.preview) || '', desc: tpDescOf(en), rel: tpRelatedOf(en), n: Number(lib.cnt[i] || 0), side: 'lib', key: tpKey('lib', en), item: rec || null, fav: favSet.has(en) });
-      if (limit && out.length >= limit) break;
+      emit({ en, zh: zh || '', color: (lm && lm.color) || '', weight: (lm && lm.weight) || '', preview: (rec && rec.preview) || '', n: Number(lib.cnt[i] || 0), side: 'lib', key: tpKey('lib', en), item: rec || null, fav: favSet.has(en) });
     }
   }
   // 我加进库里的标签（CSV 里没有，但有库侧归类）
@@ -6462,9 +6489,8 @@ function mergedRows(libId, cat, q, limit) {
     const lm = meta[en] || null;
     const zh = (lm && lm.zh) || tpZhOf(en);
     if (_tpExword && _tpExword.length && _tpExword.some((w) => (en + ' ' + zh).toLowerCase().indexOf(w) >= 0)) continue;
-    if (qq && en.toLowerCase().indexOf(qq) < 0 && String(zh || '').toLowerCase().indexOf(qq) < 0) continue;
-    out.push({ en, zh: zh || '', color: (lm && lm.color) || '', weight: (lm && lm.weight) || '', preview: (rec && rec.preview) || '', desc: tpDescOf(en), rel: tpRelatedOf(en), n: 0, side: 'lib', key: tpKey('lib', en), item: rec || null, fav: favSet.has(en) });
-    if (limit && out.length >= limit) break;
+    if (qq && en.indexOf(qq) < 0 && String(zh || '').indexOf(qq) < 0) continue;
+    emit({ en, zh: zh || '', color: (lm && lm.color) || '', weight: (lm && lm.weight) || '', preview: (rec && rec.preview) || '', n: 0, side: 'lib', key: tpKey('lib', en), item: rec || null, fav: favSet.has(en) });
   }
   for (let i = 0; i < _tagDoc.tags.length; i++) {
     const t = _tagDoc.tags[i];
@@ -6478,13 +6504,22 @@ function mergedRows(libId, cat, q, limit) {
     const lm = meta[en] || null;
     const zh = t.zh || (lm && lm.zh) || tpZhOf(en);   // 我的侧优先自己的覆盖，再退回库侧
     if (_tpExword && _tpExword.length && (en + ' ' + (zh || '')).toLowerCase().indexOf(_tpExword[0]) >= 0) continue;
-    if (qq && en.toLowerCase().indexOf(qq) < 0 && String(zh || '').toLowerCase().indexOf(qq) < 0) continue;
-    out.push({ en, zh: zh || '', color: t.color || (lm && lm.color) || '', weight: t.weight || (lm && lm.weight) || '', preview: t.preview || '', desc: tpDescOf(en), rel: tpRelatedOf(en), n: 0, side: 'mine', key: tpKey('mine', en), item: t, mine: true, own: !(lib && lib.set.has(en)), fav: !!t.fav });
-    if (limit && out.length >= limit) break;
+    if (qq && en.indexOf(qq) < 0 && String(zh || '').indexOf(qq) < 0) continue;
+    emit({ en, zh: zh || '', color: t.color || (lm && lm.color) || '', weight: t.weight || (lm && lm.weight) || '', preview: t.preview || '', n: 0, side: 'mine', key: tpKey('mine', en), item: t, mine: true, own: !(lib && lib.set.has(en)), fav: !!t.fav });
   }
+  return n;
+}
+// 正常浏览只要当前页：扫一遍（不建对象）拿到总数，只把这一页的卡片建出来；
+// _tpSort 不是默认序（按名字/按热度要整体排）或全选/跳转时才要整张表。
+function mergedRows(libId, cat, q, limit, offset) {
+  const out = [];
+  const skip = offset || 0;
+  const total = tpEachMatch(libId, cat, q, (row, i) => {
+    if (i >= skip && (!limit || out.length < limit)) out.push(row);
+  });
   if (_tpSort === 'count') out.sort((a, b) => b.n - a.n);
   else if (_tpSort === 'name') out.sort((a, b) => a.en.localeCompare(b.en));
-  return out;
+  return { total: total, rows: out };
 }
 // 面板里的卡片和标签管理用同一套样式：缩略区显示中文，下面一行英文
 // 卡片：上面预览区（没预览图就一个小图图标，中文不放里面），下面「中文 / 英文」各一行居中
@@ -7145,7 +7180,7 @@ async function tpCatDrop(from, toId, mode) {
 }
 // 多选（批量管理 / Ctrl / Shift）：单点只选它、Ctrl 切换、Shift 从上次点到这次连选（同卡片管理）
 function tpPickTile(key, shift, mod) {
-  const keys = _tpView.map((x) => x.key);
+  const keys = mergedRows(_tpLibId, _tpCat, _tpQ, 0, 0).rows.map((x) => x.key);   // Shift 连选要全局位置表
   const a = keys.indexOf(_tpLast), b = keys.indexOf(key);
   if (shift && a >= 0 && b >= 0) {
     if (!mod) _tpSel = new Set();
@@ -7294,11 +7329,14 @@ function renderTagPanel() {
   // 完整匹配列表：全选/反选按它算（不截断）；只在库/分组/搜索/排序/筛选/数据变了时才重建整张表
   // （大库有十几万条，翻页/重画不能再全量扫一遍）
   const sig = [_tpLibId, _tpCat, _tpQ, _tpSort, _tpFav, _tpEx621, _tpHideNsfw, _tpExword.join(','), _tpExcat.join(','), _tpDocV].join('|');
-  if (sig !== _tpSig) { _tpSig = sig; _tpPage = 1; _tpView = mergedRows(_tpLibId, _tpCat, _tpQ, 0); }   // 换库/分组/筛选/数据变了 → 回第一页
-  const all = _tpView;
-  const totalPages = Math.max(1, Math.ceil(all.length / _tpPer));
-  if (_tpPage > totalPages) _tpPage = totalPages;
-  const cards = all.slice((_tpPage - 1) * _tpPer, (_tpPage - 1) * _tpPer + _tpPer);
+  if (sig !== _tpSig) { _tpSig = sig; _tpPage = 1; }   // 换库/分组/筛选/数据变了 → 回第一页
+  // 默认序按库内顺序：只扫出当前页的卡片；按名字/按热度要整体排，才需要整张表
+  const needAll = _tpSort !== 'default';
+  let res = mergedRows(_tpLibId, _tpCat, _tpQ, needAll ? 0 : _tpPer, needAll ? 0 : (_tpPage - 1) * _tpPer);
+  let totalPages = Math.max(1, Math.ceil(res.total / _tpPer));
+  if (_tpPage > totalPages) { _tpPage = totalPages; res = mergedRows(_tpLibId, _tpCat, _tpQ, needAll ? 0 : _tpPer, needAll ? 0 : (_tpPage - 1) * _tpPer); }
+  _tpView = res.rows;
+  const cards = needAll ? res.rows.slice((_tpPage - 1) * _tpPer, (_tpPage - 1) * _tpPer + _tpPer) : res.rows;
   const keepTop = list.scrollTop;
   list.innerHTML = '';
   if (!cards.length) { const e = el('div', 'eph-cm-empty'); e.textContent = ezT('No tags here.'); list.appendChild(e); }
@@ -7307,8 +7345,11 @@ function renderTagPanel() {
       if (_tpBatch) { tpPickTile(r.key, !!(e && e.shiftKey), !!(e && (e.ctrlKey || e.metaKey))); return; }   // 批量模式才有多选
       if (_tpIns.indexOf(r.en) >= 0) tpRemove(r.en); else tpAdd(r.en);   // 平时只有插入 / 取消插入
     });
-    const tipParts = [r.desc, (r.rel && r.rel.length) ? ezT('Related') + ': ' + r.rel.join(', ') : ''].filter(Boolean);
-    if (tipParts.length) { tile.removeAttribute('title'); setTip(tile, tipParts.join('  ·  '), true); }   // 中文短描述 + 相关标签：悬停显示
+    tile.removeAttribute('title');           // 描述/相关改成悬停时按需加载，不在开面板时全量解析
+    tile.setAttribute('data-tip', '');
+    tile.setAttribute('data-tip-fast', '');
+    tile.setAttribute('data-tip-lazy', '');
+    tile.dataset.tipTag = r.en;
     if (r.side === 'mine') tile.classList.add('mine');
     if (_tpSel.has(r.key)) tile.classList.add('sel');
     if (_tpIns.indexOf(r.en) >= 0) tile.classList.add('on');
@@ -7323,11 +7364,16 @@ function renderTagPanel() {
       try { e.dataTransfer.setData('text/plain', r.key); e.dataTransfer.effectAllowed = 'move'; } catch (_) {}
     });
     tile.addEventListener('dragend', () => { _tpDragId = ''; });
-    tile.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); tpCardMenu(r, e.clientX, e.clientY); });
+    tile.addEventListener('contextmenu', async (e) => {
+      e.preventDefault(); e.stopPropagation();
+      tile.setAttribute('data-tip-suppress', ''); hideTip();   // 右键后先收掉气泡，即使鼠标还停在卡片上
+      try { await tpLoadRelated(); } catch (_) {}              // 相关标签按需加载，右键菜单才拿得到
+      tpCardMenu(r, e.clientX, e.clientY);
+    });
     list.appendChild(tile);
   });
-  _tpPages = totalPages; _tpTotalN = all.length;
-  tpPageBar(p._tpPage, _tpPage, totalPages, all.length);
+  _tpPages = totalPages; _tpTotalN = res.total;
+  tpPageBar(p._tpPage, _tpPage, totalPages, res.total);
   list.scrollTop = keepTop;
   renderTpIns();
 }
@@ -7684,7 +7730,7 @@ async function tpGotoTag(en) {
   _tpScrollSel = true;
   renderTagPanel();
   // 再落到"这个标签所在的那一页"（换分组会把页码重置成 1，所以必须渲染完再定）
-  const all = _tpView;   // renderTagPanel 刚按当前分组重建过
+  const all = mergedRows(_tpLibId, _tpCat, _tpQ, 0, 0).rows;   // 跳转要全局位置，按需整表扫一遍
   const idx = all.findIndex((x) => x.en === en);
   if (idx >= 0) {
     const pg = Math.floor(idx / _tpPer) + 1;
@@ -8403,9 +8449,7 @@ async function openTagPicker(targetEd, anchor) {
   await tpLoadDrop();
   await tpLoadKind();
   await tpLoadSeries();
-  await tpLoadNsfw();
-  await tpLoadDesc();
-  await tpLoadRelated();
+  await tpLoadNsfw();   // 筛选要用；描述/相关改成悬停按需加载，这里不预加载
   if (!_tpEl || !_tpEl.parentNode) {
     const p = el('div', 'eph-tp');
     const hd = el('div', 'eph-tp-hd');
@@ -8650,7 +8694,12 @@ async function openTagPicker(targetEd, anchor) {
       ]);
     });
     close.addEventListener('click', closeTagPicker);
-    search.addEventListener('input', () => { _tpQ = search.value; renderTagPanel(); });
+    let tpQTimer = null;
+    search.addEventListener('input', () => {
+      _tpQ = search.value;
+      if (tpQTimer) clearTimeout(tpQTimer);
+      tpQTimer = setTimeout(() => { tpQTimer = null; renderTagPanel(); }, 130);   // 大库：别每个键都全表扫
+    });
     libDD.addEventListener('change', async (v) => {
       _tpLibId = v; _tpCat = CM_ALL; _tpQ = ''; search.value = '';
       await tpLoadLib(v); renderTagPanel();
