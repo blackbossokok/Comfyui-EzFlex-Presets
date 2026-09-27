@@ -494,8 +494,9 @@ function setupNode(node) {
     renderPanel(node, connectedCard(node));
     installOutsideLabels(node);
     forceShell(node);
-    const settle = setInterval(() => { forceShell(node); const a = updatePorts(node, true); renderPanel(node, connectedCard(node)); installOutsideLabels(node); if (!a) { settle._n = (settle._n || 0) + 1; if (settle._n >= 4) clearInterval(settle); } }, 250);
-    let retry = 0; (function retry() { forceShell(node); installOutsideLabels(node); if (retry < 12) { retry += 1; setTimeout(retry, 120); } })();
+    let settleN = 0;   // setInterval 返回的是数字 id，不能往上面挂属性（严格模式会抛 TypeError）
+    const settle = setInterval(() => { forceShell(node); const a = updatePorts(node, true); renderPanel(node, connectedCard(node)); installOutsideLabels(node); if (!a) { settleN += 1; if (settleN >= 4) clearInterval(settle); } }, 250);
+    let retry = 0; (function again() { forceShell(node); installOutsideLabels(node); if (retry < 12) { retry += 1; setTimeout(again, 120); } })();
     setTimeout(() => { try { updatePorts(node, true); syncOutputTypes(node); renderPanel(node, connectedCard(node)); fitNode(node); } catch (_) {} }, 400);
   } catch (e) { console.error('[MediaOut] init failed', e); }
 }
