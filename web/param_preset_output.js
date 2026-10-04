@@ -9,7 +9,7 @@ import { api } from "../../scripts/api.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import { ezThemeInit } from "./ezflex_theme.js";
 import {
-  NODE_TYPES, nodeTypeOf, findNodeById, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels,
+  NODE_TYPES, nodeTypeOf, findNodeById, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.PARAM_OUT;
@@ -264,7 +264,7 @@ function updatePorts(node, noRedraw) {
     groupSock._ezFixedGroup = true;
     changed = true;
   }
-  try { groupSock.label = ''; groupSock.hideName = true; groupSock.hidden = false; } catch (_) {}
+  try { hideNativeSlotText(groupSock); groupSock.hidden = false; } catch (_) {}
   if (groupSock.color_on !== GROUP_RED) { groupSock.color_on = GROUP_RED; groupSock.color_off = GROUP_RED; groupSock.color = GROUP_RED; changed = true; }
 
   // ---- 参数 socket：先按参数 id 匹配复用（单->全部时保留下拉选中的参数 socket），
@@ -319,7 +319,7 @@ function updatePorts(node, noRedraw) {
     if (sock._ezParamId !== w.id) { sock._ezParamId = w.id; changed = true; }
     if (sock.name !== w.name) { sock.name = w.name; changed = true; }
     if (sock.type !== w.type) { try { sock.type = w.type; } catch (_) {} changed = true; }
-    try { sock.label = ''; sock.hideName = true; sock.hidden = false; } catch (_) {}
+    try { hideNativeSlotText(sock); sock.hidden = false; } catch (_) {}
     seq.push(sock);
   });
   // 删除未被复用的旧参数 socket（其连线随之消失）

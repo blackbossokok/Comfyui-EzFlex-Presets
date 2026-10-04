@@ -23,6 +23,9 @@ const SCAFFOLD_TYPES = [
   NODE_TYPES.COMBO, NODE_TYPES.LATENT, NODE_TYPES.MASTER, NODE_TYPES.GROUP,
   NODE_TYPES.PARAM_CTRL, NODE_TYPES.PARAM_OUT,
   NODE_TYPES.PROMPT_HELPER, NODE_TYPES.MEDIA_LOADER, NODE_TYPES.PREVIEW_ANY,
+  // 循环 / 转接系列（V1.3.0 新增）：顺序 = 加载全部里那一排的排列顺序
+  NODE_TYPES.MERGE_LIST, NODE_TYPES.SPLIT_LIST, NODE_TYPES.REROUTE,
+  NODE_TYPES.LOOP_START, NODE_TYPES.LOOP_END, NODE_TYPES.TIME_LINE,
 ];
 const SCAFFOLD_LABEL = {
   [NODE_TYPES.COMBO]: 'Models Combo Loader',
@@ -34,13 +37,27 @@ const SCAFFOLD_LABEL = {
   [NODE_TYPES.PROMPT_HELPER]: 'Prompt Helper',
   [NODE_TYPES.MEDIA_LOADER]: 'Media Loader',
   [NODE_TYPES.PREVIEW_ANY]: 'Preview Any',
+  [NODE_TYPES.MERGE_LIST]: 'Merge List',
+  [NODE_TYPES.SPLIT_LIST]: 'Split List',
+  [NODE_TYPES.REROUTE]: 'Reroute',
+  [NODE_TYPES.LOOP_START]: 'Loop Start',
+  [NODE_TYPES.LOOP_END]: 'Loop End',
+  [NODE_TYPES.TIME_LINE]: 'Time Line',
 };
 // 加载全部的排布（以「总控制」自身为基准，间距 30px）：
 //   左列（右缘对齐，右缘 = 总控制左缘 − 30）：素材加载器（底边与总控制平齐）→ 模型组合 → 提示词助手，依次下移 30px
 //   中列（左缘 = 总控制左缘）：节点总控制、参数预设控制，自总控制底边 +30px 起依次下移 30px
 //   右列（左缘 = 总控制右缘）：节点开关组、参数输出控制，同上
 //   分辨率：总控制右侧 +30px、底部平齐；任意预览：参数输出控制右侧 +30px、底部平齐
+//   ★ 循环/转接一排：参数预设控制**下方** +30px，**左缘与参数预设控制对齐**，向右依次排开（横向，共用同一个可视上边）
+//       顺序 = 合并列表 → 拆分列表 → 转接节点 → 开启循环 → 结束循环
+//   ★ 时间轴：任意预览**右侧** +30px、**底边与任意预览平齐**
 const SCAFFOLD_GAP = 30;
+// 循环/转接那一排的排列顺序（也是「加载全部」里从左到右的顺序）
+const LOOP_ROW = [
+  NODE_TYPES.MERGE_LIST, NODE_TYPES.SPLIT_LIST, NODE_TYPES.REROUTE,
+  NODE_TYPES.LOOP_START, NODE_TYPES.LOOP_END,
+];
 
 // ⚠️ LiteGraph 的 node.pos 是「标题栏下沿」的左上角，标题栏画在 pos 上方（高 = LiteGraph.NODE_TITLE_HEIGHT，
 // 与渲染时用的那个常数同源）。纵向推进量必须算上标题栏，否则下一个节点的标题会顶在上一个节点身上（贴在一起）。
@@ -77,6 +94,16 @@ function scaffoldLayout(mainBox, boxes) {
     const b = boxOf(t); visTop += G; putLeft(t, mLeft, visTop); visTop += TITLE + b.h;
   });
 
+  // ★ 循环/转接一排：接在「参数预设控制」下方（此刻 visTop = 它的可视底边），
+  //   左缘与参数预设控制对齐（都是 mLeft），向右依次排开 —— 共用同一个可视上边，横向推进。
+  const rowTop = visTop + G;
+  let rowX = mLeft;
+  LOOP_ROW.forEach((t) => {
+    const b = boxOf(t);
+    putLeft(t, rowX, rowTop);
+    rowX += b.w + G;
+  });
+
   // 右列：总控制右缘下方（记录末节点右缘/底边，供「任意预览」对齐）
   visTop = mBottom;
   let colRight = mRight, colBottom = mBottom;
@@ -87,6 +114,11 @@ function scaffoldLayout(mainBox, boxes) {
   // 分辨率：总控制右侧、底边平齐；任意预览：参数输出控制右侧、底边平齐
   putBottom(NODE_TYPES.LATENT, mRight + G, mBottom);
   putBottom(NODE_TYPES.PREVIEW_ANY, colRight + G, colBottom);
+
+  // ★ 时间轴：任意预览右侧 +G，底边与任意预览平齐
+  //   （任意预览的可视右缘 = 它的左缘 colRight+G + 自身宽；putBottom 按「可视底边」反推 y）
+  const pvW = boxOf(NODE_TYPES.PREVIEW_ANY).w;
+  putBottom(NODE_TYPES.TIME_LINE, colRight + G + pvW + G, colBottom);
   return out;
 }
 

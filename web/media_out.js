@@ -4,9 +4,13 @@
 // 单文件卡片 = 1 个输出；多文件（批量）卡片 = N 个输出。局部禁用某文件时保留端口、输出 None。
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { NODE_TYPES, nodeTypeOf, findNodeById, configWidget, installResizeHandles, makeDomWidgetHitThrough, TYPE_ICONS, notifyConfigChanged, scheduleOnRedraw, pumpFrames, pageRange } from "./ezflex_service.js";
+import { NODE_TYPES, nodeTypeOf, findNodeById, configWidget, installResizeHandles, makeDomWidgetHitThrough, hideNativeSlotText, TYPE_ICONS, model3dIcon, notifyConfigChanged, scheduleOnRedraw, pumpFrames, pageRange } from "./ezflex_service.js";
 import { ezT, onLocaleChange } from "./ezflex_i18n.js";
 import { ezThemeInit } from "./ezflex_theme.js";
+
+// 3D 模型统一用 PNG 图标（TYPE_ICONS.model_3d 是 SVG，别的节点仍用）
+const is3dKind = (k) => /^(model_3d|model|3d)$/.test(String(k || '').toLowerCase());
+const iconFor = (k, s) => (is3dKind(k) ? model3dIcon(s) : (TYPE_ICONS[k] || TYPE_ICONS.other));
 
 const NODE = NODE_TYPES.MEDIA_OUT;
 const API = "/media_out/outputs";
@@ -29,6 +33,10 @@ const CSS = `
 .emoo-mode button.active{background:var(--ez-bg);color:var(--ez-fg);box-shadow:0 1px 4px rgba(0,0,0,.06);font-weight:510;}
 .emoo-status{font-size:10px;color:var(--ez-fg-muted);white-space:nowrap;}
 .emoo-status.on{color:var(--ez-ok-fg);font-weight:500;}
+.emoo-lblbtn{display:inline-flex;align-items:center;gap:3px;height:24px;padding:0 8px;border-radius:8px;border:1px solid var(--ez-border);background:var(--ez-surface-3);color:var(--ez-fg-muted);font-family:inherit;font-size:11px;font-weight:500;cursor:pointer;flex:0 0 auto;line-height:1;}
+.emoo-lblbtn:hover{background:var(--ez-surface-4);}
+.emoo-lblbtn.on{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);}
+.emoo-lblbtn.off{background:var(--ez-surface-3);border-color:var(--ez-border);color:var(--ez-fg-muted);}
 .emoo-list{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column;gap:6px;}
 .emoo-page{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 auto;padding-top:4px;border-top:1px solid var(--ez-border-2);font-size:12px;color:var(--ez-fg-3);justify-content:space-between;}
 .emoo-page-l,.emoo-page-r{display:flex;align-items:center;gap:4px;flex:0 0 auto;}
@@ -73,29 +81,39 @@ const CSS = `
 .emoo-modal input:disabled{background:var(--ez-surface-3);color:var(--ez-fg-muted);}
 .emoo-modal-ft{display:flex;justify-content:flex-end;gap:8px;padding:10px 16px;border-top:1px solid var(--ez-border-2);}
 .emoo-socket-label{position:fixed;z-index:20;pointer-events:none;background:rgba(12,16,24,.4);color:#eef1f6;font-size:9px;line-height:1;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,.18);white-space:nowrap;user-select:none;display:inline-flex;align-items:center;}
+.emoo-socket-label svg{width:1.2em;height:1.2em;flex:0 0 auto;}
+.emoo-socket-label .emoo-sockic{display:inline-flex;align-items:center;margin-right:1px;}
+.emoo-no{min-width:14px;flex:0 0 auto;font-size:10px;color:var(--ez-fg-3);text-align:right;font-variant-numeric:tabular-nums;}
 `;
 
 let _styleInjected = false;
 let _widgetSeq = 0;
+// 输出端口文件名黑框标签的全局开关：绿=显示、灰=隐藏（文件名太长看不见画布时用）
+const MO_LABELS_LS = 'ezflex.moLabels';
+let _moLabels = null;
+function moLabelsOn() {
+  if (_moLabels === null) { try { _moLabels = window.localStorage.getItem(MO_LABELS_LS) !== '0'; } catch (_) { _moLabels = true; } }
+  return _moLabels;
+}
+function moLabelsSet(on) {
+  _moLabels = !!on;
+  try { window.localStorage.setItem(MO_LABELS_LS, _moLabels ? '1' : '0'); } catch (_) {}
+  document.querySelectorAll('.emoo-lblbtn').forEach((b) => { b.classList.toggle('on', _moLabels); b.classList.toggle('off', !_moLabels); b.title = _moLabels ? ezT('Hide port labels') : ezT('Show port labels'); });
+  try { if (app && app.graph) app.graph.setDirtyCanvas(true, true); } catch (_) {}
+  try { pumpFrames(); } catch (_) {}
+}
+const MO_LABEL_ICON = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0l-7.2-7.2V4h9.4l7.8 7.8a2 2 0 0 1 0 2.8z"/><circle cx="7.5" cy="7.5" r="1.1"/></svg>';
 function injectStyle() {
   ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 function nextWidgetType() { _widgetSeq += 1; return 'emoo-config__' + _widgetSeq.toString(36); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 function configWidgetOf(node) { return configWidget(node); }
 
-// ===== config / 本地禁用 + 输出模式 + 图片合并对齐 =====
+// ===== config：只保留「局部禁用」（输出模式/拼接已移到 MediaLoader）=====
 function readLocalOff(node) {
   const w = configWidgetOf(node); if (!w) return {};
-  node._ezMode = 'split';
-  node._ezFit = { size: 'first', fit: 'crop' };
   try {
     const cfg = JSON.parse(w.value || '{}') || {};
-    node._ezMode = ['card', 'row', 'group'].includes(cfg.mode) ? cfg.mode : 'split';
-    const f = cfg.fit;
-    if (f && typeof f === 'object') {
-      if (typeof f.size === 'string' && f.size) node._ezFit.size = f.size;
-      if (['crop', 'pad', 'stretch'].includes(f.fit)) node._ezFit.fit = f.fit;
-    }
     const off = Array.isArray(cfg.off) ? cfg.off : []; const m = {};
     off.forEach((id) => { m[id] = true; });
     return m;
@@ -103,49 +121,29 @@ function readLocalOff(node) {
 }
 function writeLocalOff(node) {
   const w = configWidgetOf(node); if (!w) return;
-  const off = []; const map = node._ezLocalOff || {};
-  Object.keys(map).forEach((k) => { if (map[k]) off.push(k); });
-  w.value = JSON.stringify({ mode: node._ezMode || 'split', off, fit: node._ezFit || { size: 'first', fit: 'crop' } });
+  const map = node._ezLocalOff || {};
+  const items = (connectedItems(node) || {}).items || [];
+  const off = []; const offIdx = [];
+  Object.keys(map).forEach((k) => { if (map[k]) { off.push(k); const i = items.findIndex((x) => String(x.id) === String(k)); if (i >= 0) offIdx.push(i); } });
+  w.value = JSON.stringify({ off, offIdx });
   if (typeof w.callback === 'function') w.callback(w.value);
   if (node.graph) node.graph.setDirtyCanvas(true, true);
   notifyConfigChanged(node);
 }
 function str(s) { return (s === undefined || s === null) ? '' : String(s); }
 
-// ===== 读取所连卡片（MediaLoader 输出）=====
-function connectedCard(node) {
+// ===== 读取所连 MediaLoader 口上的项（loader 端 mlPortItems 算好挂在 socket._ezItems）=====
+function connectedItems(node) {
   const inp = (node.inputs || [])[0];
   if (!inp || inp.link == null) return null;
   const graph = node.graph;
   const link = graph && graph.links && graph.links[inp.link];
   if (!link) return null;
   const origin = findNodeById(link.origin_id) || (graph && graph._nodes ? graph._nodes.find((n) => n && String(n.id) === String(link.origin_id)) : null);
-  if (!origin || nodeTypeOf(origin) !== NODE_TYPES.MEDIA_LOADER) return null;
-  const slot = link.origin_slot;
-  const sock = (origin.outputs || [])[slot];
-  let cardId = sock && sock._ezCardId;
-  let cfg = {};
-  try { const w = configWidgetOf(origin); cfg = JSON.parse(w ? (w.value || '{}') : '{}') || {}; } catch (_) { cfg = {}; }
-  if (cardId == null) { const order = []; (cfg.groups || []).forEach((g) => (g.cards || []).forEach((c) => order.push(c))); const c = order[slot]; if (c) cardId = c.id; }
-  let card = null;
-  (cfg.groups || []).forEach((g) => (g.cards || []).forEach((c) => { if (String(c.id) === String(cardId)) card = c; }));
-  if (!card) return null;
-  const files = [];
-  (card.items || []).forEach((it) => (it.files || []).forEach((f) => files.push(f)));
-  return { origin, cardId, card, files };
-}
-// 读取所连 MediaLoader 的完整配置（供 card/row/group 模式按整张结构归组）
-function connectedLoader(node) {
-  const inp = (node.inputs || [])[0];
-  if (!inp || inp.link == null) return null;
-  const graph = node.graph;
-  const link = graph && graph.links && graph.links[inp.link];
-  if (!link) return null;
-  const origin = findNodeById(link.origin_id) || (graph && graph._nodes ? graph._nodes.find((n) => n && String(n.id) === String(link.origin_id)) : null);
-  if (!origin || nodeTypeOf(origin) !== NODE_TYPES.MEDIA_LOADER) return null;
-  let cfg = {};
-  try { const w = configWidgetOf(origin); cfg = JSON.parse(w ? (w.value || '{}') : '{}') || {}; } catch (_) { cfg = {}; }
-  return { origin, cfg };
+  if (!origin) return null;
+  const sock = (origin.outputs || [])[link.origin_slot];
+  // 任何上游口只要挂了 _ezItems 就能拆（MediaLoader 一定有；MergeList/SplitList/TimeLine 也会挂）
+  return { origin, items: (sock && Array.isArray(sock._ezItems)) ? sock._ezItems : [] };
 }
 function kindOf(n) {
   const ext = (n || '').split('.').pop().toLowerCase();
@@ -161,27 +159,24 @@ function fileKind(f) {
   if (byName !== 'other') return byName;
   return String((f && f.type) || 'other').toLowerCase();
 }
-function structRows(cfg) {
-  const rows = [];
-  (cfg.groups || []).forEach((grp) => { const gname = (grp.name || '').trim() || ezT('Group'); (grp.cards || []).forEach((c) => { const items = []; (c.items || []).forEach((it) => { const files = []; (it.files || []).forEach((f) => files.push(Object.assign({}, f, { name: f.name || '', type: fileKind(f) }))); items.push({ id: it.id, files }); }); const cname = (c.name || '').trim() || ezT('Card group'); rows.push({ group: gname, cardId: c.id, label: gname + '_' + cname, items }); }); });
-  return rows;
+// 端口承载的媒体类型（盖过章的按文件类型，没盖章的退回端口声明类型）——切换输出模式时按它「同类型补位」
+function sockKind(s) {
+  const files = (s && (s._ezFiles || s._ezItems)) || [];
+  const f0 = Array.isArray(files) ? files.find((x) => x) : null;
+  if (f0) { const k = fileKind(f0); if (k !== 'other') return k; }
+  const t = String((s && s.type) || '').toUpperCase();
+  const byType = ({ IMAGE: 'image', VIDEO: 'video', AUDIO: 'audio', FILE_3D: 'model_3d', MODEL_3D: 'model_3d' })[t];
+  if (byType) return byType;
+  const n = String((s && s.name) || '');   // 类型是 '*' 的旧工作流：从端口名兜底（文件名带扩展名，槽位口叫 Image 1 / Video 1）
+  const byName = kindOf(n);
+  if (byName !== 'other') return byName;
+  if (/video|视频/i.test(n)) return 'video';
+  if (/audio|音频/i.test(n)) return 'audio';
+  if (/image|图片|picture/i.test(n)) return 'image';
+  if (/model|3d|模型/i.test(n)) return 'model_3d';
+  return 'other';
 }
-// 分组的端口类型：同一类型就用该类型（多张图=IMAGE 批量张量、多段音频=AUDIO 拼接），混用才退化成 '*'
-// 后端 _mo_one / _mo_merge_values 是同一套规则，两边必须一致。
-function oneGroup(files, name) {
-  const kinds = new Set((files || []).map((f) => fileKind(f)));
-  const k = kinds.size === 1 ? Array.from(kinds)[0] : '';
-  const type = k ? (TYPE_MAP[k] || 'STRING') : '*';
-  const label = (name || ezT('Media')) + (files.length > 1 ? ' ×' + files.length : '');
-  return { name: label, type, kind: k, files };
-}
-function moGroupings(mode, rows, off) {
-  const offset = new Set(off || []); const keep = (f) => f && !offset.has(String(f.id)); const out = [];
-  if (mode === 'card') { rows.forEach((row) => row.items.forEach((it) => { const files = (it.files || []).filter(keep); if (files.length) out.push(oneGroup(files, files[0].name || ezT('Media'))); })); }
-  else if (mode === 'row') { rows.forEach((row) => { let files = []; row.items.forEach((it) => { files = files.concat((it.files || []).filter(keep)); }); if (files.length) out.push(oneGroup(files, row.label || ezT('Card group'))); }); }
-  else if (mode === 'group') { const byg = {}, order = []; rows.forEach((row) => { const g = row.group || ezT('Group'); if (!(g in byg)) { byg[g] = []; order.push(g); } byg[g].push(row); }); order.forEach((g) => { let files = []; byg[g].forEach((row) => row.items.forEach((it) => { files = files.concat((it.files || []).filter(keep)); })); if (files.length) out.push(oneGroup(files, g)); }); }
-  return out;
-}
+// 输出口类型/名字由 loader 端 _ezItems 提供，这里不再按整张结构归组。
 
 // 卡片输入口上色（专属类型 EZFLEX_MEDIA_CARD 没有内置默认色，按文档保持深红）
 function paintCardSocket(node) {
@@ -190,155 +185,224 @@ function paintCardSocket(node) {
     if (inp) { inp.color_on = CARD_COLOR; inp.color_off = CARD_COLOR; inp.color = CARD_COLOR; }
   } catch (_) {}
 }
+// 固定模式：端口跟随上游 MediaLoader 的槽位声明（类型+数量），运行期值由 loader 按槽位排好
+function fixedSlotsOf(node) {
+  const conn = connectedItems(node); const up = conn && conn.origin;
+  if (!up || !Array.isArray(up.widgets)) return null;
+  const w = up.widgets.find((x) => x && x.name === 'config');
+  if (!w) return null;
+  try {
+    const cfg = JSON.parse(w.value || '{}') || {};
+    const fx = cfg.fixed || {};
+    if (!fx.on || !Array.isArray(fx.slots)) return null;
+    return fx.slots.filter((s) => s && s.type && (parseInt(s.n, 10) || 0) > 0);   // 全 0 时返回空表 = 不出口，和 loader 的 0 槽位一致
+  } catch (_) { return null; }
+}
+const SLOT_KIND = { image: 'image', video: 'video', video_audio: 'audio', audio: 'audio', model3d: 'model_3d', text: 'other', other: 'other' };
+const SLOT_TYPE = { image: 'IMAGE', video: 'VIDEO', video_audio: 'AUDIO', audio: 'AUDIO', model3d: 'FILE_3D', text: 'STRING', other: 'STRING' };
+const SLOT_NAME = { image: 'Image', video: 'Video', video_audio: 'Video audio', audio: 'Audio', model3d: 'Model', text: 'Text', other: 'Other' };
+function fixedWant(slots, items) {
+  const want = []; let i = 0;
+  (slots || []).forEach((s) => {
+    const t = String(s.type); const n = Math.max(0, parseInt(s.n, 10) || 0);
+    for (let k = 0; k < n; k++) {
+      const it = (items && items[i]) || null; i += 1;   // 上游 Segment 口是按槽位顺序给的，按位对上（有 path/url 才出缩略图）
+      const key = (it && it.id != null) ? String(it.id) : ('slot:' + t + ':' + k);   // 有素材 → 端口身份 = 素材 id
+      want.push({ id: 'slot:' + t + ':' + k, key, name: (SLOT_NAME[t] || t) + ' ' + (k + 1), ord: k + 1, n: 0,
+                  type: SLOT_TYPE[t] || 'STRING', kind: SLOT_KIND[t] || 'other', back: SLOT_KIND[t] || 'other', files: it ? [it] : [] });
+    }
+  });
+  return want;
+}
+// 刷新/重启时前端是先建节点、后铺 graph.links：链路没恢复就重排，会按空 items 把保存的端口全删掉 —— 连线就断了。
+// 上游口还没盖章（面板没铺）同理：先等，最多等一小会儿（第三方上游永远不盖章时兜底放行）。
+function mediaOutUpstreamReady(node, inp) {
+  const g = node.graph;
+  const L = g && g.links && g.links[inp.link];
+  if (!L) return false;
+  const up = (g.getNodeById ? g.getNodeById(L.origin_id) : null) || (((g._nodes || g.nodes) || []).find((n) => n && String(n.id) === String(L.origin_id)));
+  const sock = up && up.outputs && up.outputs[L.origin_slot];
+  if (!sock || !Array.isArray(sock._ezItems)) return false;
+  // 固定模式要等 loader 的 config 能读到：否则 fixedSlotsOf 返回 null，会被当成普通模式按空 items 重排。
+  if (fixedSlotsOf(node)) return true;
+  return sock._ezItems.some((x) => x);   // 普通模式：至少有一个真实素材才算铺好
+}
+// 给一个端口盖上素材身份/名字/类型/标签/颜色。返回是否真的改了（用来决定要不要通知下游）。
+function applySockMeta(sock, w) {
+  let changed = false;
+  const kk = (w.key != null) ? String(w.key) : String(w.id);
+  if (sock._ezMediaId !== kk) { sock._ezMediaId = kk; changed = true; }
+  if (sock.name !== w.name) { sock.name = w.name; changed = true; }
+  if (String(sock.type) !== w.type) { try { sock.type = w.type; } catch (_) {} changed = true; }
+  try {
+    const lab = String(w.ord) + (w.n > 1 ? (' ×' + w.n) : '');
+    hideNativeSlotText(sock); sock.hidden = false;
+    sock._ezLabel = lab;
+    sock._ezLabelHtml = '<span class="emoo-sockic">' + iconFor(w.kind) + '</span>_' + lab;
+    sock._ezFiles = w.files || []; sock._ezItems = w.files || [];
+  } catch (_) {}
+  const col = TYPE_COLOR[w.type] || KIND_COLOR[w.kind];
+  if (col && (sock.color_on !== col || sock.color !== col)) { sock.color_on = col; sock.color_off = col; sock.color = col; changed = true; }
+  return changed;
+}
 function updatePorts(node, noRedraw) {
   if (!node || !node.outputs) return false;
   paintCardSocket(node);
-  const conn = connectedCard(node);
-  const off = node._ezLocalOff || {};
-  const mode = node._ezMode || 'split';
-  let want;
-  if (mode === 'split') {
-    const files = conn ? conn.files : [];
-    want = files.map((f) => { const k = fileKind(f); return { id: f.id, name: f.name || ezT('File'), type: TYPE_MAP[k] || 'STRING', kind: k, files: [f] }; });
-  } else {
-    const loader = connectedLoader(node);
-    const rows = loader ? structRows(loader.cfg) : [];
-    const offIds = Object.keys(off).filter((k) => off[k]);
-    const gs = moGroupings(mode, rows, offIds);
-    want = gs.map((g, i) => ({ id: 'g' + i, name: g.name, type: g.type, kind: g.kind, files: g.files }));
-  }
+  const inp0 = (node.inputs || [])[0];
+  if (inp0 && inp0.link != null && !mediaOutUpstreamReady(node, inp0)) {
+    node._ezMoDeferN = (node._ezMoDeferN || 0) + 1;
+    if (node._ezMoDeferN <= 20) {
+      if (!node._ezMoDeferIv) node._ezMoDeferIv = setTimeout(() => { node._ezMoDeferIv = null; try { updatePorts(node, noRedraw); } catch (_) {} }, 120);
+      return false;
+    }
+  } else { node._ezMoDeferN = 0; }
+  const conn = connectedItems(node);
+  const items = conn ? conn.items : [];
+  const slots = fixedSlotsOf(node);   // 上游 MediaLoader 开了固定模式就自动跟随，不需要手动开关
+  // 固定模式：端口 = 槽位（缺槽运行期 None）；否则一个 list 项 → 一个输出口
+  const want = slots ? fixedWant(slots, items) : items.map((it, i) => {
+    const k = fileKind(it);
+    return { id: String(it.id != null ? it.id : ('f' + i)), name: it.name || ezT('File'), ord: i + 1, n: parseInt(it.n, 10) || 0,
+             type: it.mixed ? '*' : (TYPE_MAP[k] || 'STRING'), kind: k, files: [it] };
+  });
   let changed = false;
   const old = (node.outputs || []).slice();
+  const gl = (node.graph && node.graph.links) || {};
+  // 本节点所有出线（新前端不保证维护 socket.links，graph.links 才准）；slot = 旧端口下标
+  const outgoing = [];
+  Object.keys(gl).forEach((lid) => {
+    const L = gl[lid];
+    if (!L || String(L.origin_id) !== String(node.id) || L.origin_slot == null) return;
+    outgoing.push({ lid: (L.id != null ? L.id : (isFinite(Number(lid)) ? Number(lid) : lid)), slot: Number(L.origin_slot) || 0 });
+  });
+  const linked = new Set(); outgoing.forEach((o) => linked.add(o.slot));
+  // 复用与补位都要看「重排前」的身份/类型：下面的复用会把 socket 上的 _ezMediaId/_ezFiles 覆盖掉
+  const oldMeta = old.map((s) => ({ mid: s._ezMediaId != null ? String(s._ezMediaId) : null, kind: sockKind(s) }));
+
+  // 重载/重跑：端口布局和保存的一模一样（种类序列相同）→ 只原地更元数据，绝不重排/删口。
+  // 这是刷新/重启不丢线的兜底：不碰 node.outputs、不碰任何链接。
+  if (old.length === want.length && old.every((s, i) => sockKind(s) === (want[i].kind || 'other'))) {
+    let meta = false;
+    want.forEach((w, i) => { if (applySockMeta(old[i], w)) meta = true; });
+    node._ezMoFresh = false;
+    if (meta) { syncOutputTypes(node); notifyOut(node); if (node.graph) node.graph.setDirtyCanvas(true, true); }
+    return meta;
+  }
+
+  // 旧端口 → 新端口：先按素材身份（同一素材的线跟着素材走），剩下的按「同类型里的第几个」补位 ——
+  // 切模式时类型顺序会重排，原来接第 2 张图的线要落到新的「图片 2」上，不能按端口下标硬套。
+  const wantKey = want.map((w) => (w.key != null ? String(w.key) : String(w.id)));
+  const kindQueue = new Map();
+  want.forEach((w, j) => { const k = w.kind || 'other'; if (!kindQueue.has(k)) kindQueue.set(k, []); kindQueue.get(k).push(j); });
+  const claimed = new Set(); const targetOf = new Map();
+  old.forEach((s, i) => {
+    if (!linked.has(i) || oldMeta[i].mid == null) return;
+    const j = wantKey.indexOf(oldMeta[i].mid);
+    if (j >= 0 && !claimed.has(j)) { claimed.add(j); targetOf.set(i, j); }
+  });
+  old.forEach((s, i) => {
+    if (!linked.has(i) || targetOf.has(i)) return;
+    const q = kindQueue.get(oldMeta[i].kind) || [];
+    const j = q.find((x) => !claimed.has(x));
+    if (j != null) { claimed.add(j); targetOf.set(i, j); }
+  });
+
+  // 刚重载完、布局和保存的对不上（上游内容/配置还没铺好）：这次先不动，免得把保存的连线按新布局删掉。
+  // 上游配置变化会走 _ezMediaOutUpdate（那里清 _ezMoFresh），用户切模式/改槽位时才真正重排。
+  if (node._ezMoFresh && outgoing.some((o) => !targetOf.has(o.slot))) {
+    node._ezMoDeferN = (node._ezMoDeferN || 0) + 1;
+    if (node._ezMoDeferN <= 20) {
+      if (!node._ezMoDeferIv) node._ezMoDeferIv = setTimeout(() => { node._ezMoDeferIv = null; try { updatePorts(node, noRedraw); } catch (_) {} }, 120);
+      return false;
+    }
+  }
+  node._ezMoFresh = false;
+
   const used = new Set(); const seq = [];
   want.forEach((w) => {
+    const kk = (w.key != null) ? String(w.key) : String(w.id);
+    const wk = w.kind || 'other';
     let sock = null;
-    for (let i = 0; i < old.length; i++) { if (!used.has(i) && old[i]._ezMediaId != null && String(old[i]._ezMediaId) === String(w.id)) { sock = old[i]; used.add(i); break; } }
+    // 1) 同一素材的端口优先复用（线也在它身上，位置不动）
+    for (let i = 0; i < old.length; i++) { if (!used.has(i) && oldMeta[i].mid === kk) { sock = old[i]; used.add(i); break; } }
+    // 2) 同类型复用：切模式后端口类型顺序会重排，别把视频口套到图片口上
+    if (!sock) { for (let i = 0; i < old.length; i++) { if (!used.has(i) && oldMeta[i].kind === wk) { sock = old[i]; used.add(i); break; } } }
+    // 3) 剩下按位置复用（保住端口对象/颜色/标签）
     if (!sock) { for (let i = 0; i < old.length; i++) { if (!used.has(i)) { sock = old[i]; used.add(i); break; } } }
     if (!sock) { node.addOutput(w.name, w.type, {}); sock = node.outputs[node.outputs.length - 1]; changed = true; }
-    if (sock._ezMediaId !== w.id) { sock._ezMediaId = w.id; changed = true; }
-    if (sock.name !== w.name) { sock.name = w.name; changed = true; }
-    if (String(sock.type) !== w.type) { try { sock.type = w.type; } catch (_) {} changed = true; }
-    try { sock.label = ''; sock.hideName = true; sock.hidden = false; sock._ezLabel = w.name; sock._ezFiles = w.files || []; } catch (_) {}
-    const col = TYPE_COLOR[w.type] || KIND_COLOR[w.kind];
-    if (col) { if (sock.color_on !== col || sock.color !== col) { sock.color_on = col; sock.color_off = col; sock.color = col; changed = true; } }
+    if (applySockMeta(sock, w)) changed = true;
     seq.push(sock);
   });
-  old.forEach((o, i) => { if (!used.has(i)) { const idx = node.outputs.indexOf(o); if (idx >= 0) { node.removeOutput(idx); changed = true; } } });
-  if (node.outputs.length !== seq.length || node.outputs.some((o, i) => o !== seq[i])) { for (let i = 0; i < seq.length; i++) node.outputs[i] = seq[i]; node.outputs.length = seq.length; changed = true; }
-  node.outputs.forEach((o, i) => {
-    const ids = []; if (Array.isArray(o.links)) ids.push(...o.links); if (o.link != null) ids.push(o.link);
-    ids.forEach((lid) => { if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) { try { node.graph.links[lid].origin_slot = i; } catch (_) {} } });
+  if (old.length !== seq.length || old.some((o, i) => seq[i] !== o)) changed = true;
+
+  // 组装：seq 在前、未复用的旧口垫后（删尾不移位）。必须先把线写到目标口再删旧口，
+  // 否则 removeOutput 会按旧下标把线一起断掉 —— 表现就是「换模式后要重新连线」。
+  const surplus = old.filter((o) => !seq.includes(o));
+  node.outputs.length = 0;
+  seq.forEach((s) => node.outputs.push(s));
+  surplus.forEach((s) => node.outputs.push(s));
+  const byId = (id) => (node.graph && node.graph.getNodeById ? node.graph.getNodeById(id) : null) || (((node.graph && node.graph._nodes) || []).find((n) => n && String(n.id) === String(id)));
+  let moved = false;
+  outgoing.forEach((o) => {
+    const L = gl[o.lid]; if (!L) return;
+    const s = old[o.slot];
+    if (!targetOf.has(o.slot)) {
+      // 新布局里没有同类型的落点（比如视频槽位被关成 0）：断开这条线。
+      // 不能把它原地留下 —— 旧下标现在可能已经是另一个类型的口，会错接上去。
+      if (s && Array.isArray(s.links)) { const p = s.links.indexOf(o.lid); if (p >= 0) s.links.splice(p, 1); }
+      const t = byId(L.target_id); const tin = t && t.inputs && t.inputs[L.target_slot];
+      if (tin && String(tin.link) === String(o.lid)) tin.link = null;
+      try { delete gl[o.lid]; } catch (_) {}
+      try { const m = node.graph && node.graph._links; if (m && typeof m.delete === 'function') m.delete(o.lid); } catch (_) {}   // 新版 LiteGraph 用 _links(Map) 存链接
+      moved = true;
+      return;
+    }
+    const at = targetOf.get(o.slot);
+    if (s && Array.isArray(s.links)) { const p = s.links.indexOf(o.lid); if (p >= 0) s.links.splice(p, 1); }
+    // 新口（addOutput 建的）links 是 null：必须把 link id 记上，否则前端按 socket.links 画的线/后续 disconnect 都看不到它
+    const to = node.outputs[at];
+    if (to) { if (!Array.isArray(to.links)) to.links = []; if (to.links.indexOf(o.lid) < 0) to.links.push(o.lid); }
+    if (Number(L.origin_slot) !== at) { try { L.origin_slot = at; } catch (_) {} moved = true; }
   });
-  if (changed && node.graph) node.graph.setDirtyCanvas(true, true);
-  if (changed) syncOutputTypes(node);
+  for (let i = node.outputs.length - 1; i >= seq.length; i--) node.removeOutput(i);
+  if ((moved || changed) && node.graph) node.graph.setDirtyCanvas(true, true);
+  if (changed) { syncOutputTypes(node); notifyOut(node); }   // 下游 MergeList/SplitList/TimeLine 跟着重算
   return changed;
 }
+function notifyOut(node) {
+  const g = node.graph; if (!g || !g.links) return;
+  (node.outputs || []).forEach((o) => {
+    const ids = []; if (Array.isArray(o.links)) ids.push(...o.links); if (o.link != null) ids.push(o.link);
+    ids.forEach((lid) => {
+      const lk = g.links[lid]; if (!lk) return;
+      const t = (g.getNodeById ? g.getNodeById(lk.target_id) : null) || ((g._nodes || []).find((n) => n && String(n.id) === String(lk.target_id)));
+      if (!t) return;
+      if (typeof t._ezlpUpdate === 'function') { try { t._ezlpUpdate(); } catch (_) {} }
+      else if (typeof t._ezMediaOutUpdate === 'function') { try { t._ezMediaOutUpdate(); } catch (_) {} }
+    });
+  });
+}
 function syncOutputTypes(node) {
-  const conn = connectedCard(node);
-  const off = Object.keys(node._ezLocalOff || {}).filter((k) => node._ezLocalOff[k]);
-  const mode = node._ezMode || 'split';
-  const loader = connectedLoader(node);
-  const body = { mode, off };
-  if (mode === 'split') body.files = (conn ? conn.files : []).map((x) => ({ id: x.id, name: x.name || ezT('File'), type: fileKind(x) }));
-  else body.groups = (loader && loader.cfg && loader.cfg.groups) || [];
+  // 上游/链路没就绪时会上报空 files → 后端把类 RETURN_TYPES 清空 → 保存的端口与连线全丢（刷新/重启断线的真凶）。
+  const inp0 = (node.inputs || [])[0];
+  if (inp0 && inp0.link != null && !mediaOutUpstreamReady(node, inp0)) return;
+  const conn = connectedItems(node);
+  const items = conn ? conn.items : [];
+  const slots = fixedSlotsOf(node);
+  // 只同步端口名/类型；本地禁用由运行期 config 交给节点，不用上报
+  const body = { files: slots ? fixedWant(slots).map((w) => ({ id: w.id, name: w.name, type: w.back }))
+                              : items.map((it, i) => ({ id: it.id != null ? it.id : ('f' + i), name: it.name || ezT('File'), type: it.mixed ? 'other' : fileKind(it) })) };
   try { const f = (api && typeof api.fetchApi === 'function') ? (p, o) => api.fetchApi(p, o) : (p, o) => fetch(p, o); f(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => {}); } catch (_) {}
 }
-// ===== 「批量设置」弹窗：多文件端口的合并方式（卡片/卡片组/分组模式）
-// 选项对齐 KJNodes Load Images From Folder：目标尺寸（可直接填宽高）/ 适配方式 / 最多取几张 / 从第几张开始。
-function fitSummary(node) {
-  const f = node._ezFit || { size: 'first', fit: 'crop' };
-  const sizeTxt = /^\d+x\d+$/i.test(String(f.size)) ? String(f.size) : ezT('First image');
-  const fitTxt = { crop: ezT('Crop'), pad: ezT('Pad'), stretch: ezT('Stretch') }[f.fit] || ezT('Crop');
-  const capTxt = Number(f.cap) > 0 ? (ezT('Take ') + f.cap + ezT(' items')) : ezT('Take all');
-  return sizeTxt + '·' + fitTxt + '·' + capTxt;
-}
-function moField(host, label, node) {
-  const l = el('label', 'emoo-setf'); const sp = el('span'); sp.textContent = label;
-  l.appendChild(sp); l.appendChild(node); host.appendChild(l); return l;
-}
-function openFitSettings(node) {
-  const m = el('div', 'emoo-modal');
-  const box = el('div', 'emoo-modal-box');
-  const hd = el('div', 'emoo-modal-hd'); const t = el('b'); t.textContent = ezT('Batch settings');
-  const close = el('button', 'emoo-modal-close'); close.textContent = '✕';
-  hd.appendChild(t); hd.appendChild(close);
-  box.appendChild(hd);
-  const body = el('div', 'emoo-modal-body');
-  const f = Object.assign({ size: 'first', fit: 'crop', cap: 0, start: 0 }, node._ezFit || {});
 
-  const sizeSel = el('select'); [['first', ezT('Follow the first image')], ['custom', ezT('Custom size')]].forEach(([v, tx]) => { const o = el('option'); o.value = v; o.textContent = tx; sizeSel.appendChild(o); });
-  const isCustom0 = /^\d+x\d+$/i.test(String(f.size));
-  sizeSel.value = isCustom0 ? 'custom' : 'first';
-  const wIn = el('input'); wIn.type = 'number'; wIn.min = '16'; wIn.max = '8192';
-  const hIn = el('input'); hIn.type = 'number'; hIn.min = '16'; hIn.max = '8192';
-  const [cw0, ch0] = isCustom0 ? String(f.size).toLowerCase().split('x') : ['1024', '1024'];
-  wIn.value = cw0; hIn.value = ch0;
-  const sizeRow = el('div', 'emoo-setrow'); sizeRow.appendChild(sizeSel); sizeRow.appendChild(wIn);
-  const x = el('span', 'emoo-setx'); x.textContent = '×'; sizeRow.appendChild(x); sizeRow.appendChild(hIn);
-  const syncSize = () => { const on = sizeSel.value === 'custom'; wIn.disabled = !on; hIn.disabled = !on; };
-  sizeSel.addEventListener('change', syncSize); syncSize();
-
-  const fitSel = el('select');
-  [['crop', ezT('Crop (center-crop the overflow, keep ratio)')], ['pad', ezT('Pad (fill with edge color, keep ratio)')], ['stretch', ezT('Stretch (ignore aspect ratio)')]].forEach(([v, tx]) => { const o = el('option'); o.value = v; o.textContent = tx; fitSel.appendChild(o); });
-  fitSel.value = f.fit || 'crop';
-
-  const capIn = el('input'); capIn.type = 'number'; capIn.min = '0'; capIn.max = '4096'; capIn.value = String(Number(f.cap) || 0);
-  const startIn = el('input'); startIn.type = 'number'; startIn.min = '0'; startIn.max = '4096'; startIn.value = String(Number(f.start) || 0);
-
-  moField(body, ezT('Target size'), sizeRow);
-  moField(body, ezT('Fit mode'), fitSel);
-  moField(body, ezT('Max items (0 = all)'), capIn);
-  moField(body, ezT('Start index (0-based)'), startIn);
-  const hint = el('div', 'emoo-sethint');
-  hint.textContent = ezT('Only affects ports with multiple files (images) in Card / Card group / Group mode: first align sizes by the rules above, then merge into one IMAGE batch tensor; if only the size is set without changing the ratio, the fit mode is used.');
-  body.appendChild(hint);
-  box.appendChild(body);
-  const ft = el('div', 'emoo-modal-ft');
-  const cancel = el('button', 'emoo-btn'); cancel.textContent = ezT('Cancel');
-  const save = el('button', 'emoo-btn primary'); save.textContent = ezT('Save');
-  ft.appendChild(cancel); ft.appendChild(save);
-  box.appendChild(ft);
-  m.appendChild(box); document.body.appendChild(m);
-  m.classList.add('active');
-  const done = () => { try { m.remove(); } catch (_) {} };
-  close.addEventListener('click', done); cancel.addEventListener('click', done);
-  m.addEventListener('mousedown', (e) => { if (e.target === m) done(); });
-  save.addEventListener('click', () => {
-    const size = sizeSel.value === 'custom'
-      ? (Math.max(16, parseInt(wIn.value, 10) || 1024) + 'x' + Math.max(16, parseInt(hIn.value, 10) || 1024))
-      : 'first';
-    node._ezFit = { size, fit: fitSel.value, cap: Math.max(0, parseInt(capIn.value, 10) || 0), start: Math.max(0, parseInt(startIn.value, 10) || 0) };
-    writeLocalOff(node);
-    renderMode(node);
-    done();
-  });
-}
-
-function renderMode(node) {
-  const root = node && node._emooRoot; if (!root) return;
-  const mode = node._ezMode || 'split';
-  root.querySelectorAll('.emoo-mode button').forEach((b) => {
-    const mm = b.dataset.m;
-    b.className = mm === mode ? 'active' : '';
-    if (!b._modeWired) { b._modeWired = true; b.addEventListener('click', () => { node._ezMode = mm; writeLocalOff(node); renderMode(node); renderPanel(node, connectedCard(node)); updatePorts(node, true); }); }
-  });
-  // 「批量设置」只在卡片/卡片组/分组模式下可用（拆分模式下一个端口只有一个文件）
-  const btn = root.querySelector('.emoo-fit-btn');
-  if (btn) {
-    const on = mode !== 'split';
-    btn.style.display = on ? '' : 'none';
-    btn.textContent = ezT('Batch settings (') + fitSummary(node) + ezT(')');
-    if (!btn._wired) { btn._wired = true; btn.addEventListener('click', (e) => { e.stopPropagation(); openFitSettings(node); }); }
-  }
-}
 function renderPanel(node, conn) {
   const root = node._emooRoot; if (!root) return;
   const panelRoot = root.querySelector('.emoo-root') || root;
-  renderMode(node);
-  const files = conn ? conn.files : [];
+  const slots = fixedSlotsOf(node);
+  const files = slots ? fixedWant(slots).map((w) => ({ id: w.id, name: w.name, type: w.back })) : (conn ? conn.items : []);   // 循环模式下列槽位（没有逐文件元数据）
   // 内容没变就不重建：settle 定时器每 250ms 会摸一次面板，重建会把「按下还没松手」的那次点击吃掉
-  // （现象：开/关 要点两下、或者先点一下面板才点得动）。签名覆盖模式/翻页/文件/开关状态。
-  const sig = [(node._ezMode || 'split'), node._moPage, node._moPerPage,
+  // （现象：开/关 要点两下、或者先点一下面板才点得动）。签名覆盖翻页/文件/开关状态。
+  const sig = ['split', node._moPage, node._moPerPage,
     files.map((f) => ((f && f.id) + ':' + ((f && f.name) || ''))).join(','),
     files.map((f) => ((node._ezLocalOff && node._ezLocalOff[f.id]) ? '1' : '0')).join('')].join('|');
   if (node._moSig === sig) return;
@@ -350,13 +414,8 @@ function renderPanel(node, conn) {
     const e = el('div', 'emoo-empty'); e.textContent = conn ? ezT('This card group has no files') : ezT('Connect an EzFlex-MediaLoader card group output first'); list.appendChild(e);
     return;
   }
-  const mode = node._ezMode || 'split';
-  let nOut = files.length;
-  if (mode !== 'split') {
-    const loader = connectedLoader(node); const rows = loader ? structRows(loader.cfg) : [];
-    nOut = moGroupings(mode, rows, Object.keys(node._ezLocalOff || {}).filter((k) => node._ezLocalOff[k])).length;
-  }
-  status.textContent = ezT('Output ') + nOut + ezT(' ports (') + ({ split: ezT('Split'), card: ezT('Card'), row: ezT('Card group'), group: ezT('Group') })[mode] + ezT(')'); status.className = 'emoo-status on';
+  const nOut = files.length;
+  status.textContent = ezT('Total') + ' ' + nOut + ezT(' items'); status.className = 'emoo-status on';
   node._moPerPage = Math.max(1, parseInt(node._moPerPage, 10) || 10);
   node._moPage = Math.max(1, parseInt(node._moPage, 10) || 1);
   const total = files.length;
@@ -369,7 +428,8 @@ function renderPanel(node, conn) {
     const row = el('div', 'emoo-row' + (off ? ' emoo-off' : ''));
     const fkind = fileKind(f);
     const col = KIND_COLOR[fkind] || '#9aa7b5';
-    const sq = el('span', 'emoo-sq'); sq.innerHTML = TYPE_ICONS[fkind] || TYPE_ICONS.other; row.appendChild(sq);
+    const no = el('span', 'emoo-no'); no.textContent = String(start + idx + 1); row.appendChild(no);   // 序号与黑框标签一致（口序号）
+    const sq = el('span', 'emoo-sq'); sq.innerHTML = iconFor(fkind); row.appendChild(sq);
     const nm = el('span', 'emoo-name'); nm.textContent = (f.name || (ezT('File ') + (start + idx + 1))); row.appendChild(nm);
     const type = el('span', 'emoo-type'); type.textContent = fkind; row.appendChild(type);
     const toggle = el('div', 'emoo-toggle');
@@ -409,14 +469,15 @@ function installOutsideLabels(node) {
   if (!node || node._emooOutLabels) return;
   node._emooOutLabels = true;
   let all = []; let sig = '';
-  const mk = (text) => { const l = el('div', 'emoo-socket-label'); l.textContent = text || ''; l.style.display = 'none'; document.body.appendChild(l); return l; };
+  const mk = (html, text) => { const l = el('div', 'emoo-socket-label'); if (html) l.innerHTML = html; else l.textContent = text || ''; l.style.display = 'none'; document.body.appendChild(l); return l; };
   const scan = () => {
-    const cur = (node.outputs || []).map((s, i) => ({ i, name: s._ezLabel || s.name || '', type: s.type })).filter((x) => x.type !== 'EZFLEX_PARAM_GROUP');
+    const cur = (node.outputs || []).map((s, i) => ({ i, name: s._ezLabel || s.name || '', html: s._ezLabelHtml || '', type: s.type })).filter((x) => x.type !== 'EZFLEX_PARAM_GROUP');
     const s = cur.map((x) => x.i + '|' + x.name).join(';');
-    if (s !== sig) { sig = s; all.forEach((x) => { try { x.el.remove(); } catch (_) {} }); all = cur.map((x) => ({ el: mk(x.name), i: x.i })); node._emooOutEls = all.map((x) => x.el); }
+    if (s !== sig) { sig = s; all.forEach((x) => { try { x.el.remove(); } catch (_) {} }); all = cur.map((x) => ({ el: mk(x.html, x.name), i: x.i })); node._emooOutEls = all.map((x) => x.el); }
   };
   const hideAll = () => { all.forEach((item) => { try { item.el.style.display = 'none'; } catch (_) {} }); };
   const update = () => {
+    if (!moLabelsOn()) { hideAll(); return; }
     const rootEl = node._emooRoot;
     if (!rootEl || !rootEl.isConnected) { hideAll(); return; }   // 控件没挂上/被临时摘掉：先把标签收掉，别留在屏幕上
     // 只在「当前渲染的那张图」里显示：子图（app.canvas.graph）也算当前图，别拿 app.graph 比
@@ -445,9 +506,9 @@ function installOutsideLabels(node) {
     const prevDraw = node.onDrawForeground;
     node.onDrawForeground = function (ctx) {
         if (prevDraw) prevDraw.call(this, ctx);
-        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）
+        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）；
+        // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍
         update();
-        pumpFrames();
       };
     scheduleOnRedraw(update);
     onLocaleChange(() => { node._moSig = ''; update(); });   // 语言切换：清内容签名强制重画
@@ -466,9 +527,21 @@ function buildRoot(node) {
   const shell = el('div', 'emoo-shell');
   const root = el('div', 'emoo-root');
   shell.appendChild(root);
-  root.innerHTML = '<div class="emoo-hd"><span class="emoo-title">' + ezT('Media Out') + '</span><span class="emoo-mode"><button data-m="split">' + ezT('Split') + '</button><button data-m="card">' + ezT('Card') + '</button><button data-m="row">' + ezT('Card group') + '</button><button data-m="group">' + ezT('Group') + '</button></span><span class="emoo-status">' + ezT('Not connected') + '</span></div>' +
-    '<div class="emoo-fitbar"><button class="emoo-btn emoo-fit-btn" style="display:none">' + ezT('Batch settings') + '</button></div>' +
+  root.innerHTML = '<div class="emoo-hd"><span class="emoo-title">' + ezT('Media Out') + '</span><span class="emoo-status">' + ezT('Not connected') + '</span></div>' +
     '<div class="emoo-list"></div>';
+  // 端口信息行：显示/隐藏文件名黑框标签的开关（绿=显示、灰=隐藏）
+  const hd = root.querySelector('.emoo-hd');
+  const lblBtn = el('button', 'emoo-lblbtn'); lblBtn.type = 'button';
+  const syncLbl = () => {
+    const on = moLabelsOn();
+    lblBtn.classList.toggle('on', on); lblBtn.classList.toggle('off', !on);
+    lblBtn.innerHTML = MO_LABEL_ICON + '<span>' + ezT('Labels') + '</span>';
+    lblBtn.title = on ? ezT('Hide port labels') : ezT('Show port labels');
+  };
+  lblBtn.addEventListener('click', (e) => { e.stopPropagation(); moLabelsSet(!moLabelsOn()); });
+  onLocaleChange(syncLbl);
+  syncLbl();
+  if (hd) hd.appendChild(lblBtn);
   return shell;
 }
 function fitNode(node) {
@@ -479,6 +552,7 @@ function setupNode(node) {
   try {
     if (typeof node.addDOMWidget !== 'function') return;
     node._emooSetup = true;
+    node._ezMediaOutUpdate = () => { node._ezMoFresh = false; try { updatePorts(node, true); renderPanel(node, connectedItems(node)); } catch (_) {} };   // MediaLoader 内容变了会回调这里（这里才允许按新布局重排）
     node._ezLocalOff = readLocalOff(node);
     const root = buildRoot(node);
     node._emooRoot = root;
@@ -491,13 +565,14 @@ function setupNode(node) {
     try { node.setSize([460, 200]); } catch (_) {}
     hideConfigWidget(node);
     updatePorts(node, true); syncOutputTypes(node);
-    renderPanel(node, connectedCard(node));
+    renderPanel(node, connectedItems(node));
     installOutsideLabels(node);
     forceShell(node);
     let settleN = 0;   // setInterval 返回的是数字 id，不能往上面挂属性（严格模式会抛 TypeError）
-    const settle = setInterval(() => { forceShell(node); const a = updatePorts(node, true); renderPanel(node, connectedCard(node)); installOutsideLabels(node); if (!a) { settleN += 1; if (settleN >= 4) clearInterval(settle); } }, 250);
+    const settle = setInterval(() => { forceShell(node); const a = updatePorts(node, true); renderPanel(node, connectedItems(node)); installOutsideLabels(node); if (!a) { settleN += 1; if (settleN >= 4) clearInterval(settle); } }, 250);
+    node._ezSettleIv = settle;   // 节点被删时 onRemoved 要能停掉它
     let retry = 0; (function again() { forceShell(node); installOutsideLabels(node); if (retry < 12) { retry += 1; setTimeout(again, 120); } })();
-    setTimeout(() => { try { updatePorts(node, true); syncOutputTypes(node); renderPanel(node, connectedCard(node)); fitNode(node); } catch (_) {} }, 400);
+    setTimeout(() => { try { updatePorts(node, true); syncOutputTypes(node); renderPanel(node, connectedItems(node)); fitNode(node); } catch (_) {} }, 400);
   } catch (e) { console.error('[MediaOut] init failed', e); }
 }
 function hookPrototype(nt) {
@@ -505,10 +580,10 @@ function hookPrototype(nt) {
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;
-    try { if (this._emooSetup) setTimeout(() => { updatePorts(this, true); syncOutputTypes(this); renderPanel(this, connectedCard(this)); }, 0); } catch (_) {}
+    try { if (this._emooSetup) setTimeout(() => { updatePorts(this, true); syncOutputTypes(this); renderPanel(this, connectedItems(this)); }, 0); } catch (_) {}
     return r;
   };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; try { (this._emooOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); this._emooOutEls = []; } catch (_) {} try { if (this._emooRoot) this._emooRoot.remove(); } catch (_) {} this._emooSetup = false; return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; try { (this._emooOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); this._emooOutEls = []; } catch (_) {} try { clearInterval(this._ezSettleIv); } catch (_) {} try { if (this._emooRoot) this._emooRoot.remove(); } catch (_) {} this._emooSetup = false; return r; };
 }
 // ===== 运行期空传：排队提交前，把「已禁用但仍连着」的端口从 prompt 里摘掉（不改画布） =====
 // 服务器拿到的 prompt 里那条输入**根本不存在** → 下游按「没提供」走：
@@ -559,8 +634,8 @@ installQueuePrune();
 app.registerExtension({
   name: 'EzFlex.MediaOut',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },
-  nodeCreated(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
-  loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
+  nodeCreated(n) { if (nodeTypeOf(n) === NODE) { n._ezMoFresh = true; setupNode(n); } },   // 建节点/重载建节点：这次重排先保守
+  loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) { n._ezMoFresh = true; setupNode(n); } },   // 重载：这次重排先保守，别删保存的连线
   setup() {
     try { if (typeof LGraphCanvas !== 'undefined' && LGraphCanvas.link_type_colors) { Object.assign(LGraphCanvas.link_type_colors, { VIDEO: '#e0645c', AUDIO: '#34a853', MODEL_3D: '#b15bd6', FILE_3D: '#b15bd6', IMAGE: '#4a9eff', EZFLEX_MEDIA_CARD: CARD_COLOR }); } } catch (_) {}
     ((app.graph && app.graph._nodes) || []).forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); });

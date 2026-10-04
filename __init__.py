@@ -21,6 +21,7 @@ import os
 import random
 import re
 import struct
+import time
 
 import numpy as np
 import torch
@@ -63,7 +64,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.2.12"
+__version__ = "1.3.0"   # 1.3.0: 循环节点端口重做 + 预览图独立文件存储（tag_preview · card_preview）+ Ctrl+Z/Y 画布守卫
 
 WEB_DIRECTORY = "./web"
 
@@ -84,14 +85,24 @@ try:
         return _handler
 
     _routes = PromptServer.instance.routes
+    # 必须覆盖 web/ 下**全部** .js：漏掉的会走 ComfyUI 默认静态路由（带缓存），
+    # 改完前端刷新看不到变化、容易被误判成「代码没生效」。
     for _fname in ("modelscombo_node.js", "freelatent_node.js",
-                   "ezflex_service.js", "node_switch_group.js", "node_switch_master.js",
+                   "ezflex_service.js", "ezflex_theme.js", "ezflex_i18n.js",
+                   "ezflex_listview.js", "ezflex_media_index.js",
+                   "node_switch_group.js", "node_switch_master.js",
                    "main_control.js", "param_preset_control.js", "param_preset_output.js",
                    "preview_any.js", "prompt_helper.js",
-                   "media_loader.js", "media_out.js", "ezflex_theme.js"):
+                   "media_loader.js", "media_out.js", "loop_nodes.js",
+                   "reroute_node.js"):
         _routes.get("/extensions/Comfyui-EzFlex-Presets/" + _fname)(_serve_no_store(_fname))
-except Exception:
-    pass
+except Exception as _e_routes:
+    # 整块失败会让所有前端 JS 退回「带缓存的默认静态路由」，表现为刷新后仍是旧版：
+    # 不静默吞掉，至少让它出现在控制台里。
+    import logging as _logging
+    _logging.getLogger("EzFlex").warning(
+        "no-store routes for /extensions/Comfyui-EzFlex-Presets/*.js were NOT registered (%s); "
+        "front-end changes may appear stale until the browser cache is cleared.", _e_routes)
 
 MAX_PORTS_PER_TYPE = 32
 # 动态端口同步路由（前端 POST /xxx/outputs）的入参上限：这些路由会改「类级」RETURN_TYPES/NAMES，
@@ -188,6 +199,52 @@ def _ez_plugin_scan_dirs():
     return out
 
 
+# ===== 目录扫描缓存（性能）=====
+# 说明：只缓存"文件名/路径"这类**元数据**，绝不缓存模型对象、图片字节或 tensor —— 不占显存。
+# 失效：参与扫描的任一根目录 mtime 变化即重建；再加一个 TTL 兜住 mtime 精度粗 / 网络盘的情况。
+_SCAN_CACHE_TTL_MS = 5000
+_SCAN_CACHE = {}
+
+
+def _scan_sig(roots):
+    sig = []
+    for r in (roots or []):
+        try:
+            sig.append((os.path.normpath(str(r)), os.path.getmtime(r)))
+        except OSError:
+            sig.append((str(r), -1.0))
+    return tuple(sig)
+
+
+def _scan_cached(key, roots, build):
+    if _SCAN_CACHE_TTL_MS <= 0:
+        return build()
+    sig = _scan_sig(roots)
+    now = time.monotonic()
+    hit = _SCAN_CACHE.get(key)
+    if hit is not None and hit[0] == sig and (now - hit[1]) * 1000.0 < _SCAN_CACHE_TTL_MS:
+        return hit[2]
+    val = build()
+    _SCAN_CACHE[key] = (sig, now, val)
+    return val
+
+
+def _ph_root_index(root):
+    """某个模型根目录下「文件名 -> 绝对路径」索引（缓存）；替代每次查询都 os.walk 整个根。"""
+    return _scan_cached(("ph_index", os.path.normpath(root)), [root], lambda: _ph_root_index_build(root))
+
+
+def _ph_root_index_build(root):
+    idx = {}
+    try:
+        for dirpath, _dirs, files in os.walk(root):
+            for fn in files:
+                idx.setdefault(fn, os.path.abspath(os.path.join(dirpath, fn)))
+    except Exception:
+        pass
+    return idx
+
+
 def _ez_roots():
     """允许前端读写的根目录 = ComfyUI 的 input/output/temp/models + 用户登记过的扫描目录。"""
     out = []
@@ -258,6 +315,45 @@ def _ez_adopt_to_temp(path):
         return dest
     except Exception:
         return ""
+
+
+# PreviewAny 往 temp 写的导出件（图片/音频/视频/遮罩/3D）此前**只增不删**，长期会持续占磁盘。
+# 这里按「文件年龄」回收：只扫 temp 根下、只认这几个前缀、只删超过 TTL 的。
+# 正在播放/刚写完的文件因为年龄不够不会被动到；内容寻址的（ezpv_vid_/ezpv3d_mesh_）删了会自动重算。
+_EZPV_PREFIXES = ("ezpv_img_", "ezpv_audio_", "ezpv_vid_", "ezpv_mask_", "ezpv3d_mesh_", "ezpv3d_", "ezflex_serve_")
+_EZPV_TTL_SEC = 6 * 60 * 60        # 6 小时：远大于任何一次预览/播放的生命周期
+_EZPV_SWEEP_MIN_GAP = 300.0        # 两次清扫最小间隔（秒），避免每个预览请求都遍历目录
+_ezpv_sweep_last = [0.0]
+
+
+def _ezpv_sweep(force=False):
+    """回收 temp 下过期的 EzFlex 导出件。失败静默（清理是尽力而为，不该影响预览本身）。"""
+    try:
+        now = time.monotonic()
+        if not force and (now - _ezpv_sweep_last[0]) < _EZPV_SWEEP_MIN_GAP:
+            return 0
+        _ezpv_sweep_last[0] = now
+        tmp_root = _ez_real(folder_paths.get_temp_directory())
+        if not tmp_root or not os.path.isdir(tmp_root):
+            return 0
+        cutoff = time.time() - _EZPV_TTL_SEC
+        removed = 0
+        with os.scandir(tmp_root) as it:          # 只扫 temp 根，不递归（这些导出件都直接落在根下）
+            for ent in it:
+                try:
+                    if not ent.is_file(follow_symlinks=False):
+                        continue
+                    if not ent.name.startswith(_EZPV_PREFIXES):
+                        continue
+                    if ent.stat(follow_symlinks=False).st_mtime >= cutoff:
+                        continue
+                    os.remove(ent.path)
+                    removed += 1
+                except Exception:
+                    continue
+        return removed
+    except Exception:
+        return 0
 
 
 def _ez_local(req):
@@ -434,6 +530,16 @@ def _lora_meta_summary(type_, rel, meta):
 async def _lora_meta_list(req):
     if not _ez_local(req):
         return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    roots = []
+    for folder in _META_LOADER_FOLDERS.values():
+        try:
+            roots.extend(folder_paths.get_folder_paths(folder) or [])
+        except Exception:
+            pass
+    return _web.json_response(_scan_cached(("lora_meta",), roots, _lora_meta_build))
+
+
+def _lora_meta_build():
     out = []
     seen = set()
     for type_, folder in _META_LOADER_FOLDERS.items():
@@ -462,7 +568,7 @@ async def _lora_meta_list(req):
                     seen.add(key)
                     out.append(_lora_meta_summary(type_, rel, meta))
     out.sort(key=lambda x: (x.get("type") or "", x.get("model_name") or x.get("file_name") or ""))
-    return _web.json_response(out)
+    return out
 
 
 async def _lora_meta_detail(req):
@@ -601,6 +707,8 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
         return _web.json_response(_read_all(node_name))
 
     async def _save(req):
+        if not _ez_local(req):
+            return _web.json_response({"error": "forbidden: local clients only"}, status=403)
         try:
             data = await req.json()
             name = (data.get("name") or "").strip()
@@ -622,6 +730,8 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
             return _web.json_response({"error": str(e)}, status=500)
 
     async def _delete(req):
+        if not _ez_local(req):
+            return _web.json_response({"error": "forbidden: local clients only"}, status=403)
         try:
             name = req.match_info.get("name", "")
             items = [p for p in _read_all(node_name) if p.get("name") != name]
@@ -635,6 +745,8 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
             return _web.json_response(_read_ratios(node_name))
 
         async def _ratio_save(req):
+            if not _ez_local(req):
+                return _web.json_response({"error": "forbidden: local clients only"}, status=403)
             try:
                 data = await req.json()
                 if isinstance(data.get("ratios"), list):
@@ -652,6 +764,8 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
                 return _web.json_response({"error": str(e)}, status=500)
 
         async def _ratio_delete(req):
+            if not _ez_local(req):
+                return _web.json_response({"error": "forbidden: local clients only"}, status=403)
             try:
                 ratio = req.match_info.get("ratio", "")
                 ratios = [r for r in _read_ratios(node_name) if r != ratio]
@@ -748,6 +862,29 @@ def _mc_output_types(loaders):
     return out_types, out_names
 
 
+_MC_TRIGGER_CACHE = {}   # <metadata.json 路径> -> (mtime, 触发词列表)：同一 LoRA 只解析一次
+
+
+def _mc_lora_words(path):
+    mp = os.path.splitext(path)[0] + ".metadata.json"
+    try:
+        mt = os.path.getmtime(mp)
+    except OSError:
+        return []
+    hit = _MC_TRIGGER_CACHE.get(mp)
+    if hit is not None and hit[0] == mt:
+        return hit[1]
+    try:
+        with open(mp, "r", encoding="utf-8-sig") as fh:
+            meta = json.load(fh)
+    except Exception:
+        words = []
+    else:
+        words = _lora_trained_words(meta)
+    _MC_TRIGGER_CACHE[mp] = (mt, words)
+    return words
+
+
 def _mc_trigger_words(loras):
     """按 LoRA 顺序拼触发词串（LoraManager <模型>.metadata.json 的 trainedWords）；没有触发词的跳过。"""
     words = []
@@ -761,13 +898,61 @@ def _mc_trigger_words(loras):
             path = None
         if not path:
             continue
-        try:
-            with open(os.path.splitext(path)[0] + ".metadata.json", "r", encoding="utf-8-sig") as fh:
-                meta = json.load(fh)
-        except Exception:
-            continue
-        words.extend(_lora_trained_words(meta))
+        words.extend(_mc_lora_words(path))
     return ", ".join(words)
+
+
+# 模型文件列表：优先用 ComfyUI 内核的 /models/<folder>（它按 folder_paths 的配置路径递归扫，含 extra_model_paths.yaml）。
+# 但旧版/整合包的 ComfyUI 里那个路由可能不存在，或 folder 只注册了旧别名（unet/clip）→ 前端就"下载了也读不到"。
+# 这里给一条自己的兜底：先 map_legacy 别名，再退回内置加载节点的 combo 选项（core 一定会填）。
+_MC_FOLDERS = {"checkpoints", "diffusion_models", "unet", "text_encoders", "clip", "vae", "loras"}
+_MC_COMBO = {
+    "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
+    "unet": ("UNETLoader", "unet_name"),
+    "diffusion_models": ("UNETLoader", "unet_name"),
+    "clip": ("CLIPLoader", "clip_name"),
+    "text_encoders": ("CLIPLoader", "clip_name"),
+    "vae": ("VAELoader", "vae_name"),
+    "loras": ("LoraLoader", "lora_name"),
+}
+
+
+def _mc_folder_files(folder):
+    if folder not in _MC_FOLDERS:
+        return []
+    try:
+        name = folder_paths.map_legacy(folder)
+    except Exception:
+        name = folder
+    roots = []
+    try:
+        roots = list(folder_paths.get_folder_paths(name) or [])
+    except Exception:
+        roots = []
+
+    def _build():
+        try:
+            files = folder_paths.get_filename_list(name)
+            if files:
+                return [str(x) for x in files]
+        except Exception:
+            pass
+        try:
+            import nodes as _nodes
+            cls_name, inp = _MC_COMBO.get(folder, (None, None))
+            obj = _nodes.NODE_CLASS_MAPPINGS.get(cls_name) if cls_name else None
+            spec = ((obj.INPUT_TYPES().get("required") or {}) if obj else {}).get(inp)
+            if isinstance(spec, (list, tuple)) and spec and isinstance(spec[0], (list, tuple)):
+                return [str(x) for x in spec[0]]
+        except Exception:
+            pass
+        return []
+
+    return list(_scan_cached(("mc_files", name), roots, _build))
+
+
+async def _mc_files(req):
+    return _web.json_response(_mc_folder_files(str(req.query.get("folder") or "")))
 
 
 async def _mc_outputs(req):
@@ -789,6 +974,7 @@ async def _mc_outputs(req):
 
 
 try:
+    PromptServer.instance.routes.get("/models_combo/files")(_mc_files)
     PromptServer.instance.routes.post("/models_combo/outputs")(_mc_outputs)
 except Exception:
     pass
@@ -1396,6 +1582,7 @@ class PreviewAnyNode:
     DESCRIPTION = "Preview Any"
 
     def preview(self, config="{}", unique_id=None, extra_pnginfo=None, **kwargs):
+        _ezpv_sweep()      # 顺带回收 temp 下过期的导出件（有最小间隔，不会每次执行都扫目录）
         cfg = self._parse_config(config)
         connected = self._connected_inputs(unique_id, extra_pnginfo)
         wf_meta = PreviewAnyNode._workflow_gen_meta((extra_pnginfo or {}).get("workflow", {}))
@@ -1425,7 +1612,8 @@ class PreviewAnyNode:
         if not isinstance(data, dict):
             data = {}
         return {"save": bool(data.get("save")), "savePath": str(data.get("savePath") or ""),
-                "saveFormats": data.get("saveFormats") if isinstance(data.get("saveFormats"), dict) else {}}
+                "saveFormats": data.get("saveFormats") if isinstance(data.get("saveFormats"), dict) else {},
+                "batchMode": str(data.get("batchMode") or "auto")}
 
     def _connected_inputs(self, unique_id, extra_pnginfo):
         """返回已连接输入 (name, label)，按 workflow 里 input 顺序。label 取上游输出标签。"""
@@ -1817,7 +2005,7 @@ class PreviewAnyNode:
             if max(img.size) > _PREVIEW_MAX_IMG_SIDE:
                 img.thumbnail((_PREVIEW_MAX_IMG_SIDE, _PREVIEW_MAX_IMG_SIDE), Image.LANCZOS)
             buf = BytesIO()
-            img.save(buf, format="PNG", optimize=True)
+            img.save(buf, format="PNG")   # optimize=True 对 PNG 很慢，缩略图不值得
             return base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception:
             return None
@@ -1939,12 +2127,10 @@ class PreviewAnyNode:
                 u = _url(src)
                 if u:
                     return u
-            # 无文件 → 写临时 WAV
-            uri = PreviewAnyNode._audio_to_data_uri(data)
-            if uri and uri.startswith("data:audio/wav;base64,"):
-                wav = base64.b64decode(uri.split(",", 1)[1])
+            # 无文件 → 写临时 WAV（直接拿 WAV 字节，不再 base64 编一遍再解回来）
+            wav = PreviewAnyNode._audio_wav_bytes(data)
+            if wav:
                 import uuid
-                import tempfile
                 tmp = os.path.join(folder_paths.get_temp_directory(), f"ezpv_audio_{uuid.uuid4().hex}.wav")
                 with open(tmp, "wb") as fh:
                     fh.write(wav)
@@ -1954,8 +2140,8 @@ class PreviewAnyNode:
             return None
 
     @staticmethod
-    def _audio_to_data_uri(data):
-        """把 ComfyUI 音频（dict 含 waveform/sample_rate，或 (waveform, sample_rate)）编码为 WAV data URI。"""
+    def _audio_wav_bytes(data):
+        """把 ComfyUI 音频编成 WAV 字节（data URI 与临时文件共用，省掉 encode→decode 一转）。"""
         try:
             waveform = None
             sample_rate = 44100
@@ -1979,9 +2165,15 @@ class PreviewAnyNode:
                 wf.setsampwidth(2)
                 wf.setframerate(int(sample_rate))
                 wf.writeframes(audio16.tobytes())
-            return "data:audio/wav;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+            return buf.getvalue()
         except Exception:
             return None
+
+    @staticmethod
+    def _audio_to_data_uri(data):
+        """把 ComfyUI 音频（dict 含 waveform/sample_rate，或 (waveform, sample_rate)）编码为 WAV data URI。"""
+        wav = PreviewAnyNode._audio_wav_bytes(data)
+        return ("data:audio/wav;base64," + base64.b64encode(wav).decode("ascii")) if wav else None
 
     @staticmethod
     def _audio_summary(data):
@@ -3497,17 +3689,18 @@ class PreviewAnyNode:
             return entry
         base, counter = PreviewAnyNode._save_base(cfg, dirpath, name)
         sf = cfg.get("saveFormats") or {}
-        icfg = sf.get("image") if isinstance(sf.get("image"), dict) else {}
-        # 多图保存类型是「卡片级」的（节点 config 的 batchModes[input]），格式参数才在保存类型弹窗里
-        mode = str((cfg.get("batchModes") or {}).get(entry.get("input") or "") or "auto")
+        acfg = sf.get("animated") if isinstance(sf.get("animated"), dict) else {}
+        # 多图保存为是**全局**的（节点 config 的 batchMode）；动图格式走独立的 animated 段
+        mode = str(cfg.get("batchMode") or "auto")
         if mode == "auto":
             mode = "video" if entry.get("batch_kind") == "frames" else "images"   # 抽帧 → 视频；批量出图 → 序列
         if mode == "animation":
-            afmt = str(icfg.get("animfmt") or "webp")
-            afps = icfg.get("afps") or 6
-            aloss = str(icfg.get("alossless") or "") != "no"
+            afmt = str(acfg.get("fmt") or "webp")
+            afps = acfg.get("afps") or 6
+            _al = acfg.get("alossless")
+            aloss = not (_al is False or str(_al).strip().lower() in ("no", "false", "0", "off"))
             paths = [p for p in (PreviewAnyNode._src_file_of(u) for u in sources) if p and os.path.isfile(p)]
-            res = _encode_frames_animated(paths, afmt, afps, quality, aloss)
+            res = _encode_frames_animated(paths, afmt, afps, acfg.get("quality") or quality, aloss, acfg.get("method"))
             if res and res[1].lower() in _SAVE_ALLOWED_EXTS:
                 data, ext = res
                 fname = f"{base}_{counter + 1:05}{ext}"
@@ -3824,13 +4017,16 @@ def _norm_param_value(value, ptype):
 
 
 def _bitrate_int(s):
+    """码率：接受 '192k' / '192000' / 192（裸数字 < 1000 当 kbps）。"""
     try:
         if isinstance(s, (int, float)):
-            return int(s)
+            n = int(s)
+            return n * 1000 if 0 < n < 1000 else n
         s = str(s).strip().lower()
         if s.endswith("k"):
             return int(float(s[:-1]) * 1000)
-        return int(float(s))
+        n = int(float(s))
+        return n * 1000 if 0 < n < 1000 else n
     except Exception:
         return None
 
@@ -3870,7 +4066,7 @@ def _encode_audio(data_bytes, fmt, bitrate=None, sample_rate=None):
         return None
 
 
-def _encode_frames_animated(paths, fmt, fps, quality=None, lossless=True):
+def _encode_frames_animated(paths, fmt, fps, quality=None, lossless=True, method=None):
     """一批帧 → 动图（webp / png / gif），参数对齐内置 SaveAnimatedWEBP / SaveAnimatedPNG。"""
     try:
         if not paths:
@@ -3893,6 +4089,9 @@ def _encode_frames_animated(paths, fmt, fps, quality=None, lossless=True):
             kw["lossless"] = bool(lossless)
             if not lossless and quality:
                 kw["quality"] = int(quality)
+            m = {"fastest": 0, "default": 4, "slowest": 6}.get(str(method or ""))
+            if m is not None:
+                kw["method"] = m
             imgs[0].save(buf, format="WEBP", **kw)
             return buf.getvalue(), ".webp"
         if fmt == "png":
@@ -3912,7 +4111,8 @@ def _encode_frames_to_video(paths, fps, fmt="mp4", codec="", crf=None):
         import av
         from io import BytesIO
         fmt = (fmt or "mp4").lower()
-        codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec, "libx264")
+        # 没选编码器时按容器给默认：webm 用 vp9，其它用 h264（原来一律 libx264，写 webm 会失败）
+        codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec) or ("libvpx-vp9" if fmt == "webm" else "libx264")
         container = {"mkv": "matroska", "mov": "mov", "avi": "avi"}.get(fmt, fmt)
         rate = float(fps) if fps else 24
         oidx = BytesIO()
@@ -3945,7 +4145,8 @@ def _encode_video(data_bytes, fmt, codec="h264", crf=None, fps=None):
         import av
         from io import BytesIO
         fmt = (fmt or "webm").lower()
-        codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec, "libvpx-vp9")
+        # 没选编码器时按容器给默认（空 codec 原来落成 libvpx-vp9，写 mp4 会失败）
+        codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec) or ("libvpx-vp9" if fmt == "webm" else "libx264")
         container = {"mkv": "matroska", "mov": "mov", "avi": "avi"}.get(fmt, fmt)
         oidx = BytesIO()
         fsrc = BytesIO(data_bytes); fsrc.seek(0)
@@ -4303,6 +4504,17 @@ async def _preview_any_pick_folder(req):
         return _web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+# 允许这条「媒体/模型直链」服务的扩展名：根内文件以前**任何**后缀都能读（含 .json/.txt），
+# 收紧到媒体/模型相关后缀，避免把允许目录里的其它文件顺出去。
+_MEDIA_SERVE_EXT = {
+    ".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
+    ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus", ".aac", ".wma",
+    ".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".3ds", ".dae", ".blend",
+    ".splat", ".spz", ".ksplat", ".bin", ".mtl", ".ktx2", ".hdr", ".exr",
+}
+
+
 async def _preview_any_serve_video(req):
     """流式返回媒体文件（Range 支持）。只服务「允许目录」内的文件；根外文件仅「本机预览」才复制进临时目录
     再服务 —— 否则远端能借这条路由把任意文件当视频读走。"""
@@ -4314,6 +4526,8 @@ async def _preview_any_serve_video(req):
         src = _ez_adopt_to_temp(path)
     if not src or not os.path.isfile(src):
         return _web.json_response({"error": "not found"}, status=404)
+    if os.path.splitext(src)[1].lower() not in _MEDIA_SERVE_EXT:
+        return _web.json_response({"error": "unsupported file type"}, status=415)
     return _web.FileResponse(src)
 
 
@@ -4611,6 +4825,25 @@ def _ph_clip_generate(clip, prompt, tg, media=None):
 
 
 # ===== 按「设置」里的 CLIP 路径+类型 自行加载 text-gen CLIP（点击即用，像 llama 一样）=====
+# 模型缓存有上限：装不下就淘汰最旧一个（llama 先 close()，不等 GC）。没上限时远端能靠反复换模型把内存/显存吃满。
+_LLAMA_CACHE_MAX = 2
+_PH_CLIP_CACHE_MAX = 4
+
+
+def _ph_cache_put(cache, key, val, maxn, closer=None):
+    cache[key] = val
+    while len(cache) > maxn:
+        oldest = next(iter(cache))
+        if oldest == key:
+            break
+        old = cache.pop(oldest, None)
+        if old is not None and closer is not None:
+            try:
+                closer(old)
+            except Exception:
+                pass
+
+
 _PH_CLIP_CACHE = {}
 
 
@@ -4657,9 +4890,9 @@ def ph_resolve_model(p, extra_roots=None, strict=False):
         cand = os.path.join(root, p)
         if os.path.isfile(cand):
             return os.path.abspath(cand)
-        for dirpath, _dirs, files in os.walk(root):
-            if base in files:
-                return os.path.abspath(os.path.join(dirpath, base))
+        hit = _ph_root_index(root).get(base)   # 缓存索引：不再每次查询都 os.walk 整个模型根
+        if hit:
+            return hit
     return ""
 
 
@@ -4675,7 +4908,7 @@ def _ph_clip_instance(clip_path, clip_type):
                                   clip_type=ct, model_options={})
     except Exception as e:
         raise ValueError(f"failed to load CLIP: {e} (make sure this is a text-gen text encoder and the CLIP type is correct)") from e
-    _PH_CLIP_CACHE[key] = clip
+    _ph_cache_put(_PH_CLIP_CACHE, key, clip, _PH_CLIP_CACHE_MAX)
     return clip
 
 
@@ -4703,6 +4936,54 @@ def ph_clear_model_cache():
         comfy.model_management.soft_empty_cache()
     except Exception:
         pass
+
+
+def ph_gen_unload_after():
+    """生图（预览图）批次全部跑完后调用：把这一批工作流加载的 checkpoint/UNet/VAE/LoRA 真卸掉，
+    并把显存还给系统。EzFlex 是绕过 ComfyUI /prompt 直接往队列里塞项，队列项 extra_data 不带
+    free_memory/unload_models flag，所以内核 main.py 那套自动卸载不会触发 —— 必须自己卸。
+
+    只在"整批跑完"后调一次（不是每张都卸），否则连续生成 N 张会反复 load/unload 反而更慢。
+    先 unload_all_models() 真卸载，再 soft_empty_cache() + gc.collect() 把显存/内存真正回收。"""
+    import gc
+    mm = None
+    try:
+        import comfy.model_management as mm
+    except Exception:
+        mm = None
+    try:
+        if mm is not None:
+            mm.unload_all_models()
+    except Exception:
+        pass
+    try:
+        if mm is not None:
+            mm.soft_empty_cache()
+    except Exception:
+        pass
+    # 顺带把我们自己的文本模型缓存也清掉（生图批次结束后本来也不再需要）
+    for m in list(_LLAMA_CACHE.values()):
+        try:
+            m.close()
+        except Exception:
+            pass
+    try:
+        _LLAMA_CACHE.clear()
+    except Exception:
+        pass
+    try:
+        _PH_CLIP_CACHE.clear()
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
 
 def _ph_html_to_text(html):
     """把卡片 contenteditable 的 HTML 转成纯文本（供合并提示词用）。"""
@@ -5028,7 +5309,7 @@ def _ph_llama_instance(model_path, mmproj, ll):
         if vision:
             kw["chat_handler_kwargs"] = vision
     llm = llama_cpp.Llama(**kw)
-    _LLAMA_CACHE[key] = llm
+    _ph_cache_put(_LLAMA_CACHE, key, llm, _LLAMA_CACHE_MAX, lambda m: m.close())
     return llm
 
 
@@ -5946,6 +6227,326 @@ def _ph_libs_clean(libs):
     return out
 
 
+# 预览图（base64 data URL）落盘上限。卡片侧 _ph_pcards_save 用的是同一个数；
+# 标签侧原来单独写 400000，两边不一致，且超限会**静默丢弃**（表现就是"预览图偶尔没了"）。
+# ⚠️ 2026-10-04 起预览图改为「独立文件」存储，JSON 里只留哈希短名；
+#    该上限仅用于「把进来的 data URL 转存成文件」时的**单张**准入判断（见 _pv_store_dataurl）。
+_PH_PREVIEW_MAX = 1200000
+
+
+# ===== 预览图独立文件存储（user/EzFlex/{tag_preview,card_preview}/<sha1>.webp）=====
+# 背景：以前预览图以 base64 内嵌在 JSON 里，图一多就「全量传输 + 全量 stringify」，
+#      且单条超 _PH_PREVIEW_MAX 会被静默丢弃。改为独立文件后：
+#      JSON 只存哈希短名，img.src 走专用路由 + 长缓存 → 加载/保存都随图数线性变好的方向反转。
+# 身份模型：文件按「标签名 / 卡片名」派生哈希命名（**不能用 id**：库侧记录的 id 是随机补的，
+#          重新加载会变；name 才是稳定且贯穿 CSV 库/元数据/我的副本的唯一键）。
+# ★ 2026-10-04：标签与卡片**分目录**存储（同名标签与卡片哈希会撞车 → 必须分开）：
+#     kind='tag'  → user/EzFlex/tag_preview/
+#     kind='card' → user/EzFlex/card_preview/
+#   旧的共用目录 tag_preview 里若混着卡片文件，读取时会**惰性搬迁**到 card_preview（见 _pv_dir/_pv_get_or_migrate_card）。
+_PV_DIRNAME = 'tag_preview'                 # 标签预览目录（保留旧名，兼容外部引用）
+_PV_CARD_DIRNAME = 'card_preview'           # 卡片预览目录
+_PV_KINDS = ('tag', 'card')
+
+
+def _pv_dir_of(kind):
+    """预览子目录名：kind='card' → card_preview；其它（含 'tag'/None）→ tag_preview。"""
+    return _PV_CARD_DIRNAME if str(kind) == 'card' else _PV_DIRNAME
+
+
+def _pv_legacy_dir():
+    """旧版「标签卡片共用」目录（tag_preview）；用于把历史卡片预览惰性搬迁出来。"""
+    return _ezflex_user_dir(_PV_DIRNAME)
+
+
+def _pv_dir(kind='tag'):
+    """预览图目录 user/EzFlex/<子目录>/（与 prompts 同级，随 user 数据一起迁移/保留）。"""
+    d = _ezflex_user_dir(_pv_dir_of(kind))
+    if d:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+    return d
+
+
+def _pv_hash(name):
+    """标签名/卡片名 → 稳定哈希短名（sha1 前 32 hex）。归一化规则必须与前端判等一致（strip）。"""
+    import hashlib
+    nm = str(name or '').strip()
+    return hashlib.sha1(nm.encode('utf-8')).hexdigest()[:32]
+
+
+def _pv_ext_of(data_url):
+    """从 data URL 的 mime 推断扩展名；默认 webp（体积优先）。"""
+    m = re.match(r'data:image/([a-z0-9.+-]+)', str(data_url or ''), re.I)
+    kind = (m.group(1).lower() if m else 'webp')
+    kind = 'jpg' if kind in ('jpeg', 'jpg') else kind
+    if kind not in ('webp', 'png', 'jpg', 'gif', 'bmp'):
+        kind = 'webp'
+    return kind
+
+
+def _pv_store_dataurl(name, data_url, kind='tag'):
+    """把 data:image/... 写进独立文件，返回哈希短名（如 'ab12...ef.webp'）；失败返回 ''。
+    覆盖写：同一 name 重存 = 覆盖同一文件（旧的其它扩展名文件会被顺手删掉）。
+    kind：'tag' → tag_preview/；'card' → card_preview/。"""
+    s = str(data_url or '')
+    if not s.startswith('data:image/') or ',' not in s or len(s) > _PH_PREVIEW_MAX:
+        return ''
+    d = _pv_dir(kind)
+    if not d:
+        return ''
+    ext = _pv_ext_of(s)
+    b64 = s.split(',', 1)[1]
+    try:
+        raw = base64.b64decode(b64, validate=False)
+    except Exception:
+        return ''
+    if not raw:
+        return ''
+    base = _pv_hash(name)
+    fname = base + '.' + ext
+    dst = os.path.join(d, fname)
+    try:
+        tmp = dst + '.tmp'
+        with open(tmp, 'wb') as fh:
+            fh.write(raw)
+        os.replace(tmp, dst)
+    except Exception:
+        return ''
+    # 同一 name 若换过扩展名（如先 png 后 webp），删掉同名其它扩展，避免残留
+    for other in ('webp', 'png', 'jpg', 'gif', 'bmp'):
+        if other == ext:
+            continue
+        op = os.path.join(d, base + '.' + other)
+        try:
+            if os.path.isfile(op):
+                os.remove(op)
+        except Exception:
+            pass
+    return fname
+
+
+def _pv_file_path(fname, kind='tag'):
+    """短名 → 绝对路径；拒绝任何路径分隔/穿越，只接受 <32hex>.<ext> 形态。"""
+    s = str(fname or '').strip()
+    if not s or os.path.sep in s or '/' in s or '..' in s:
+        return ''
+    if not re.fullmatch(r'[0-9a-fA-F]{4,64}\.[A-Za-z0-9]{2,5}', s):
+        return ''
+    d = _pv_dir(kind)
+    if not d:
+        return ''
+    p = os.path.join(d, s)
+    if os.path.realpath(os.path.dirname(p)) != os.path.realpath(d):
+        return ''
+    return p
+
+
+def _pv_relocate_legacy(fname, kind):
+    """历史遗留搬迁：老版本标签/卡片共用 tag_preview/。
+    卡片预览读到时若卡目录里没有、但老共用目录里有 → 搬过来（一次，之后正常）。
+    只在 kind='card' 时用；tag 本就在 tag_preview，无需迁。返回是否发生了搬迁。"""
+    if str(kind) != 'card':
+        return False
+    s = str(fname or '').strip()
+    if not re.fullmatch(r'[0-9a-fA-F]{4,64}\.[A-Za-z0-9]{2,5}', s):
+        return False
+    dst_dir = _pv_dir('card')
+    if not dst_dir:
+        return False
+    dst = os.path.join(dst_dir, s)
+    if os.path.isfile(dst):
+        return False
+    legacy = _pv_legacy_dir()
+    if not legacy:
+        return False
+    src = os.path.join(legacy, s)
+    if not os.path.isfile(src):
+        return False
+    try:
+        os.replace(src, dst)     # 同盘移动（同一 user 目录下）
+    except Exception:
+        try:
+            import shutil
+            shutil.move(src, dst)
+        except Exception:
+            return False
+    return True
+
+
+def _pv_delete(name, kind='tag'):
+    """删除某 name 对应的预览文件（尽力，任何扩展名）；同时清掉老共用目录里的同名残留。"""
+    base = _pv_hash(name)
+    dirs = [_pv_dir(kind)]
+    if str(kind) == 'card':
+        dirs.append(_pv_legacy_dir())   # 历史遗留位置也清一下
+    for d in dirs:
+        if not d:
+            continue
+        for ext in ('webp', 'png', 'jpg', 'gif', 'bmp'):
+            try:
+                p = os.path.join(d, base + '.' + ext)
+                if os.path.isfile(p):
+                    os.remove(p)
+            except Exception:
+                pass
+
+
+def _pv_is_dataurl(v):
+    return isinstance(v, str) and v.startswith('data:image/') and len(v) <= _PH_PREVIEW_MAX
+
+
+def _pv_is_fname(v):
+    """JSON 里 preview 字段是否为「新格式哈希短名」。"""
+    if not isinstance(v, str):
+        return False
+    return bool(re.fullmatch(r'[0-9a-fA-F]{4,64}\.[A-Za-z0-9]{2,5}', v.strip()))
+
+
+def _pv_migrate_value(name, val, kind='tag'):
+    """惰性迁移：值是旧 base64 → 落盘成文件并返回哈希短名；值已是新格式 → 原样返回；其它 → ''。
+    kind 决定落到 tag_preview/ 还是 card_preview/。"""
+    if _pv_is_dataurl(val):
+        return _pv_store_dataurl(name, val, kind)
+    if _pv_is_fname(val):
+        return str(val).strip()
+    return ''
+
+
+def _pv_clean_dir(valid_names, kind='tag'):
+    """孤儿回收：目录里存在、但不在 valid_names 里的文件删掉。
+    ★ valid_names 必须是「**当前真正被引用的哈希短名集合**」（不是「所有 name 的哈希」）——
+      否则「把某条预览移除了、但记录还在」时，它的哈希仍被算作有效 → 文件永远删不掉（用户报过：
+      「移除后对应图片没删掉」）。
+    valid_names 为 None 时不清理（避免误删）。只清指定 kind 的目录。"""
+    if valid_names is None:
+        return 0
+    d = _pv_dir(kind)
+    if not d or not os.path.isdir(d):
+        return 0
+    keep = set()
+    for v in valid_names:
+        s = str(v or "").strip()
+        if _pv_is_fname(s):
+            keep.add(s)
+    n = 0
+    try:
+        for fn in os.listdir(d):
+            if fn.endswith('.tmp'):
+                try:
+                    os.remove(os.path.join(d, fn))
+                except Exception:
+                    pass
+                continue
+            if fn not in keep:
+                try:
+                    os.remove(os.path.join(d, fn))
+                    n += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return n
+
+
+def _pv_all_valid_names():
+    """两个目录合并回收用：当前**真正被引用**的预览短名集合（标签 ∪ 卡片，含卡片组顶层 + 组内单卡）。
+    读取失败时返回 None（= 不清理，宁可留着也别误删）。
+    ⚠️ 与 _pv_clean_dir 同口径：只收 preview 非空的短名，不收没有预览的 name。"""
+    names = set()
+    ok = False
+    try:
+        fn = _ph_tags_file()
+        if fn and os.path.isfile(fn):
+            with open(fn, 'r', encoding='utf-8') as fh:
+                d = json.loads(fh.read())
+            for t in (d.get("tags") or []):
+                if isinstance(t, dict):
+                    pv = str(t.get("preview") or "").strip()
+                    if _pv_is_fname(pv):
+                        names.add(pv)
+            ok = True
+    except Exception:
+        pass
+    try:
+        pd = _ph_prompts_dir()
+        if pd and os.path.isdir(pd):
+            for fn in os.listdir(pd):
+                if not fn.endswith(".json") or fn.endswith(".bak"):
+                    continue
+                try:
+                    with open(os.path.join(pd, fn), 'r', encoding='utf-8') as fh:
+                        d = json.loads(fh.read())
+                except Exception:
+                    continue
+                if isinstance(d, dict):
+                    pv = str(d.get("preview") or "").strip()
+                    if _pv_is_fname(pv):
+                        names.add(pv)
+                    for c in (d.get("cards") or []):
+                        if isinstance(c, dict):
+                            cpv = str(c.get("preview") or "").strip()
+                            if _pv_is_fname(cpv):
+                                names.add(cpv)
+            ok = True
+    except Exception:
+        pass
+    return names if ok else None
+
+
+def _pv_tag_valid_names():
+    """标签目录回收用：**当前真正引用了预览图的标签**的哈希短名集合（读取失败 → None，不清理）。
+    ⚠️ 必须只收「preview 非空」的条目 —— 收了没有预览的 name 会让它对应的孤儿文件永远删不掉。"""
+    try:
+        fn = _ph_tags_file()
+        if not fn or not os.path.isfile(fn):
+            return None
+        with open(fn, 'r', encoding='utf-8') as fh:
+            d = json.loads(fh.read())
+        out = set()
+        for t in (d.get("tags") or []):
+            if isinstance(t, dict):
+                pv = str(t.get("preview") or "").strip()
+                if _pv_is_fname(pv):
+                    out.add(pv)
+        return out
+    except Exception:
+        return None
+
+
+def _pv_card_valid_names():
+    """卡片目录回收用：prompts/*.json 里**真正引用了预览图**的短名集合（读取失败 → None，不清理）。
+    收「卡片组顶层 preview」+「组内每张卡的 preview」两类。"""
+    try:
+        pd = _ph_prompts_dir()
+        if not pd or not os.path.isdir(pd):
+            return None
+        out = set()
+        for fn in os.listdir(pd):
+            if not fn.endswith(".json") or fn.endswith(".bak"):
+                continue
+            try:
+                with open(os.path.join(pd, fn), 'r', encoding='utf-8') as fh:
+                    d = json.loads(fh.read())
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            pv = str(d.get("preview") or "").strip()
+            if _pv_is_fname(pv):
+                out.add(pv)
+            for c in (d.get("cards") or []):
+                if isinstance(c, dict):
+                    cpv = str(c.get("preview") or "").strip()
+                    if _pv_is_fname(cpv):
+                        out.add(cpv)
+        return out
+    except Exception:
+        return None
+
+
 def _ph_tags_clean(items):
     out = []
     if not isinstance(items, list):
@@ -5967,9 +6568,18 @@ def _ph_tags_clean(items):
                 tid = base + "_" + str(n)
         seen.add(tid)
         rec = {"id": tid, "name": name, "category": str(it.get("category") or "").strip()[:64]}
-        if isinstance(it.get("preview"), str) and it["preview"].startswith("data:image/") and len(it["preview"]) < 400000:
-            rec["preview"] = it["preview"]
-        for key, cap in (("from", 64), ("collectedFrom", 64), ("rec", 64), ("fav", 8), ("zh", 64), ("color", 32), ("mine", 8)):
+        # 预览图：改为独立文件存储，JSON 只留哈希短名。
+        #   - 旧数据（data:image base64）在这里**惰性迁移**：落盘成文件、字段换成短名（用户无感）。
+        #   - 新格式（<hash>.ext）原样保留；其它值一律丢弃。
+        pv = _pv_migrate_value(name, it.get("preview"), 'tag')
+        if pv:
+            rec["preview"] = pv
+        # 布尔字段单独处理：以前和字符串字段一起 str(v)[:8]，
+        #   mine=True  → "True"（truthy 字符串，能用但类型脏）；mine=False → "False"（**truthy**！前端 !t.mine 判不出）
+        for key in ("mine", "fav"):
+            if it.get(key) is True:
+                rec[key] = True
+        for key, cap in (("from", 64), ("collectedFrom", 64), ("rec", 64), ("zh", 64), ("color", 32)):
             val = str(it.get(key) or "").strip()[:cap]
             if val:
                 rec[key] = val
@@ -6000,6 +6610,95 @@ async def _ph_tags_get(req):
     return _web.json_response(_ph_tags_load())
 
 
+async def _ph_preview_delete(req):
+    """删掉某个标签/卡片对应的预览图片文件（+ 顺手回收目录里的孤儿）。
+    POST {name, kind}。标签侧前端「移除预览图」不落 JSON 字段时也能立即清文件，
+    否则该文件会一直留在 tag_preview/ 里（用户报过：「移除后对应图片没删掉」）。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    name = str(data.get("name") or "").strip()[:96]
+    kind = str(data.get("kind") or "tag").strip().lower()
+    if kind not in _PV_KINDS:
+        kind = "tag"
+    if not name:
+        return _web.json_response({"error": "no name"}, status=400)
+    _pv_delete(name, kind)
+    try:
+        if kind == 'card':
+            _pv_clean_dir(_pv_card_valid_names(), 'card')
+        else:
+            _pv_clean_dir(_pv_tag_valid_names(), 'tag')
+    except Exception:
+        pass
+    return _web.json_response({"ok": True, "name": name, "kind": kind})
+
+
+async def _ph_thumb_get(req):
+    """预览图独立文件服务：GET /prompt_helper/thumb/<kind>/<hash>.webp
+    kind = 'tag' | 'card'（缺省/未知当 'tag'，兼容旧 URL）。
+    只读对应目录下的合法短名（拒绝路径穿越）。
+    卡片图若还在历史共用的 tag_preview/ 里，顺手搬迁到 card_preview/ 再返回。
+
+    ★ 缓存策略：文件名是「名字哈希」而非「内容哈希」→ 重新生成预览图后 URL 不变。
+      若给 immutable + 1 年，浏览器永远拿旧图（用户报过：「生成预览图没有覆盖掉原来的图片」）。
+      所以这里改为 **no-cache + ETag(内容哈希) + Last-Modified**：浏览器每次带 If-None-Match
+      回源校验，没变 → 304 省流量；变了（重新生成过）→ 200 拿新图。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    kind = (req.match_info.get("kind") or "tag").strip().lower()
+    if kind not in _PV_KINDS:
+        kind = "tag"
+    fname = (req.match_info.get("fname") or "").strip()
+    p = _pv_file_path(fname, kind)
+    if p and not os.path.isfile(p) and kind == "card":
+        # 历史遗留：卡片图可能在旧的共用 tag_preview/ 里 → 搬迁后再取
+        try:
+            if _pv_relocate_legacy(fname, kind):
+                p = _pv_file_path(fname, kind)
+        except Exception:
+            pass
+    if not p or not os.path.isfile(p):
+        return _web.json_response({"error": "not found"}, status=404)
+    try:
+        with open(p, 'rb') as fh:
+            raw = fh.read()
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+    import hashlib as _hashlib
+    etag = '"' + _hashlib.sha1(raw).hexdigest()[:32] + '"'
+    inm = req.headers.get("If-None-Match")
+    if inm and etag in [x.strip() for x in inm.split(",")]:
+        return _web.Response(status=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
+    ext = fname.rsplit('.', 1)[-1].lower()
+    mime = {"webp": "image/webp", "png": "image/png", "jpg": "image/jpeg",
+            "jpeg": "image/jpeg", "gif": "image/gif", "bmp": "image/bmp"}.get(ext, "application/octet-stream")
+    try:
+        import email.utils as _eu
+        lm = _eu.formatdate(os.path.getmtime(p), usegmt=True)
+    except Exception:
+        lm = None
+    hdrs = {"Cache-Control": "no-cache", "ETag": etag}
+    if lm:
+        hdrs["Last-Modified"] = lm
+    return _web.Response(body=raw, content_type=mime, headers=hdrs)
+
+
+def _ph_backup_before_write(fn):
+    """写前把旧文件留一份 .bak（只留最近一份）。
+    标签数据（ezflex_prompt_tags.json）和卡片（user/EzFlex/prompts/*.json）都走这里。
+    ⚠️ 2026-10-04 起预览图已独立成文件（tag_preview/），不再内嵌，所以 .bak 主要保的是元数据。"""
+    try:
+        if fn and os.path.isfile(fn):
+            import shutil
+            shutil.copy2(fn, fn + ".bak")
+    except Exception:
+        pass
+
+
 async def _ph_tags_save(req):
     if not _ez_local(req):
         return _web.json_response({"error": "forbidden: local clients only"}, status=403)
@@ -6011,9 +6710,33 @@ async def _ph_tags_save(req):
     fn = _ph_tags_file()
     if not fn:
         return _web.json_response({"error": "no userdata"}, status=500)
+    # ⚠️ 空表护栏：整份覆盖写最怕前端拿了个「还没加载完/加载失败」的空状态回来保存 —— 一写就把
+    #    磁盘上几百 KB 的标签连同内嵌预览图全抹了（实测发生过：live 文件被写成 tags:[]）。
+    #    真要清空，前端得显式带 allowEmpty:true，避免误清。
+    if not rec["tags"] and not data.get("allowEmpty"):
+        try:
+            cur = _ph_tags_load()
+        except Exception:
+            cur = {"tags": []}
+        if cur.get("tags"):
+            # 磁盘上有数据、这次却要写空 → 判定为坏请求，不写盘，把现状回给前端让它自愈（顺手留 .bak）。
+            try:
+                _ph_backup_before_write(fn)
+            except Exception:
+                pass
+            return _web.json_response({
+                "ok": False, "rejected": "empty_overwrite",
+                "categories": cur["categories"], "tags": cur["tags"], "libs": cur.get("libs") or {},
+            })
     try:
+        _ph_backup_before_write(fn)
         with open(fn, 'w', encoding='utf-8') as fh:
             json.dump(rec, fh, ensure_ascii=False, indent=2)
+        # 孤儿回收：标签目录已与卡片目录分开 → 只按「标签名」清 tag_preview/ 即可，不会误伤卡片图。
+        try:
+            _pv_clean_dir(_pv_tag_valid_names(), 'tag')
+        except Exception:
+            pass
         return _web.json_response({"ok": True, "categories": rec["categories"], "tags": rec["tags"], "libs": rec["libs"]})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
@@ -6302,9 +7025,11 @@ async def _ph_pcards_get(req):
         if not isinstance(rec, dict):
             rec = {}
         cards = rec.get("cards")
+        # 旧卡片文件里 preview 还是 base64 → GET 时惰性迁移成短名（写回文件，用户无感）
+        pv = _pv_get_or_migrate_card(name, fn, rec)
         return _web.json_response({"name": name, "cards": cards if isinstance(cards, list) else [],
                                    "kind": str(rec.get("kind") or "card"), "category": str(rec.get("category") or ""),
-                                   "preview": str(rec.get("preview") or "")})
+                                   "preview": pv})
     out = []
     if d and os.path.isdir(d):
         for fn in sorted(os.listdir(d)):
@@ -6318,10 +7043,37 @@ async def _ph_pcards_get(req):
             if not isinstance(rec, dict):
                 rec = {}
             cards = rec.get("cards")
-            out.append({"name": fn[:-5], "count": len(cards) if isinstance(cards, list) else 0,
+            nm = fn[:-5]
+            pv = _pv_get_or_migrate_card(nm, os.path.join(d, fn), rec)
+            out.append({"name": nm, "count": len(cards) if isinstance(cards, list) else 0,
                         "kind": str(rec.get("kind") or "card"), "category": str(rec.get("category") or ""),
-                        "preview": str(rec.get("preview") or "")})
+                        "preview": pv})
     return _web.json_response({"cards": out})
+
+
+def _pv_get_or_migrate_card(name, fn, rec):
+    """读卡片 preview：旧 base64 → 落盘成文件 + 写回文件 + 返回短名；新短名 → 原样返回。"""
+    raw = rec.get("preview") if isinstance(rec, dict) else None
+    if not raw:
+        return ""
+    short = _pv_migrate_value(name, raw, 'card')
+    if short and short != raw:
+        # 发生过迁移（base64 → 短名）：把文件写回，避免每次都重转
+        try:
+            rec["preview"] = short
+            _ph_backup_before_write(fn)
+            with open(fn, 'w', encoding='utf-8') as fh:
+                json.dump(rec, fh, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    else:
+        # 历史遗留：短名对应的文件还躺在旧的共用 tag_preview/ 里 → 惰性搬到 card_preview/
+        try:
+            if short and not os.path.isfile(_pv_file_path(short, 'card') or ''):
+                _pv_relocate_legacy(short, 'card')
+        except Exception:
+            pass
+    return short
 
 
 async def _ph_pcards_save(req):
@@ -6334,26 +7086,28 @@ async def _ph_pcards_save(req):
         return _web.json_response({"error": "bad json"}, status=400)
     name = (data.get("name") or "").strip()
     cards = data.get("cards")
-    category = str(data.get("category") or "").strip()[:200]
+    category = data.get("category")
+    category = (str(category).strip()[:200] if category is not None else None)   # 缺省 = 不改分类（只改预览图时别把分类冲掉）
     kind_in = str(data.get("kind") or "").strip()
     fn = _ph_prompt_card_file(name)
     if not fn:
         return _web.json_response({"error": 'invalid name: must not contain \\ / : * ? " < > | , must not start with a dot, max 64 characters'}, status=400)
-    preview_in = data.get("preview")
-    if not (isinstance(preview_in, str) and preview_in.startswith("data:image/") and len(preview_in) <= 1200000):
-        preview_in = None
+    # 预览图：传入可能是「data:image base64（新加的图）」或「已存在的哈希短名（只改别的字段时带回）」。
+    # 统一走 _pv_migrate_value：base64 → 落盘成文件并换短名；短名 → 原样；其它 → 空。
+    preview_in = _pv_migrate_value(name, data.get("preview"), 'card')
+    remove_preview = bool(data.get("removePreview"))
     if isinstance(cards, list) and cards:
-        rec = {"name": name, "cards": cards, "kind": kind_in if kind_in in ("card", "group") else "card", "category": category}
+        rec = {"name": name, "cards": cards, "kind": kind_in if kind_in in ("card", "group") else "card", "category": category or ""}
         # 只改卡片内容时这里会重建 rec：把原文件里已有的预览图带回来（前端保存卡片不传 preview，不然一存就没图）
-        if preview_in is None and os.path.isfile(fn):
+        if not preview_in and os.path.isfile(fn):
             try:
                 with open(fn, 'r', encoding='utf-8') as fh:
                     prev = json.loads(fh.read())
-                if isinstance(prev, dict) and isinstance(prev.get("preview"), str):
-                    preview_in = prev["preview"]
+                if isinstance(prev, dict):
+                    preview_in = _pv_migrate_value(name, prev.get("preview"), 'card')
             except Exception:
                 pass
-        if preview_in is not None:
+        if preview_in:
             rec["preview"] = preview_in
     else:
         # 没带卡片 = 只改分类/类型（移动已保存的卡片/卡片组）：原文件必须在
@@ -6367,16 +7121,30 @@ async def _ph_pcards_save(req):
         if not isinstance(rec, dict):
             rec = {}
         rec["name"] = name
-        rec["category"] = category
-        if preview_in is not None:
+        if category is not None:
+            rec["category"] = category
+        if preview_in:
             rec["preview"] = preview_in
+        elif isinstance(rec.get("preview"), str):
+            # 旧文件里还是 base64 → 顺手迁移成短名
+            rec["preview"] = _pv_migrate_value(name, rec.get("preview"), 'card') or rec.pop("preview", None)
         if kind_in in ("card", "group"):
             rec["kind"] = kind_in
         else:
             rec["kind"] = str(rec.get("kind") or "card")
+    if remove_preview:
+        rec.pop("preview", None)
+        _pv_delete(name, 'card')
     try:
+        _ph_backup_before_write(fn)
         with open(fn, 'w', encoding='utf-8') as fh:
             json.dump(rec, fh, ensure_ascii=False, indent=2)
+        # 孤儿回收：卡片目录里没被任何卡片引用的图删掉（移除预览后旧图不会残留）
+        if remove_preview:
+            try:
+                _pv_clean_dir(_pv_card_valid_names(), 'card')
+            except Exception:
+                pass
         return _web.json_response({"ok": True, "name": name, "count": len(rec.get("cards") or [])})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
@@ -6392,6 +7160,7 @@ async def _ph_pcards_delete(req):
         return _web.json_response({"error": "no card named " + name}, status=404)
     try:
         os.remove(fn)
+        _pv_delete(name, 'card')          # 顺手删掉该卡片的预览文件
         return _web.json_response({"ok": True})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
@@ -6441,6 +7210,7 @@ _PGEN_DEFAULT = {
     "seedMode": "random", "seed": 0,
     "positive": "masterpiece, best quality, vibrant, very aesthetic, high contrast, highly detailed, absurdres,", "negative": "lowres, worst quality, low quality, bad anatomy, bad proportions, signature, watermark, patreon, artist name, twitter username, simple background, borders",
     "format": "webp", "quality": 80, "size": 384,
+    "unloadAfter": True,   # 生成预览图整批结束后卸载模型、还显存（默认开，防止连生几张后爆显存/变卡）
 }
 
 
@@ -6468,6 +7238,8 @@ def _ph_gen_clean(data):
                     pass
             elif k in ("seedMode", "format"):
                 out[k] = str(v)[:16]
+            elif k == "unloadAfter":
+                out[k] = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("0", "false", "no", "off", ""))
             elif k == "api":
                 out[k] = str(v)[:2 * 1024 * 1024]
             else:
@@ -6631,6 +7403,81 @@ def _ph_gen_run_one(name, cfg):
         return None, f"读取/压缩生成图失败: {e}"
 
 
+def _ph_card_prompt(rec):
+    """已保存的卡片/卡片组 → 一段用于生图的提示词（合=灰的卡不并，和运行期合并同口径）。"""
+    cards = rec.get("cards") if isinstance(rec, dict) else None
+    parts = []
+    for c in (cards or []):
+        if not isinstance(c, dict) or c.get("mergeOff"):
+            continue
+        t = str(c.get("content") or "").strip() or _ph_html_to_text(c.get("contentHTML") or "").strip()
+        if t:
+            parts.append(_ph_compile_card(t, c))
+    return ", ".join(parts)
+
+
+async def _ph_gen_card_preview(req):
+    """给已保存的卡片/卡片组生成预览图：用同一套生图设置，按卡片正文拼提示词，成功后直接写回卡片文件。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+    except Exception:
+        return _web.json_response({"error": "bad json"}, status=400)
+    names = [str(x)[:64] for x in (data.get("names") or []) if str(x).strip()][:32]
+    if not names:
+        return _web.json_response({"error": "no cards"}, status=400)
+    cfg = _ph_gen_load()
+    if isinstance(data.get("settings"), dict):
+        cfg = _ph_gen_clean({**cfg, **data["settings"]})
+    out = {}
+    err = None
+    import asyncio
+    try:
+        for nm in names:
+            fn = _ph_prompt_card_file(nm)
+            if not fn or not os.path.isfile(fn):
+                err = "no saved card named " + nm
+                break
+            try:
+                with open(fn, 'r', encoding='utf-8') as fh:
+                    rec = json.loads(fh.read())
+            except Exception as e:
+                err = str(e)
+                break
+            if not isinstance(rec, dict):
+                rec = {}
+            text = _ph_card_prompt(rec)
+            if not text.strip():
+                err = "card has no prompt content: " + nm
+                break
+            url, e = await asyncio.to_thread(_ph_gen_run_one, text, cfg)
+            if not url:
+                err = e
+                break
+            # 生图返回 base64 → 立刻落盘成独立文件（card_preview/），卡片里只存短名（不再内嵌）
+            short = _pv_store_dataurl(nm, url, 'card') or _pv_migrate_value(nm, url, 'card')
+            if not short:
+                err = "preview write failed"
+                break
+            rec["preview"] = short
+            try:
+                with open(fn, 'w', encoding='utf-8') as fh:
+                    json.dump(rec, fh, ensure_ascii=False, indent=2)
+            except Exception as e:
+                err = str(e)
+                break
+            out[nm] = short
+    finally:
+        # 整批跑完（含出错/超时提前 break）后统一卸模型、还显存：否则连续生成几张会累积占用显存直到卡死
+        if cfg.get("unloadAfter", True):
+            try:
+                await asyncio.to_thread(ph_gen_unload_after)
+            except Exception:
+                pass
+    return _web.json_response({"ok": bool(out), "previews": out, "error": err})
+
+
 async def _ph_gen_preview(req):
     if not _ez_local(req):
         return _web.json_response({"error": "forbidden: local clients only"}, status=403)
@@ -6647,13 +7494,27 @@ async def _ph_gen_preview(req):
     out = {}
     err = None
     import asyncio
-    for nm in names:
-        url, e = await asyncio.to_thread(_ph_gen_run_one, nm, cfg)
-        if url:
-            out[nm] = url
-        else:
-            err = e
-            break
+    try:
+        for nm in names:
+            url, e = await asyncio.to_thread(_ph_gen_run_one, nm, cfg)
+            if url:
+                # 生图返回 base64 → 落盘成独立文件（tag_preview/），只回短名给前端（前端把它塞进 tag.preview 再保存）
+                short = _pv_store_dataurl(nm, url, 'tag') or _pv_migrate_value(nm, url, 'tag')
+                if short:
+                    out[nm] = short
+                else:
+                    err = "preview write failed: " + nm
+                    break
+            else:
+                err = e
+                break
+    finally:
+        # 标签系统预览：整批结束后同样卸模型、还显存
+        if cfg.get("unloadAfter", True):
+            try:
+                await asyncio.to_thread(ph_gen_unload_after)
+            except Exception:
+                pass
     return _web.json_response({"ok": bool(out), "previews": out, "error": err})
 
 try:
@@ -6685,6 +7546,7 @@ try:
     PromptServer.instance.routes.get("/prompt_helper/gen_settings")(_ph_gen_get)
     PromptServer.instance.routes.post("/prompt_helper/gen_settings")(_ph_gen_save)
     PromptServer.instance.routes.post("/prompt_helper/gen_preview")(_ph_gen_preview)
+    PromptServer.instance.routes.post("/prompt_helper/gen_card_preview")(_ph_gen_card_preview)
     PromptServer.instance.routes.get("/prompt_helper/tag_libs")(_ph_libs_get)
     PromptServer.instance.routes.get("/prompt_helper/tag_lib")(_ph_tag_lib_get)
     PromptServer.instance.routes.get("/prompt_helper/tag_zh")(_ph_tag_zh_get)
@@ -6695,6 +7557,9 @@ try:
     PromptServer.instance.routes.get("/prompt_helper/tag_related")(_ph_tag_related_get)
     PromptServer.instance.routes.get("/prompt_helper/tag_desc")(_ph_tag_desc_get)
     PromptServer.instance.routes.post("/prompt_helper/tag_import")(_ph_tag_import)
+    PromptServer.instance.routes.get("/prompt_helper/thumb/{kind}/{fname}")(_ph_thumb_get)
+    PromptServer.instance.routes.get("/prompt_helper/thumb/{fname}")(_ph_thumb_get)   # 兼容旧 URL（默认 tag）
+    PromptServer.instance.routes.post("/prompt_helper/preview_delete")(_ph_preview_delete)
 except Exception:
     pass
 
@@ -6755,9 +7620,9 @@ def _ph_resolve_gguf(p, extra_roots=None, strict=False):
         cand = os.path.join(root, p)
         if os.path.isfile(cand):
             return os.path.abspath(cand)
-        for dirpath, _dirs, files in os.walk(root):
-            if base in files:
-                return os.path.abspath(os.path.join(dirpath, base))
+        hit = _ph_root_index(root).get(base)   # 缓存索引：不再每次查询都 os.walk 整个模型根
+        if hit:
+            return hit
     return ""
 
 
@@ -6767,23 +7632,26 @@ async def _ph_llama_models(req):
     root_q = (req.query.get("root") or "").strip()
     if root_q and not _ez_local(req):
         root_q = ""   # 远端不能指定扫描根（否则能拿它递归遍历任意目录）；回落默认 models 根
-    seen = set()
-    out = []
-    for root in _ph_scan_roots(root_q):
-        if not os.path.isdir(root):
-            continue
-        for dirpath, _dirs, files in os.walk(root):
-            for fn in files:
-                if not fn.lower().endswith(".gguf"):
-                    continue
-                full = os.path.abspath(os.path.join(dirpath, fn))
-                if full in seen:
-                    continue
-                seen.add(full)
-                rel = os.path.relpath(full, os.path.abspath(root))
-                out.append({"path": rel.replace("\\", "/"), "name": fn})
-    out.sort(key=lambda x: (x["name"] or "").lower())
-    return _web.json_response({"models": out})
+    roots = [r for r in _ph_scan_roots(root_q) if os.path.isdir(r)]
+
+    def _build():
+        seen = set()
+        out = []
+        for root in roots:
+            for dirpath, _dirs, files in os.walk(root):
+                for fn in files:
+                    if not fn.lower().endswith(".gguf"):
+                        continue
+                    full = os.path.abspath(os.path.join(dirpath, fn))
+                    if full in seen:
+                        continue
+                    seen.add(full)
+                    rel = os.path.relpath(full, os.path.abspath(root))
+                    out.append({"path": rel.replace("\\", "/"), "name": fn})
+        out.sort(key=lambda x: (x["name"] or "").lower())
+        return out
+
+    return _web.json_response({"models": _scan_cached(("ph_llama", root_q), roots, _build)})
 
 
 async def _ph_clip_models(req):
@@ -6792,24 +7660,27 @@ async def _ph_clip_models(req):
     root_q = (req.query.get("root") or "").strip()
     if root_q and not _ez_local(req):
         root_q = ""   # 远端不能指定扫描根（否则能拿它递归遍历任意目录）；回落默认 models 根
-    seen = set()
-    out = []
-    for root in _ph_scan_roots(root_q):
-        if not os.path.isdir(root):
-            continue
-        for dirpath, _dirs, files in os.walk(root):
-            for fn in files:
-                lf = fn.lower()
-                if not lf.endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin")):
-                    continue
-                full = os.path.abspath(os.path.join(dirpath, fn))
-                if full in seen:
-                    continue
-                seen.add(full)
-                rel = os.path.relpath(full, os.path.abspath(root)).replace("\\", "/")
-                out.append({"path": rel, "name": fn})
-    out.sort(key=lambda x: (x["name"] or "").lower())
-    return _web.json_response({"models": out})
+    roots = [r for r in _ph_scan_roots(root_q) if os.path.isdir(r)]
+
+    def _build():
+        seen = set()
+        out = []
+        for root in roots:
+            for dirpath, _dirs, files in os.walk(root):
+                for fn in files:
+                    lf = fn.lower()
+                    if not lf.endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin")):
+                        continue
+                    full = os.path.abspath(os.path.join(dirpath, fn))
+                    if full in seen:
+                        continue
+                    seen.add(full)
+                    rel = os.path.relpath(full, os.path.abspath(root)).replace("\\", "/")
+                    out.append({"path": rel, "name": fn})
+        out.sort(key=lambda x: (x["name"] or "").lower())
+        return out
+
+    return _web.json_response({"models": _scan_cached(("ph_clip", root_q), roots, _build)})
 
 
 try:
@@ -6830,9 +7701,10 @@ except Exception:
 #   - MediaOut 接收该卡片对象，按文件逐个拆出真实类型的输出端口。
 
 _MEDIA_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
-_MEDIA_VID_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v"}
-_MEDIA_AUD_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma"}
-_MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".spz", ".splat", ".ksplat", ".3ds", ".dae", ".blend"}
+_MEDIA_VID_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".ts", ".m2ts", ".vob"}
+_MEDIA_AUD_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma", ".aiff", ".aif", ".mka", ".ac3", ".amr"}
+_MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".spz", ".splat", ".ksplat", ".3ds", ".dae", ".blend", ".vrm", ".usdz", ".x3d", ".lwo", ".abc"}
+_MEDIA_TXT_EXTS = {".txt", ".md", ".json", ".csv", ".log", ".xml", ".yaml", ".yml"}
 # PreviewAny 存档允许的扩展名：只写媒体/文本文档，未知后缀（.bat/.desktop/.sh 等）一律不落盘。
 _SAVE_ALLOWED_EXTS = _MEDIA_IMG_EXTS | _MEDIA_VID_EXTS | _MEDIA_AUD_EXTS | {".txt", ".md", ".json", ".csv", ".log", ".html"} | {".safetensors", ".gguf", ".onnx", ".ckpt", ".pt", ".bin", ".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply"}
 
@@ -7050,30 +7922,33 @@ async def _ml_files(req):
     if not _ez_local(req):
         return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     from urllib.parse import quote as _q
-    out = []
-    for root in _ph_media_input_dirs():
-        if not os.path.isdir(root):
-            continue
-        for dirpath, _dirs, files in os.walk(root):
-            rel = os.path.relpath(dirpath, root).replace("\\", "/")
-            for fn in sorted(files):
-                typ = _media_kind(fn)
-                if typ == "other":
-                    continue
-                sub = "" if rel == "." else rel
-                path = (rel + "/" + fn) if rel != "." else fn
-                full = os.path.join(dirpath, fn)
-                try:
-                    size = os.path.getsize(full)
-                    mtime = _fmt_mtime(os.path.getmtime(full))
-                except Exception:
-                    size, mtime = 0, ""
-                url = "/view?type=input&filename=" + _q(fn) + ("&subfolder=" + _q(sub) if sub else "")
-                out.append({
-                    "name": fn, "path": path, "subfolder": sub, "dir": "input",
-                    "type": typ, "url": url, "size": size, "mtime": mtime,
-                })
-    return _web.json_response({"files": out})
+    roots = [r for r in _ph_media_input_dirs() if os.path.isdir(r)]
+
+    def _build():
+        out = []
+        for root in roots:
+            for dirpath, _dirs, files in os.walk(root):
+                rel = os.path.relpath(dirpath, root).replace("\\", "/")
+                for fn in sorted(files):
+                    typ = _media_kind(fn)
+                    if typ == "other":
+                        continue
+                    sub = "" if rel == "." else rel
+                    path = (rel + "/" + fn) if rel != "." else fn
+                    full = os.path.join(dirpath, fn)
+                    try:
+                        size = os.path.getsize(full)
+                        mtime = _fmt_mtime(os.path.getmtime(full))
+                    except Exception:
+                        size, mtime = 0, ""
+                    url = "/view?type=input&filename=" + _q(fn) + ("&subfolder=" + _q(sub) if sub else "")
+                    out.append({
+                        "name": fn, "path": path, "subfolder": sub, "dir": "input",
+                        "type": typ, "url": url, "size": size, "mtime": mtime,
+                    })
+        return out
+
+    return _web.json_response({"files": _scan_cached(("ml_files",), roots, _build)})
 
 
 async def _ml_outputs(req):
@@ -7083,7 +7958,7 @@ async def _ml_outputs(req):
         data = await req.json()
         labels = data.get("labels") or []
         labels = [str(x)[:128] for x in labels][:_EZ_OUTPUT_CAP] if isinstance(labels, list) else []
-        MediaLoaderNode.RETURN_TYPES = _DynamicOutputTypes(_MEDIA_CARD for _ in labels)
+        MediaLoaderNode.RETURN_TYPES = _DynamicOutputTypes("*" for _ in labels)   # 全 ANY：换模式/重排不做类型校验，避免 Return type mismatch
         MediaLoaderNode.RETURN_NAMES = tuple(labels)
         return _web.json_response({"ok": True, "names": labels})
     except Exception as e:
@@ -7091,90 +7966,20 @@ async def _ml_outputs(req):
 
 
 async def _mo_outputs(req):
+    """MediaOut 的端口清单同步：一个 list 项一个输出口，口名/类型都来自 MediaLoader 的项。"""
     if not _ez_local(req):
         return _web.json_response({"error": "forbidden: local clients only"}, status=403)
     try:
         data = await req.json()
-        mode = str(data.get("mode") or "split")
         files = data.get("files") or []
         files = files[:_EZ_OUTPUT_CAP] if isinstance(files, list) else []
-        off = data.get("off") or []
-        if not isinstance(off, list):
-            off = []
-        offset = {str(x) for x in off}
-        if mode == "split":
-            types = [MEDIA_TO_COMFY.get(_file_kind(f), "STRING") for f in files]
-            names = [f.get("name") or f"File {i + 1}" for i, f in enumerate(files)]
-        else:
-            groups = data.get("groups") or []
-            groups = groups[:128] if isinstance(groups, list) else []
-            rows = _config_to_rows(groups)
-            groupings = _mo_groupings(mode, off, rows)
-            if mode == "group":
-                # 分组模式：把空组也去掉后，按分组标签输出
-                types = [g["type"] for g in groupings]
-                names = [g["name"] for g in groupings]
-            else:
-                types = [g["type"] for g in groupings]
-                names = [g["name"] for g in groupings]
-        types = types[:_EZ_OUTPUT_CAP]
-        names = [str(x)[:128] for x in names][:_EZ_OUTPUT_CAP]
-        MediaOutNode.RETURN_TYPES = _DynamicOutputTypes(types)
+        types = [MEDIA_TO_COMFY.get(_file_kind(f), "STRING") for f in files]
+        names = [str(f.get("name") or f"File {i + 1}")[:128] for i, f in enumerate(files)]
+        MediaOutNode.RETURN_TYPES = _DynamicOutputTypes("*" for _ in types)   # 全 ANY：拆分口不做类型校验
         MediaOutNode.RETURN_NAMES = tuple(names)
         return _web.json_response({"ok": True, "types": types, "names": names})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
-
-
-def _mout_parse_off(config):
-    """解析 MediaOut 局部禁用的文件 id 集合（config = {"off":[ids]}）。"""
-    if isinstance(config, str):
-        if not config.strip():
-            return {}
-        try:
-            data = json.loads(config)
-        except json.JSONDecodeError:
-            return {}
-    else:
-        data = config or {}
-    if not isinstance(data, dict):
-        return {}
-    off = data.get("off") or []
-    if not isinstance(off, list):
-        off = []
-    return {str(x): True for x in off}
-
-
-def _mout_mode(config):
-    """MediaOut 输出模式：split / card / row / group。"""
-    if isinstance(config, str):
-        if not config.strip():
-            return "split"
-        try:
-            data = json.loads(config)
-        except json.JSONDecodeError:
-            return "split"
-    else:
-        data = config or {}
-    if isinstance(data, dict):
-        m = str(data.get("mode") or "split")
-        if m in ("card", "row", "group"):
-            return m
-    return "split"
-
-
-def _mo_common_kind(files):
-    """一组文件的共同类型；超过一种就返回 ''（无法合并成单一批量）。"""
-    kinds = {_file_kind(f) for f in (files or [])}
-    return kinds.pop() if len(kinds) == 1 else ""
-
-
-def _mo_one(files, name):
-    """给定一个输出分组的文件列表，算出端口类型：同一类型用该类型，混合类型用 *（运行期会给出明确报错）。"""
-    files = files or []
-    k = _mo_common_kind(files)
-    t = MEDIA_TO_COMFY.get(k, "*") if k else "*"
-    return {"name": name or "Media", "type": t, "files": files}
 
 
 def _mout_fit(config):
@@ -7332,89 +8137,174 @@ def _mo_merge_values(values, label, kind="", fit=None):
     )
 
 
-def _mo_groupings(mode, off, rows):
-    """把 rows（素材卡片组结构）按 mode 归组，返回 [{name,type,files}]。"""
-    offset = {str(x) for x in (off or [])}
-    def keep(f): return f and str(f.get("id")) not in offset
-    out = []
-    if mode == "card":
-        for row in rows:
-            for it in (row.get("items") or []):
-                files = [f for f in (it.get("files") or []) if keep(f)]
-                if not files:
-                    continue
-                out.append(_mo_one(files, files[0].get("name") or "Media"))
-    elif mode == "row":
-        for row in rows:
-            files = []
-            for it in (row.get("items") or []):
-                files.extend([f for f in (it.get("files") or []) if keep(f)])
-            if not files:
-                continue
-            out.append(_mo_one(files, row.get("label") or "Card group"))
-    elif mode == "group":
-        byg, order = {}, []
-        for row in rows:
-            g = row.get("group") or "Group"
-            if g not in byg:
-                byg[g] = []; order.append(g)
-            byg[g].append(row)
-        for g in order:
-            files = []
-            for row in byg[g]:
-                for it in (row.get("items") or []):
-                    files.extend([f for f in (it.get("files") or []) if keep(f)])
-            if not files:
-                continue
-            out.append(_mo_one(files, g))
-    return out
+
+# ===== MediaLoader 输出：按模式分组 + 可选拼接（拼接对象不得大于输出模式）=====
+_ML_RANK = {"card": 0, "row": 1, "group": 2}
 
 
-def _config_to_rows(groups):
-    """把前端 config 的 groups（分组→素材卡片组→单个卡片→批量卡片）转成 rows 结构（含 label）。"""
+def _ml_load_rows(config):
+    """加载 MediaLoader 卡片结构，返回 [{group, cardId, label, items:[{id, files:[{id,name,type,value,path}]}]}]。"""
     rows = []
-    for grp in (groups or []):
-        if not isinstance(grp, dict):
-            continue
-        gname = (grp.get("name") or "").strip() or "Group"
-        for c in (grp.get("cards") or []):
-            if not isinstance(c, dict):
-                continue
-            items = []
-            for it in (c.get("items") or []):
-                if not isinstance(it, dict):
+    for card in parse_media_cards(config):
+        items = []
+        for item in (card.get("items") or []):
+            loaded = []
+            for f in (item.get("files") or []):
+                path = _ml_resolve(f.get("path") or "")
+                if not path:
                     continue
-                files = []
-                for f in (it.get("files") or []):
-                    if not isinstance(f, dict):
-                        continue
-                    nm = f.get("name") or ""
-                    files.append({"id": f.get("id"), "name": nm,
-                                  "type": f.get("type") or _media_kind(nm) or "other"})
-                items.append({"id": it.get("id"), "files": files})
-            cname = (c.get("name") or "").strip() or "Card group"
-            rows.append({"group": gname, "cardId": c.get("id"), "label": gname + "_" + cname, "items": items})
+                ftype = (f.get("type") or _media_kind(f.get("name") or f.get("path")) or "other").lower()
+                loaded.append({"id": f.get("id"), "name": f.get("name") or os.path.basename(path),
+                               "type": ftype, "value": _ml_load_media(path, ftype), "path": f.get("path") or ""})
+            items.append({"id": item.get("id"), "files": loaded})
+        rows.append({"group": card.get("group"), "cardId": card.get("id"), "label": card.get("label"), "items": items})
     return rows
 
 
-def _mout_flatten(card):
-    """把 MediaLoader 卡片对象 / 单值 / 列表 统一展开成文件描述符列表。"""
-    if card is None:
-        return []
-    if isinstance(card, dict) and card.get("_kind") == "ezflex_media_card":
-        return card.get("files") or []
-    if isinstance(card, (list, tuple)):
-        out = []
-        for i, x in enumerate(card):
-            if isinstance(x, dict) and "value" in x:
-                out.append(x)
-            else:
-                out.append({"id": f"f{i}", "name": getattr(x, "name", None) or f"File {i + 1}",
-                            "type": _media_kind(getattr(x, "name", None) or "") or "other", "value": x})
-        return out
-    if isinstance(card, dict) and ("value" in card or "type" in card):
-        return [card]
-    return [{"id": "f0", "name": "File", "type": "other", "value": card}]
+def _ml_merge_types(cfg):
+    mt = cfg.get("mergeTypes") if isinstance(cfg.get("mergeTypes"), dict) else {}
+    txt = mt.get("other", mt.get("text", True))
+    return {"image": mt.get("image", True), "audio": mt.get("audio", True), "other": txt, "text": txt}
+
+
+def _ml_fit_cfg(cfg):
+    f = cfg.get("mergeFit") if isinstance(cfg.get("mergeFit"), dict) else {}
+    return _mout_fit({"fit": f})
+
+
+def _ml_merge_items(files, scope, types, fit):
+    """把一个输出口内的 (文件, row, item) 按 scope 再分组：同类型且该类型开着拼接 → 合成 1 项；否则逐项。
+    同一个拼接组里混用媒体类型 → 直接抛错（前端也给提示）。"""
+    groups, order = {}, []
+    for f, row, item in files:
+        if scope == "card":
+            key = (row.get("cardId"), item.get("id"))
+        elif scope == "row":
+            key = (row.get("cardId"),)
+        else:
+            key = "__all__"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(f)
+    out = []
+    for key in order:
+        fs = groups[key]
+        kinds = {str(f.get("type") or "other").lower() for f in fs}
+        if len(kinds) > 1:
+            raise ValueError("EzFlex-MediaLoader: this merge group mixes media types (" + "、".join(sorted(kinds)) +
+                             "); turn Merge off or make the group a single type.")
+        k = kinds.pop() if kinds else "other"
+        if len(fs) > 1 and types.get(k):
+            out.append(_mo_merge_values([f.get("value") for f in fs], fs[0].get("name") or "Media", k, fit))
+        else:
+            for f in fs:
+                out.append(f.get("value"))
+    return out
+
+
+def _ml_buckets(rows, mode, groups=None):
+    """按粒度分桶：card=每个卡片项一口 / row=每张素材卡片一口 / group=每个分组一口，顺序 = 图上顺序。
+    返回 (buckets, order, mode)；bucket = {"row","item","files":[(f,row,item)]}，空卡片组也占位。"""
+    mode = mode if mode in _ML_RANK else "card"
+    buckets, order = {}, []
+
+    def add(key, row, item):
+        if key not in buckets:
+            buckets[key] = {"row": row, "item": item, "files": []}
+            order.append(key)
+        return buckets[key]
+
+    if mode == "group":
+        for gname in (groups if groups is not None else []):
+            bucket = add(("g", gname), {"group": gname, "label": gname, "cardId": None}, {})
+            for row in rows:
+                if row.get("group") != gname:
+                    continue
+                for item in (row.get("items") or []):
+                    bucket["files"].extend((f, row, item) for f in (item.get("files") or []))
+    elif mode == "row":
+        for row in rows:
+            bucket = add(("c", row.get("cardId")), row, {})
+            for item in (row.get("items") or []):
+                bucket["files"].extend((f, row, item) for f in (item.get("files") or []))
+    else:
+        for row in rows:
+            items = row.get("items") or []
+            if not items:
+                add(("i", row.get("cardId"), None), row, None)   # 空卡片组：占位口，输出空 list
+                continue
+            for item in items:
+                bucket = add(("i", row.get("cardId"), item.get("id")), row, item)
+                bucket["files"].extend((f, row, item) for f in (item.get("files") or []))
+    return buckets, order, mode
+
+
+def _ml_fixed_segment(rows, index, slots, groups=None):
+    """固定模式：**只出一个口**，按 index 走「分组 → 卡片组」的扁平顺序取第 index 个卡片组，
+    输出它的槽位序列（越界 = 全 None）。循环里 MediaOut 读的永远是同一个口、同一组槽位。"""
+    buckets, order, _mode = _ml_buckets(rows, "row", groups)
+    total = sum(max(0, int((s or {}).get("n") or 0)) for s in (slots or []) if isinstance(s, dict))
+    i = int(index or 0)
+    if i < 0 or i >= len(order):
+        return [{"name": "Segment", "items": [None] * total}]
+    return [{"name": "Segment", "items": _ml_fixed_items(buckets[order[i]]["files"], slots)}]
+
+
+def _ml_ports(rows, mode, merge, scope, types, fit, groups=None, fixed=None):
+    """按 mode 分组输出口：card=每个卡片一项一口 / row=每张素材卡片一口 / group=每个分组一口。
+    **空卡片组/空分组也留口**（输出空 list）。拼接对象 scope 不得大于 mode（大了就夹回 mode）。
+    fixed = 槽位声明时走固定模式：每个出口的值重排成 Σn 个槽位（缺槽 None），并忽略拼接。"""
+    buckets, order, mode = _ml_buckets(rows, mode, groups)
+    scope = scope if scope in _ML_RANK else "card"
+    if _ML_RANK[scope] > _ML_RANK[mode]:
+        scope = mode
+    out = []
+    for key in order:
+        b = buckets[key]
+        if fixed:
+            items = _ml_fixed_items(b["files"], fixed)
+        elif merge:
+            items = _ml_merge_items(b["files"], scope, types, fit)
+        else:
+            items = [f.get("value") for f, _r, _i in b["files"]]
+        if mode == "group":
+            name = b["row"].get("group") or "Group"
+        elif mode == "card" and b["item"] is None:
+            name = "Empty card"
+        elif mode == "card" and (b["item"].get("files") or []):
+            name = b["item"]["files"][0].get("name") or (b["row"].get("label") or "Card")
+        else:
+            name = b["row"].get("label") or "Card"
+        out.append({"name": name, "items": items})
+    return out
+
+
+_FIXED_KINDS = ("image", "video", "audio", "text", "model3d", "other")   # 顺序 = 面板槽位顺序（图片/视频/音频/文本/模型/其他）
+# 面板槽位类型 → 文件类型池：3D 文件带下划线，文本与 other 共用一个池（loader 不区分 .txt 与未知类型）
+_FIXED_POOL = {"image": "image", "video": "video", "audio": "audio", "text": "other", "model3d": "model_3d", "other": "other"}
+
+
+def _ml_fixed_items(files, slots):
+    """固定模式：把一口的文件按槽位声明重排成 Σn 个值（缺槽给 None，顺序 = 预设槽位顺序）。
+
+    slots = [{"type": "image", "n": 3}, ...]；同类槽位按出现顺序续取同一个桶。
+    固定模式与拼接互斥（槽位要的就是 N 份独立值）。"""
+    pool = {}
+    for f, _row, _item in (files or []):
+        pool.setdefault(str(f.get("type") or "other").lower(), []).append(f.get("value"))
+    out, used = [], {}
+    for s in (slots or []):
+        if not isinstance(s, dict):
+            continue
+        k = _FIXED_POOL.get(str(s.get("type") or "other").lower(), "other")
+        vals = pool.get(k) or []
+        i = used.get(k, 0)
+        for _ in range(max(0, int(s.get("n") or 0))):
+            out.append(vals[i] if i < len(vals) else None)
+            i += 1
+        used[k] = i
+    return out
 
 
 def _ml_media_root():
@@ -7600,8 +8490,8 @@ async def _ml_upload(req):
             name = _media_safe(val.filename)
             if not name:
                 continue
-            if _media_kind(name) == "other":
-                continue      # 只接收媒体文件，挡掉任意后缀（.bat/.desktop/.sh/.html 等）
+            if _media_kind(name) == "other" and os.path.splitext(name)[1].lower() not in _MEDIA_TXT_EXTS:
+                continue      # 只接收媒体/文本文件，挡掉任意后缀（.bat/.desktop/.sh/.exe 等）
             name = _ml_unique_name(root, name)
             dest = os.path.join(root, name)
             src = val.file if hasattr(val.file, "read") else None
@@ -7748,9 +8638,11 @@ async def _ml_save_as(req):
         if not dest or not os.path.isdir(dest):
             return _web.json_response({"error": "bad dest"}, status=400)
         import shutil
-        target = os.path.join(dest, os.path.basename(abs_))
+        # 重名不覆盖：与 _ml_upload 同款策略（<base>_1.<ext> …）。原先直接 copy2 会把同名文件静默替换掉。
+        name = _ml_unique_name(dest, os.path.basename(abs_))
+        target = os.path.join(dest, name)
         shutil.copy2(abs_, target)
-        return _web.json_response({"ok": True, "dest": target})
+        return _web.json_response({"ok": True, "dest": target, "renamed": name != os.path.basename(abs_)})
     except Exception as e:
         return _web.json_response({"error": str(e)}, status=500)
 
@@ -7861,6 +8753,14 @@ class MediaLoaderNode:
                     "tooltip": "Config JSON generated by the Media Loader panel (groups / cards / files).",
                 }),
             },
+            "optional": {
+                "index": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "forceInput": True,
+                    "tooltip": "Fixed mode only: output the index-th card group's slots (the panel walks groups then card groups).",
+                }),
+            },
             "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
@@ -7870,57 +8770,43 @@ class MediaLoaderNode:
     CATEGORY = "EzFlex"
     DESCRIPTION = "Media Loader"
 
-    def load(self, config="{}", **kwargs):
-        cards = parse_media_cards(config)
-        rows = []
-        for card in cards:
-            items = []
-            for item in (card.get("items") or []):
-                loaded_item = []
-                for f in (item.get("files") or []):
-                    path = _ml_resolve(f.get("path") or "")
-                    if not path:
-                        continue
-                    ftype = (f.get("type") or _media_kind(f.get("name") or f.get("path")) or "other").lower()
-                    val = _ml_load_media(path, ftype)
-                    loaded_item.append({
-                        "id": f.get("id"), "name": f.get("name") or os.path.basename(path),
-                        "type": ftype, "value": val, "path": f.get("path") or "",
-                    })
-                items.append({"id": item.get("id"), "files": loaded_item})
-            rows.append({"group": card.get("group"), "cardId": card.get("id"),
-                         "label": card.get("label"), "items": items})
-        outputs = []
-        labels = []
-        for card in cards:
-            row = next((r for r in rows if str(r["cardId"]) == str(card.get("id"))), None)
-            flat = []
-            if row:
-                for it in row["items"]:
-                    flat.extend(it["files"])
-            outputs.append({"_kind": "ezflex_media_card", "cardId": card.get("id"),
-                            "label": card.get("label"), "files": flat, "_rows": rows})
-            labels.append(card.get("label") or "Card")
-        self.__class__.RETURN_TYPES = _DynamicOutputTypes(_MEDIA_CARD for _ in outputs)
+    def load(self, config="{}", index=None, **kwargs):
+        cfg = {}
+        try:
+            cfg = json.loads(config) if isinstance(config, str) else (config or {})
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        rows = _ml_load_rows(config)
+        groups = [((g.get("name") or "").strip() or "Group") for g in (cfg.get("groups") or []) if isinstance(g, dict)]
+        fixed = cfg.get("fixed") if isinstance(cfg.get("fixed"), dict) else {}
+        slots = fixed.get("slots") if fixed.get("on") else None
+        if slots:
+            ports = _ml_fixed_segment(rows, index, slots, groups)
+        else:
+            ports = _ml_ports(rows, str(cfg.get("mode") or "card"), bool(cfg.get("merge")) and not slots,
+                              str(cfg.get("mergeScope") or "card"), _ml_merge_types(cfg), _ml_fit_cfg(cfg), groups, slots)
+        outputs = [p["items"] for p in ports]
+        labels = [p["name"] or "Card" for p in ports]
+        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in outputs)   # 全 ANY：改模式/重排不做类型校验
         self.__class__.RETURN_NAMES = tuple(labels)
+        self.OUTPUT_IS_LIST = tuple([True] * len(outputs))                      # 挂在实例上：merge_result_data 读的就是实例，UI 的 /object_info 看不到 → 端口保持圆点
         return tuple(outputs)
 
 
 class MediaOutNode:
-    """EzFlex-MediaOut：接收 MediaLoader 的某张「素材卡片」（深红专属类型输入），把卡片内的文件输出到端口。
-    模式：拆分（一个文件一个端口）/ 卡片（一个「单个卡片」一个端口）/ 卡片组 / 分组。
-    多文件端口的输出是**下游能直接读的合法值**：多张图 → 批量张量 [B,H,W,C]（尺寸不一致时与内置 Batch Images 同款，
-    以第一张为准等比缩放+居中裁剪，通道按最大值补齐），多段音频 → 按时间拼成一条音轨，多段文本 → 换行拼接；
-    类型混用或音频采样率不一致时给出明确报错（提示改用拆分模式）。
-    局部禁用某个文件时：拆分模式保留端口输出 None，卡片/卡片组/分组模式从分组里剔除。"""
+    """EzFlex-MediaOut：MediaLoader 的拆分端。收 Loader 整份 list（INPUT_IS_LIST=True），一个项一个输出口，
+    值按序原样给；端口名/类型由前端 /media_out/outputs 按素材项同步（运行期全是 *）。
+    config 里记的本地禁用项输出 None，端口位置不变。批量合并（多张图成批量张量、音频拼接等）在 MediaLoader 那边做。"""
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "card": (_MEDIA_CARD, {
+                "card": ("*", {
                     "forceInput": True,
-                    "tooltip": "A media-card output from EzFlex-MediaLoader (dark red input).",
+                    "tooltip": "A list output from EzFlex-MediaLoader (one item per file / merged group).",
                 }),
                 "config": ("STRING", {
                     "multiline": True,
@@ -7933,52 +8819,24 @@ class MediaOutNode:
 
     RETURN_TYPES = _DynamicOutputTypes()
     RETURN_NAMES = ()
+    INPUT_IS_LIST = True   # 收 MediaLoader 整份 list，自己拆；不再按项执行
     FUNCTION = "run"
     CATEGORY = "EzFlex"
     DESCRIPTION = "Media Out"
 
     def run(self, card=None, config="{}", **kwargs):
-        off = _mout_parse_off(config)
-        mode = _mout_mode(config)
-        rows = None
-        if isinstance(card, dict):
-            rows = card.get("_rows") or None
-        if mode == "split":
-            files = _mout_flatten(card)
-            types, names, outputs = [], [], []
-            for i, f in enumerate(files):
-                fid = f.get("id") if isinstance(f, dict) else f"f{i}"
-                name = f.get("name") if isinstance(f, dict) else f"File {i + 1}"
-                ftype = _file_kind(f) if isinstance(f, dict) else "other"
-                types.append(MEDIA_TO_COMFY.get(str(ftype).lower(), "STRING"))
-                names.append(name)
-                outputs.append(None if str(fid) in off else (f.get("value") if isinstance(f, dict) else f))
-            self.__class__.RETURN_TYPES = _DynamicOutputTypes(types)
-            self.__class__.RETURN_NAMES = tuple(names)
-            return tuple(outputs)
-        # card / row / group：基于整张 MediaLoader 的结构
-        if not rows:
-            flat = _mout_flatten(card)
-            label = (card.get("label") or "Card group") if isinstance(card, dict) else "Card group"
-            rows = [{"group": (card.get("label") or "Group") if isinstance(card, dict) else "Group",
-                     "cardId": (card.get("cardId") if isinstance(card, dict) else None),
-                     "label": label,
-                     "items": [{"id": f.get("id") if isinstance(f, dict) else f"f{i}", "files": [f]} for i, f in enumerate(flat)]}]
-        groupings = _mo_groupings(mode, off, rows)
-        fit = _mout_fit(config)
-        types = [g["type"] for g in groupings]
-        names = [g["name"] for g in groupings]
-        outputs = []
-        for g in groupings:
-            keep_vals = [f.get("value") if isinstance(f, dict) else f for f in g["files"]
-                         if str(f.get("id") if isinstance(f, dict) else "") not in off]
-            start = int(fit.get("start") or 0)
-            cap = int(fit.get("cap") or 0)
-            if start or cap:
-                keep_vals = keep_vals[start:(start + cap) if cap else None]   # 「批量设置」里的 从第几张开始 / 最多取几张
-            outputs.append(_mo_merge_values(keep_vals, g["name"], _mo_common_kind(g["files"]), fit))
-        self.__class__.RETURN_TYPES = _DynamicOutputTypes(types)
-        self.__class__.RETURN_NAMES = tuple(names)
+        """只拆分：list 项就是真实媒体值（MediaLoader 输出的就是值本身），一项一个输出口。
+        端口名/类型由前端 /media_out/outputs 按 MediaLoader 的 _ezItems 设置，这里只按序返回；offIdx = 本地禁用项下标。"""
+        cfg = config[0] if isinstance(config, (list, tuple)) and config else config
+        off = set()
+        try:
+            data = json.loads(cfg) if isinstance(cfg, str) else (cfg or {})
+            off = {int(x) for x in (data.get("offIdx") or [])}
+        except Exception:
+            pass
+        vals = card if isinstance(card, (list, tuple)) else ([] if card is None else [card])
+        outputs = [None if i in off else v for i, v in enumerate(vals)]
+        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in outputs)   # 全 ANY：拆分口换内容不做类型校验
         return tuple(outputs)
 
 
@@ -8013,6 +8871,11 @@ class PromptHelperNode:
                 "forceInput": True,
                 "tooltip": f"Text of prompt card {i} (when connected it overrides that card panel content).",
             })
+        # 循环输入：固定排在所有 media_in / card_in 之后（最下面）。接上后「合并提示词」只出第 index 张卡。
+        inputs["optional"]["index"] = ("INT", {
+            "default": 0, "min": 0, "forceInput": True,
+            "tooltip": "Loop index: when wired, the Merged prompt outputs only card #index's text (one prompt per loop round).",
+        })
         return inputs
 
     RETURN_TYPES = ("STRING",) * (_PH_MAX_CARDS + 1)
@@ -8157,6 +9020,20 @@ class PromptHelperNode:
         # 按卡片自己的规范编译（只编引用媒体）；编译结果就是各卡片的输出端口
         compiled = [_ph_compile_card(ports[i], cards[i]) for i in range(count)]
 
+        # 循环模式（设置·其他设置里开）：index 接上时「合并提示词」只出第 index 张卡 —— 一段一张提示词时不用改卡片
+        try:
+            _cfg = json.loads(config) if isinstance(config, str) else (config or {})
+        except Exception:
+            _cfg = {}
+        loop_mode = bool(_cfg.get("loopMode")) if isinstance(_cfg, dict) else False
+        idx_raw = kwargs.get("index")
+        if loop_mode and idx_raw is not None and str(idx_raw).strip() != "":
+            try:
+                _i = max(0, int(idx_raw))
+            except (TypeError, ValueError):
+                _i = -1
+            merged = compiled[_i] if 0 <= _i < len(compiled) else ""
+
         if bool(opt.get("clearCache")):
             ph_clear_model_cache()
 
@@ -8179,6 +9056,658 @@ class PromptHelperNode:
         }
 
 
+_EZ_LIST_MAX = 16
+
+
+class MergeListNode:
+    """EzFlex-MergeList：把若干输入按顺序拼成一个列表（列表展开并入，非列表追加为一项）。
+    输入口动态（前端按需增删，后端声明到 _EZ_LIST_MAX），输出固定一个 list，可直接喂 StartLoop 的 List 模式。"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        opt = {}
+        for i in range(1, _EZ_LIST_MAX + 1):
+            opt["input_%d" % i] = ("*",)
+        return {"required": {}, "optional": opt}
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("list",)
+    INPUT_IS_LIST = True
+    FUNCTION = "merge"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Merge List"
+
+    def merge(self, **kwargs):
+        self.OUTPUT_IS_LIST = (True,)   # 实例级：UI 里出口保持圆点，执行仍是"一份 list"
+        out = []
+        for i in range(1, _EZ_LIST_MAX + 1):
+            v = kwargs.get("input_%d" % i)
+            if v is None:
+                continue
+            if isinstance(v, (list, tuple)):
+                out.extend(v)
+            else:
+                out.append(v)
+        return (out,)
+
+
+class SplitListNode:
+    """EzFlex-SplitList：把一份 list 按顺序拆成多个输出口（一个 list 项一个口），缺的补 None。
+    与 EzFlex-MergeList 互为反操作，适用于任意 ComfyUI 列表值。端口数由面板决定。"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {
+            "list": ("*", {"forceInput": True, "tooltip": "Any ComfyUI list value (for example the output of EzFlex-MergeList)."}),
+        }}
+
+    RETURN_TYPES = _DynamicOutputTypes("*" for _ in range(_EZ_LIST_MAX))
+    RETURN_NAMES = tuple("item%d" % i for i in range(_EZ_LIST_MAX))
+    INPUT_IS_LIST = True
+    FUNCTION = "run"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Split List"
+
+    def run(self, **kwargs):
+        # 输入名就叫 list，不能当形参（会遮蔽内置 list），从 kwargs 取
+        v = kwargs.get("list")
+        vals = v if isinstance(v, (list, tuple)) else ([] if v is None else [v])
+        return tuple(vals[i] if i < len(vals) else None for i in range(_EZ_LIST_MAX))
+
+
+_EZ_REROUTE_MAX = 32
+
+
+class EzFlexRerouteNode:
+    """EzFlex-Reroute：转接点。与内置 Reroute 一样做「原样转接」，但一口一卡、可自定义命名。
+
+    与 MergeList / SplitList 的区别（**都保留，语义别混**）：
+      - MergeList 是 N→1（把多个值合成一个 list）；
+      - SplitList 是 1→N（把一份 list 拆成多个口）；
+      - Reroute 是 **逐口 1:1 透传**（第 i 个入口 → 第 i 个出口），不做任何合并/拆分。
+    输入输出全是 ANY（`*`），可以转接任意类型（MODEL / LATENT / 图片 / 字符串……）。
+
+    口数与每个口的名字由前端面板维护、存进本节点 config；面板增删口后 POST /ezreroute/outputs
+    同步类 RETURN_TYPES / RETURN_NAMES（校验与端口名用），execute 再按入口实际收到的值逐口返回。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        # ⚠️ config 必须放在 **required** 里（不能放 optional）：
+        #    - required 的 STRING 才会被前端稳定建成「可编辑 + 可序列化」的 widget，
+        #      值进 widgets_values，刷新/重启后能恢复；
+        #    - 放 optional 会被当成「可选输入口」处理，不生成可序列化 widget →
+        #      writeConfig 静默 return、readConfig 恒读回 {}，自定义名一刷新就丢。
+        #    （同 MediaLoader / MediaOut / PromptHelper 的写法：required + multiline STRING + default "{}"）
+        req = {"config": ("STRING", {
+            "multiline": True,
+            "default": "{}",
+            "tooltip": "Reroute panel state: per-card custom names (one per connected input).",
+        })}
+        opt = {}
+        for i in range(1, _EZ_REROUTE_MAX + 1):
+            opt["input_%d" % i] = ("*",)
+        return {"required": req, "optional": opt}
+
+    RETURN_TYPES = _DynamicOutputTypes("*" for _ in range(_EZ_REROUTE_MAX))
+    # 1 基命名（output_1..output_32），与入口 input_1..input_32 对齐 —— 面板默认名也用这套。
+    RETURN_NAMES = tuple("output_%d" % (i + 1) for i in range(_EZ_REROUTE_MAX))
+    FUNCTION = "route"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Reroute"
+
+    def route(self, **kwargs):
+        # 逐口透传：第 i 个入口原样送到第 i 个出口。没接线的入口给 None（下游会当空值处理）。
+        # ⚠️ 必须按「本实例当前口数」返回，不能固定返回 _EZ_REROUTE_MAX 个 ——
+        # 类 RETURN_TYPES 是全局共享的，超过实际口数会产出一堆悬空输出。
+        n = len(getattr(self, "outputs", None) or [])
+        if not n:
+            n = int(getattr(self, "_ez_ports", 0) or 0)
+        if not n:
+            # 兜底：按前端最后一次同步的口数取，再不行就按实际收到的最大 input_N
+            for i in range(_EZ_REROUTE_MAX, 0, -1):
+                if kwargs.get("input_%d" % i) is not None:
+                    n = i
+                    break
+        n = max(0, min(_EZ_REROUTE_MAX, n))
+        return tuple(kwargs.get("input_%d" % (i + 1)) for i in range(n))
+
+
+async def _ez_reroute_outputs(req):
+    """EzFlex-Reroute 端口同步：面板按当前输出口数上报 labels（每口名字），
+    这里把类 RETURN_TYPES / RETURN_NAMES 同步成同样多的 ANY 口（校验与端口名用）。
+    输入口数由 INPUT_TYPES 固定声明到 _EZ_REROUTE_MAX，前端只显示接了的那几个 + 1 个空槽。
+
+    ⚠️ 走 _ez_sync_dynamic_types 的「只增不减」不变量（与 ParamPresetOutput 等一致），
+    **不要**精确覆写长度 —— 类 RETURN_TYPES 全局一份，同屏多个 Reroute 口数不同时，
+    精确收缩会把另一个实例的高位槽挤掉，校验时取越界报 `tuple index out of range`。"""
+    if not _ez_local(req):
+        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
+    try:
+        data = await req.json()
+        labels = data.get("labels") or []
+        labels = [str(x)[:128] for x in labels][:_EZ_OUTPUT_CAP] if isinstance(labels, list) else []
+        if not labels:
+            labels = ["output_1"]
+        _ez_sync_dynamic_types(EzFlexRerouteNode, labels)
+        return _web.json_response({"ok": True, "names": list(labels)})
+    except Exception as e:
+        return _web.json_response({"error": str(e)}, status=500)
+
+
+try:
+    PromptServer.instance.routes.post("/ezreroute/outputs")(_ez_reroute_outputs)
+except Exception:
+    pass
+
+
+_EZ_LOOP_MAX = 20
+# 熔断上限：轮次标记丢失 / 旧工作流 rounds 离谱大时，也绝不把画布卡死（用户只能强杀进程）。
+_EZ_LOOP_SAFE_MAX = 200
+
+
+try:
+    from comfy_execution.graph_utils import GraphBuilder, is_link
+    from comfy_execution.graph import ExecutionBlocker
+    import nodes as _comfy_nodes
+except Exception:   # 旧核心没有展开器/执行图就只登记节点，运行期自然报缺依赖
+    GraphBuilder = None
+    is_link = None
+    ExecutionBlocker = None
+    _comfy_nodes = None
+
+
+class LoopStartNode:
+    """EzFlex-LoopStart：循环起点，只干一件事 —— 把上一轮 LoopEnd 收到的产物回喂给本轮。
+
+    面板只有一个 index 框：**本次运行从第几轮开始**（默认 0 = 从头）。运行期它是只读的，每展开
+    一轮 +1；它同时作为 index 输出口的值给下游（PromptHelper / TimeLine / MediaLoader 的 index
+    输入口按它换内容），所以「控制起点」和「控制下游」是同一件事。
+
+    端口：固定输出 index（INT），紧跟 value1 / value2 / …（动态。「连一个加一个」）。
+      · 第 1 轮（idx <= start）：valueK 输出 = 对应的 initial valueK 输入；没接 initial valueK 才给 None。
+      · 第 2 轮起：valueK 输出 = 上一轮 LoopEnd 第 K 个输入口收到的值（有回喂就覆盖初值）。
+      初值口 initial value1 / initial value2 / … 也是「连一个加一个」的通配（`*`）输入口，
+      类型跟着你接进去的线走 —— 用来喂「第一次循环还没有上一轮产物」时下游要的那个值。不接也行，
+      但下游若是 torch.cat / VAE 之类吃实值的节点，第一轮收到 None 就会报错，这时就必须给初值。
+    轮数不在这里，在 LoopEnd 面板的「次数」框。
+
+    ★ 回喂是**隐式**的，画布上不要连。真连上 End.valueK → Start.valueK 会成环：内核
+      comfy_execution/graph.py:303 是唯一的 DependencyCycleError 抛点，校验期不做环检测，
+      所以一提交就报 "Dependency cycle detected"。做法是展开时直接写进克隆节点的字面量输入。
+    这一条对后端 static 方法同样成立：本节点没有 FROM_END 那种「声明式回连口」，因为声明了
+    就会在前端生成连线、连线就会成环。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        opt = {"index": ("INT", {"default": 0, "min": 0, "forceInput": True,
+                                 "tooltip": "Start round (0 = from the first). Also becomes the index output value of the first round. Leave unwired to use the panel value."})}
+        # 初值口：第 1 轮（还没有上一轮产物）时每个 valueK 输出什么。通配类型，跟着线走。
+        for k in range(1, _EZ_LOOP_MAX + 1):
+            opt["initial value%d" % k] = ("*", {"tooltip": "Initial value %d. Used as value%d on the first round, before any feed-back arrives. Wire the same kind of data you expect LoopEnd value%d to carry back. Optional, but required if the downstream node cannot accept a missing value." % (k, k, k)})
+        # ★★ _ezfeedK：展开时由 LoopEnd 写进克隆节点的字面量输入（上一轮 End 收到的值）。
+        #   必须在这里声明成 optional，否则 get_input_data 会把未声明的键整个丢掉
+        #   （execution.py:183 `elif input_category is not None ...` 那一支），loop_open 的 **kwargs
+        #   里永远拿不到 _ezfeedK → v 恒 None → 每轮都回落到初值 → 表现就是「不循环 / 每轮同一个值」。
+        #   ★ 这正是 __ezround 在 LoopEnd 侧的同一个坑，两边都不能漏。
+        #   前端 stripCoreSockets 会把这些口摘掉，用户看不到它。
+        for k in range(1, _EZ_LOOP_MAX + 1):
+            opt["%s%d" % (LoopStartNode._FEED_PREFIX, k)] = ("*", {"forceInput": True,
+                             "tooltip": "Internal feed-back slot written by the loop expander. Not a canvas port."})
+        return {"required": {"config": ("STRING", {"multiline": True, "default": "{}",
+                                                   "tooltip": "Loop Start panel state (start round). Kept as a serialisable widget so the round counter survives save / load."})},
+                "optional": opt}
+
+    RETURN_TYPES = ("INT",) + ("*",) * _EZ_LOOP_MAX
+    RETURN_NAMES = ("index",) + tuple("value%d" % (i + 1) for i in range(_EZ_LOOP_MAX))
+    FUNCTION = "loop_open"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Loop Start"
+
+    # 展开时由 LoopEnd 直接写进克隆节点的字面量输入（不是画布连线，见类 docstring）
+    _FEED_PREFIX = "_ezfeed"
+
+    @staticmethod
+    def _is_feed(name):
+        return isinstance(name, str) and name.startswith(LoopStartNode._FEED_PREFIX)
+
+    @staticmethod
+    def _feed_slot(name):
+        try:
+            return max(1, int(str(name)[len(LoopStartNode._FEED_PREFIX):]))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _feed_name(k):
+        return "%s%d" % (LoopStartNode._FEED_PREFIX, int(k))
+
+    @staticmethod
+    def _init_name(k):
+        """初值输入口 / 初值 kwargs 的键名：'initial value1'（带空格，前端黑框标签也照它显示）。"""
+        return "initial value%d" % int(k)
+
+    @staticmethod
+    def _start_round(cfg):
+        try:
+            v = (cfg or {}).get("start")
+            if v is None or v == "":
+                v = (cfg or {}).get("index")
+        except Exception:
+            v = None
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 0
+
+    def loop_open(self, config="{}", index=0, **kwargs):
+        try:
+            cfg = json.loads(config) if isinstance(config, str) else (config or {})
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        idx = max(0, int(index or 0))
+        out = [idx]
+        for k in range(1, _EZ_LOOP_MAX + 1):
+            v = kwargs.get(self._feed_name(k))
+            if idx <= self._start_round(cfg) or v is None:
+                # 还没有回喂（第 1 轮 / 起始轮之前）：用初值口兜底。
+                # ★ 别直接给 None：下游若是 torch.cat / VAE 这类吃实值的节点，收到 None 会直接报错。
+                out.append(kwargs.get(self._init_name(k)))
+            else:
+                out.append(v)
+        return tuple(out)
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")   # 循环控制节点不进缓存：每次提交都重新展开，避免「改了 body 却什么都不跑」
+
+
+class LoopEndNode:
+    """EzFlex-LoopEnd：循环触发器 + 终点。面板只有一个「次数」框（总轮数）：
+    0 = 不循环（只跑第一次，等于普通运行）；1 = 再点一次运行（总共 2 次）；以此类推。
+
+    输入口是动态的 value1 / value2 / …，和 LoopStart 的输出口一一对应：
+      · 每个口收什么 → 下一轮 LoopStart 同编号的 valueK 就输出什么（段间参考 / 尾帧钉入这类用法）。
+      · 正向管线是「Start.valueK → 本轮某个节点的输入端 → 本轮产物 → End.valueK」，
+        所以 valueK 常常一开始没接（值是 None），第一轮起就能接、也允许先空着。
+    跑完总轮数就把这些值原样从 out1..outN 吐出去，供最后一段解码 / 收尾使用。
+
+    OUTPUT_NODE 必须为 True：否则「没往本节点的出口接东西」（例如只在 body 里放预览）时它根本不会被调度到，
+    循环就只跑一轮 —— 内置循环把 LoopResult 标成 is_output_node 也是这个原因。
+    """
+
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(s):
+        opt = {}
+        for k in range(1, _EZ_LOOP_MAX + 1):
+            opt["value%d" % k] = ("*", {"tooltip": "Loop data %d. Whatever this port receives becomes the next round's LoopStart value%d (implicit feed, do not wire End back to Start)." % (k, k)})
+        # 「次数」只是个可序列化的落点，面板画的是自绘数字框。★ 必须放 required：
+        #   放 optional 会被当成一个可选输入口 + 不可序列化，值一存就丢。
+        req = {"rounds": ("INT", {"default": 1, "min": 0,
+                                  "tooltip": "Total rounds (including the first run). 0 = no loop, 1 = run once more (2 runs total), and so on."})}
+        # ★ __ezround：轮次标记。展开时写进克隆节点的字面量输入（不是画布连线，面板也不画口）。
+        #   必须声明成 optional，否则 get_input_data 会把未知键整个丢掉、传不进 kwargs；
+        #   前端 stripCoreSockets 会把这个口摘掉，用户看不到它。
+        opt["__ezround"] = ("INT", {"default": 0, "min": 0,
+                                    "tooltip": "Internal round marker written by the loop expander. Not a canvas port."})
+        return {"required": req,
+                "optional": opt,
+                "hidden": {"dynprompt": "DYNPROMPT", "unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO",
+                           "execution_list": "EXECUTION_LIST"}}
+
+    RETURN_TYPES = ("*",) * _EZ_LOOP_MAX
+    RETURN_NAMES = tuple("out%d" % k for k in range(1, _EZ_LOOP_MAX + 1))
+    FUNCTION = "loop_close"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Loop End"
+
+    _FWD = "__ezfwd"   # 展开时写进克隆 End 的「配对 Start 节点 id」标记（不是画布连线）
+    _ROUND = "__ezround"   # 展开时写进克隆 End 的「下一轮轮号」标记（不是画布连线）
+
+    @staticmethod
+    def _total_from(rounds, cfg):
+        """总轮数：面板次数优先，回落到 cfg（旧工作流的 rounds / count / times 键都认）。"""
+        for v in (rounds, (cfg or {}).get("rounds"), (cfg or {}).get("count"), (cfg or {}).get("times")):
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                continue
+            if n > 0:
+                return n
+        return 0
+
+    @classmethod
+    def _find_start(cls, dynprompt, unique_id, node_id=None):
+        """找配对的 EzFlex-LoopStart。展开时走 _FWD 标记（一个 prompt 里可以有多个循环）；
+        没标记（第一次运行、老工作流）就按「首轮展开时记录的门牌号」找，最后回落到「唯一一个 Start」。
+
+        为什么不能沿用旧的「flow 端口的 rawLink」：新设计里 Start 与 End 之间没有画布连线
+        （连线会成环，见 LoopStartNode docstring），rawLink 那条路不存在了。
+        """
+        if dynprompt is None:
+            return None
+        ids = []
+        if node_id is not None:
+            ids.append(node_id)
+        if unique_id is not None and unique_id != node_id:
+            ids.append(unique_id)
+        for nid in ids:
+            try:
+                info = dynprompt.get_node(nid)
+            except Exception:
+                info = None
+            if not info:
+                continue
+            src = (info.get("inputs") or {}).get(cls._FWD)
+            if src is None or isinstance(src, (list, tuple, dict)):
+                continue
+            try:
+                cand = dynprompt.get_node(str(src))
+            except Exception:
+                cand = None
+            if cand and cand.get("class_type") == "EzFlex-LoopStart":
+                return str(src)
+        try:
+            prompt = dynprompt.get_original_prompt() or {}
+        except Exception:
+            prompt = {}
+        found = [str(k) for k, v in prompt.items()
+                 if isinstance(v, dict) and v.get("class_type") == "EzFlex-LoopStart"]
+        return found[0] if len(found) == 1 else None
+
+    @staticmethod
+    def _display(dynprompt, node_id):
+        """把任意节点 id（原始 id / 带前缀的克隆 id）归一成「显示 id」（画布上那个门牌号）。
+
+        展开出来的克隆节点是 ephemeral：id 带 `.N.M.` 前缀，但 display_id 指向原始 id。
+        归一之后才能用同一套键比较「这个节点属于哪个循环体」—— 否则第 2 轮开始
+        克隆节点（"P.1"）和原始 id（"1"）对不上，循环体会整段丢失。
+        """
+        try:
+            return str(dynprompt.get_display_node_id(str(node_id)))
+        except Exception:
+            return str(node_id)
+
+    @classmethod
+    def _body_of(cls, dynprompt, start_id, end_id):
+        """从显示图算出「Start 与 End 之间」的循环体门牌号集合 + 每个节点的显示 id 表。
+
+        和内核 comfy_execution/validation.py 的 `_walk_graph` 同一套语义：
+        从 Start 顺流而下（下游 = 谁的输入引用了本节点），走到 End 就停、不穿过 End。
+        返回 (body_set, display_of)，两者都用「显示 id」。
+        """
+        try:
+            prompt = dynprompt.get_original_prompt() or {}
+        except Exception:
+            prompt = {}
+        display_of = {}
+        children = {}
+        for nid, info in prompt.items():
+            if not isinstance(info, dict):
+                continue
+            did = cls._display(dynprompt, nid)
+            display_of[str(nid)] = did
+            children.setdefault(did, set())
+        # 只要显示图里存在的节点；连线的目标同样归一到显示 id
+        for nid, info in prompt.items():
+            did = cls._display(dynprompt, nid)
+            for v in (info.get("inputs") or {}).values():
+                if is_link(v):
+                    src = cls._display(dynprompt, v[0])
+                    children.setdefault(src, set()).add(did)
+        # BFS：Start 的下游，遇 End 停下（End 本身不算 body）
+        body = set()
+        seen = {str(start_id)}
+        stack = list(children.get(str(start_id), ()))
+        while stack:
+            nid = stack.pop()
+            if nid == str(end_id) or nid in seen:
+                continue
+            seen.add(nid)
+            body.add(nid)
+            stack.extend(children.get(nid, ()))
+        return body, display_of
+
+    def loop_close(self, rounds=0, dynprompt=None, unique_id=None, execution_list=None, **kwargs):
+        try:
+            raw = kwargs.get("config")
+            cfg = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        # ★ 当前轮次从「展开时写进克隆节点的 __ezround」读。
+        #   绝对不要去读 kwargs["index"] —— LoopEnd 没有 index 输入口（那是 LoopStart 的），
+        #   早先的版本就是靠它取轮次，结果永远读到 None → cur 恒为 0 → cur+1>=total 永不成立
+        #   → 无限展开，表现就是「LoopEnd 一直跑停不下来」。这是本条最关键的修复点。
+        cur = 0
+        for src in (kwargs.get(self._ROUND), cfg.get("round"), cfg.get("rounds_done")):
+            try:
+                if src is not None and src != "":
+                    cur = max(0, int(src))
+                    break
+            except (TypeError, ValueError):
+                continue
+        total = self._total_from(rounds, cfg)
+        if total <= 0:
+            print("[EzFlex-LoopEnd] rounds is 0: running a single pass without looping. "
+                  "Set the panel round counter to 1 or more to loop.")
+            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+        if cur + 1 >= total:
+            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+        if cur >= _EZ_LOOP_SAFE_MAX:
+            # 兜底熔断：任何意外（旧工作流里 rounds 特别大 / 轮次标记丢失）都不该让画布卡死。
+            print("[EzFlex-LoopEnd] safety cap %d reached: stopping the loop early. "
+                  "Check the panel round counter and whether LoopStart is still on the canvas."
+                  % _EZ_LOOP_SAFE_MAX)
+            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+        if dynprompt is None or not unique_id:
+            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+        fwd = None
+        try:
+            info = dynprompt.get_node(unique_id)
+            v = (info.get("inputs") or {}).get(self._FWD) if info else None
+            if v is not None and not isinstance(v, (list, tuple, dict)):
+                fwd = str(v)
+        except Exception:
+            fwd = None
+        open_node = self._find_start(dynprompt, unique_id, fwd)
+        if not open_node:
+            # 找不到配对 Start 时不要静默只跑一轮（最难查的症状）：报清楚，但别把整个执行炸掉
+            print("[EzFlex-LoopEnd] cannot find the paired EzFlex-LoopStart; running a single pass. "
+                  "Add an EzFlex-LoopStart node and re-queue so the loop can be expanded.")
+            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+        if fwd is None:
+            fwd = open_node   # 首次展开时把门牌号记下，下一轮的克隆 End 靠它定位（见 _find_start）
+        # ★★ 循环体一律按「显示图」算：Start 的显示 id / End 的显示 id 都归一到画布门牌号。
+        #    这一条是「回喂值传不下去」的根因修复：早先直接拿 unique_id（第 2 轮起是带前缀的
+        #    克隆 id "P.Recurse"）去和 upstream 的键比较，克隆体的键是 "P.1"/"P.3"，两边对不上
+        #    → contained 为空 → 除 Start/End 外整段 body 丢失 → 每轮只剩 Start 重算初值，
+        #    于是 out1 永远停在第一轮的值（用户看到的「好像没循环」）。
+        start_did = self._display(dynprompt, open_node)
+        end_did = self._display(dynprompt, unique_id)
+        body, _display_of = self._body_of(dynprompt, start_did, end_did)
+
+        # 需要克隆的显示 id：循环体 + Start + End 自己（End 克隆成 "Recurse"）
+        wanted = set(body)
+        wanted.add(start_did)
+        wanted.add(end_did)
+
+        # 原始图里「显示 id → 真实节点 id」的映射（同一个显示 id 只取一个源即可）
+        src_of = {}
+        try:
+            prompts = dynprompt.get_original_prompt() or {}
+        except Exception:
+            prompts = {}
+        for nid, info in prompts.items():
+            if not isinstance(info, dict) or "inputs" not in info:
+                continue
+            did = self._display(dynprompt, nid)
+            src_of.setdefault(did, str(nid))
+
+        graph = GraphBuilder()
+        # ① 建节点：End → "Recurse"（保持内核递归展开的既定命名），其余用显示 id
+        built = {}
+        for did in sorted(wanted):
+            nid = src_of.get(did)
+            if nid is None:
+                continue   # 画布上找不到对应节点（例如刚删掉）：跳过，别造空壳
+            info = dynprompt.get_node(nid)
+            if not info:
+                continue
+            key = "Recurse" if did == end_did else did
+            node = graph.node(info["class_type"], key)
+            node.set_override_display_id(nid)   # ★ display 指回原始门牌号（内核靠它回溯）
+            built[did] = node
+
+        # ② 连边：引用「本轮要克隆的显示 id」→ 改指克隆；其余原样保留
+        for did, node in built.items():
+            nid = src_of.get(did)
+            info = dynprompt.get_node(nid) or {}
+            for k, v in (info.get("inputs") or {}).items():
+                if str(k) == self._FWD or str(k) == self._ROUND:
+                    continue   # 配对门牌号 / 轮号是幂等元数据，下面统一写一次
+                if is_link(v):
+                    src_did = self._display(dynprompt, v[0])
+                    tgt = built.get(src_did)
+                    # 引用循环体 / Start 的线 → 接本轮克隆；引用体外的线 → 保留原线（外部依赖不重造）
+                    node.set_input(k, tgt.out(v[1]) if tgt is not None else v)
+                else:
+                    node.set_input(k, v)
+
+        # ③ 下一轮 Start：index +1，并把上一轮 End 收到的 valueK 作为回喂字面量写进去
+        new_open = built.get(start_did)
+        if new_open is not None:
+            new_open.set_input("index", cur + 1)
+            # ★ 回喂：上一轮 End 每个输入口收到的值，原样写进下一轮 Start 同编号口（字面量，不是连线）
+            for k in range(1, _EZ_LOOP_MAX + 1):
+                new_open.set_input(LoopStartNode._feed_name(k), kwargs.get("value%d" % k))
+
+        # ④ 下一轮 End：带上配对门牌号 + 轮次标记（否则下一轮读不到第几轮 → 无限展开）
+        my_clone = built.get(end_did)
+        if my_clone is not None:
+            my_clone.set_input(self._FWD, fwd)
+            my_clone.set_input(self._ROUND, cur + 1)
+        return {"result": tuple(my_clone.out(i) for i in range(_EZ_LOOP_MAX)) if my_clone is not None
+                          else tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1)),
+                "expand": graph.finalize()}
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")   # 每次提交都重新展开（否则重跑同一份工作流会命中缓存、整个循环被跳过）
+
+
+_TL_MODELS = {
+    "minimax_h3": {"defaultFps": 24, "B": 5, "S": 17, "maxF": 362},
+    "wan": {"defaultFps": 16, "B": 1, "S": 4, "maxF": 121},
+    "ltx": {"defaultFps": 24, "B": 1, "S": 8, "maxF": 257},
+}
+
+
+def _tl_plan(model="minimax_h3", total=30.0, segment=5.0, fps=None, overlap=22, tolerance=1, align="align"):
+    """按模型帧网格把总时长切成分段，返回每段的帧数表。
+    每段：index / genFrames（含过渡的生成帧数）/ netFrames（净帧数）/ overlapFrames / genStart / genDuration / exceed。"""
+    m = _TL_MODELS.get(str(model)) or _TL_MODELS["minimax_h3"]
+    B, S, maxF = m["B"], m["S"], m["maxF"]
+    try:
+        fps = max(1, int(fps or m["defaultFps"]))
+    except (TypeError, ValueError):
+        fps = m["defaultFps"]
+    try:
+        T = max(0.1, float(total))
+    except (TypeError, ValueError):
+        T = 30.0
+    try:
+        n = max(0.1, float(segment))
+    except (TypeError, ValueError):
+        n = 5.0
+    try:
+        raw = max(1, int(overlap))
+    except (TypeError, ValueError):
+        raw = 1
+    try:
+        tol = max(0, int(tolerance))
+    except (TypeError, ValueError):
+        tol = 0
+    overlap_frames = B if raw <= B else B + S * ((raw - B + S - 1) // S)   # 帧数对齐到网格
+    oeff = overlap_frames + tol
+    strict = str(align) == "strict"
+    x = max(1, int(T / n + 0.5))
+    N = x - 1
+    k1 = max(1, int(((fps * n - B) / S) + 0.5) if strict else -((-(fps * n - B)) // S))
+    F1 = B + S * k1
+    out = [{"index": 1, "genFrames": F1, "netFrames": F1, "overlapFrames": 0,
+            "genStart": 0.0, "genDuration": F1 / fps, "exceed": F1 > maxF}]
+    if N > 0:
+        if strict:
+            mlist = [max(1, int((fps * n / S) + 0.5))] * N
+        else:
+            f_target = fps * T
+            snet = int(((f_target - B) / S) + 0.5) - k1
+            if snet < N:
+                mlist = [max(1, snet // N)] * N
+            else:
+                m_base, r = snet // N, snet - N * (snet // N)
+                mlist = [(m_base + 1) if i < r else m_base for i in range(N)]
+        cursor = F1 / fps
+        ov = oeff / fps
+        for i, mm in enumerate(mlist):
+            net = S * mm
+            gen = net + oeff
+            out.append({"index": i + 2, "genFrames": gen, "netFrames": net, "overlapFrames": oeff,
+                        "genStart": cursor - ov, "genDuration": gen / fps, "exceed": gen > maxF})
+            cursor += net / fps
+    return out
+
+
+class TimeLineNode:
+    """EzFlex-TimeLine：按模型帧网格（MiniMax H3 / Wan 2.2 / LTX）规划时间轴，
+    把总时长切成若干段并输出每段帧数列表，供循环逐段生成。"""
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": (list(_TL_MODELS.keys()), {"default": "minimax_h3"}),
+                "total": ("FLOAT", {"default": 30.0, "min": 0.1, "step": 0.1}),
+                "segment": ("FLOAT", {"default": 5.0, "min": 0.1, "step": 0.1}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
+                "overlap": ("INT", {"default": 22, "min": 1, "max": 200}),
+                "tolerance": ("INT", {"default": 1, "min": 0, "max": 5}),
+                "align": (["align", "strict"], {"default": "align"}),
+            },
+            "optional": {
+                "index": ("INT", {"default": 0, "min": 0, "forceInput": True,
+                                   "tooltip": "Segment index (0-based). Wire EzFlex-LoopStart.index / easy forLoop index here; frames outputs that segment's frame count."}),
+                "video": ("*", {"tooltip": "Segment videos (a list, one item per segment). Wire the generated segments here; the panel previews segment i with item i."}),
+            },
+        }
+
+    RETURN_TYPES = ("INT", "INT", "INT")
+    RETURN_NAMES = ("frames", "overlap_frames", "segments")
+    OUTPUT_IS_LIST = (False, False, False)
+    FUNCTION = "run"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Time Line"
+
+    def run(self, model="minimax_h3", total=30.0, segment=5.0, fps=24, overlap=22, tolerance=1, align="align", index=0, **kwargs):
+        segs = _tl_plan(model, total, segment, fps, overlap, tolerance, align)
+        try:
+            idx = max(0, int(index))
+        except (TypeError, ValueError):
+            idx = 0
+        n = len(segs)
+        if idx >= n:   # 越界 = 这一段不存在；给 0，让循环自己收尾
+            return (0, 0, n)
+        seg = segs[idx]
+        return (int(seg["genFrames"]), int(seg.get("overlapFrames") or 0), n)
+
+
 NODE_CLASS_MAPPINGS = {
     "EzFlex-MainControl": MainControlNode,
     "EzFlex-ModelsCombo": ModelsComboLoader,
@@ -8191,6 +9720,12 @@ NODE_CLASS_MAPPINGS = {
     "EzFlex-PromptHelper": PromptHelperNode,
     "EzFlex-MediaLoader": MediaLoaderNode,
     "EzFlex-MediaOut": MediaOutNode,
+    "EzFlex-MergeList": MergeListNode,
+    "EzFlex-SplitList": SplitListNode,
+    "EzFlex-Reroute": EzFlexRerouteNode,
+    "EzFlex-TimeLine": TimeLineNode,
+    "EzFlex-LoopStart": LoopStartNode,
+    "EzFlex-LoopEnd": LoopEndNode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -8205,4 +9740,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EzFlex-PromptHelper": "EzFlex-PromptHelper",
     "EzFlex-MediaLoader": "EzFlex-MediaLoader",
     "EzFlex-MediaOut": "EzFlex-MediaOut",
+    "EzFlex-MergeList": "EzFlex-MergeList",
+    "EzFlex-SplitList": "EzFlex-SplitList",
+    "EzFlex-Reroute": "EzFlex-Reroute",
+    "EzFlex-TimeLine": "EzFlex-TimeLine",
+    "EzFlex-LoopStart": "EzFlex-LoopStart",
+    "EzFlex-LoopEnd": "EzFlex-LoopEnd",
 }

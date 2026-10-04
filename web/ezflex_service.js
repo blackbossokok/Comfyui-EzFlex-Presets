@@ -59,6 +59,12 @@ export const NODE_TYPES = {
   PROMPT_HELPER: "EzFlex-PromptHelper",
   MEDIA_LOADER: "EzFlex-MediaLoader",
   MEDIA_OUT: "EzFlex-MediaOut",
+  MERGE_LIST: "EzFlex-MergeList",
+  LOOP_START: "EzFlex-LoopStart",
+  LOOP_END: "EzFlex-LoopEnd",
+  SPLIT_LIST: "EzFlex-SplitList",
+  REROUTE: "EzFlex-Reroute",
+  TIME_LINE: "EzFlex-TimeLine",
 };
 
 // ===== 性能开关（全插件一处控制；出问题改常数即可回到旧行为，不用改结构）=====
@@ -197,18 +203,26 @@ export function emit(evt, arg) { (_bus[evt] || []).forEach((fn) => { try { fn(ar
 export function allGraphGroups(rootGraph) {
   const base = rootGraph || (app && app.graph) || null;
   const groups = [];
+  const seen = new Set();   // 子图定义在后端/前端可能被共享成注册表：不去重会自己套自己 → 栈溢出
   const walk = (g) => {
-    if (!g) return;
-    if (g._groups) groups.push(...g._groups);
-    (g.subgraphs || []).forEach(walk);
+    if (!g || seen.has(g)) return;
+    seen.add(g);
+    if (Array.isArray(g._groups)) groups.push(...g._groups);
+    const subs = g.subgraphs;
+    if (!subs) return;
+    // Nodes 2.0 的 subgraphs 可能是数组 / Map / Set / 普通对象，不能假定 .forEach 一定存在
+    if (Array.isArray(subs)) subs.forEach(walk);
+    else if (typeof subs.forEach === 'function') subs.forEach((s) => walk(s));
+    else if (typeof subs === 'object') Object.keys(subs).forEach((k) => walk(subs[k]));
   };
   walk(base);
   return groups;
 }
 export function groupNodes(group) {
   if (!group) return [];
-  if (group._children && group._children.size) return [...group._children].filter((n) => n instanceof LGraphNode);
-  if (Array.isArray(group.nodes) && group.nodes.length) return group.nodes.filter((n) => n instanceof LGraphNode);
+  const onlyNodes = (arr) => ((typeof LGraphNode !== 'undefined' && LGraphNode) ? arr.filter((n) => n instanceof LGraphNode) : arr);
+  if (group._children && group._children.size) return onlyNodes([...group._children]);
+  if (Array.isArray(group.nodes) && group.nodes.length) return onlyNodes(group.nodes);
   // _children 为空：画布边界法（节点中心在分组矩形内即算成员）
   const bb = group.getBounding ? group.getBounding() : [group._pos[0], group._pos[1], group._size[0], group._size[1]];
   return ((group.graph && (group.graph._nodes || group.graph.nodes)) || []).filter((n) => {
@@ -219,7 +233,7 @@ export function groupNodes(group) {
 }
 export function normalizeColor(c) {
   if (!c) return '';
-  if (LGraphCanvas.node_colors[c]) c = LGraphCanvas.node_colors[c].groupcolor;
+  if (typeof LGraphCanvas !== 'undefined' && LGraphCanvas && LGraphCanvas.node_colors && LGraphCanvas.node_colors[c]) c = LGraphCanvas.node_colors[c].groupcolor;
   c = c.replace('#', '').trim().toLowerCase();
   if (c.length === 3) c = c.replace(/(.)(.)(.)/, '$1$1$2$2$3$3');
   return '#' + c;
@@ -233,6 +247,11 @@ export function changeModeOfNodes(nodes, mode) {
 }
 
 // ===== config widget 读写 =====
+// 弹窗层级栈：同一时刻只有最上层弹窗响应 ←/→ 等按键，避免多层同时动
+const _ezModalStack = [];
+export function ezPushModal(tok) { _ezModalStack.push(tok); return tok; }
+export function ezPopModal(tok) { const i = _ezModalStack.lastIndexOf(tok); if (i >= 0) _ezModalStack.splice(i, 1); }
+export function ezIsTopModal(tok) { return _ezModalStack.length > 0 && _ezModalStack[_ezModalStack.length - 1] === tok; }
 export function configWidget(node) {
   return (node.widgets || []).find((w) => w.name === 'config');
 }
@@ -270,6 +289,80 @@ export function readConfig(node, fallback) {
   return cfg;
 }
 
+// ===== 动态端口安全工具（所有会 addOutput/removeOutput 的面板共用）=====
+// 背景：LiteGraph 的 removeOutput → disconnectOutput 会对该 socket 的每条 link 去取
+// 目标节点的 inputs[target_slot] 并置 slot.link = null。若 target_slot 越界
+// （工作流残留坏线：面板重建过端口、或多口节点被裁短），取到 undefined 就抛
+//   TypeError: Cannot set properties of undefined (setting 'link')
+// 直接把整份工作流加载中止。删口前必须先清掉这类坏线。
+// 判定一条输出线是否为「去路已不存在」的坏线。
+// ⚠️ 故意**不**把 origin_slot 与当前槽下标不符当作坏线：面板重排端口时，
+// socket 对象会整体搬位置，而 link.origin_slot 由 updatePorts 末尾另行回填，
+// 存在「搬完但还没回填」的中间态。若此时判坏就会误删有效连线（换顺序断连）。
+// 正确的做法是只修不删 —— 见 ezPruneDanglingLinks 里的 origin_slot 同步。
+export function ezLinkIsDangling(node, lid, originSlot) {
+  const g = node && node.graph; if (!g || !g.links) return false;
+  const L = g.links[lid];
+  if (!L) return false;   // link 对象缺失属于「链路未恢复」，交给调用方的 pending 守卫处理
+  if (L.origin_id != null && String(L.origin_id) !== String(node.id)) return true;   // 不是从本节点出发
+  const tgt = g.getNodeById ? g.getNodeById(L.target_id) : ((g._nodes || []).find((n) => String(n.id) === String(L.target_id)));
+  if (!tgt) return true;                                                            // 目标节点已不存在
+  const slot = (tgt.inputs || [])[L.target_slot];
+  if (!slot) return true;                                                           // target_slot 越界
+  if (slot.link != null && String(slot.link) !== String(lid)) return true;          // 下游槽已改指别人
+  return false;
+}
+// 拆掉 node 上「去路已不存在」的坏线；返回清掉的条数。保留一切有效线。
+export function ezPruneDanglingLinks(node) {
+  const g = node && node.graph; if (!g || !g.links) return 0;
+  let n = 0;
+  const pruneSide = (sockets, isOutput) => {
+    (sockets || []).forEach((s, si) => {
+      if (!s) return;
+      const ids = Array.isArray(s.links) ? s.links.slice() : [];
+      if (s.link != null && ids.indexOf(s.link) < 0) ids.push(s.link);
+      const keep = [];
+      ids.forEach((lid) => {
+        if (lid == null) return;
+        const L = g.links[lid];
+        if (!L) { keep.push(lid); return; }   // 链路未恢复，留给上层 defer
+        let dangling = false;
+        if (isOutput) dangling = ezLinkIsDangling(node, lid, si);
+        else {
+          // 输入侧：link 对象必须指向本节点、本槽
+          dangling = (String(L.target_id) !== String(node.id)) || (Number(L.target_slot) !== Number(si));
+        }
+        if (dangling) {
+          try {
+            const otherId = isOutput ? L.target_id : L.origin_id;
+            const other = g.getNodeById ? g.getNodeById(otherId) : ((g._nodes || []).find((x) => String(x.id) === String(otherId)));
+            const os = other && (isOutput ? (other.inputs || [])[L.target_slot] : (other.outputs || [])[L.origin_slot]);
+            if (os) {
+              if (isOutput) { if (String(os.link) === String(lid)) os.link = null; }
+              else if (Array.isArray(os.links)) { os.links = os.links.filter((x) => String(x) !== String(lid)); if (!os.links.length) os.links = null; }
+            }
+          } catch (_) {}
+          try { delete g.links[lid]; } catch (_) { try { g.links[lid] = null; } catch (_) {} }
+          n += 1;
+        } else {
+          keep.push(lid);
+          // 有效线：顺手把 origin_slot 正回当前槽下标（只修不删）。
+          // 面板重排后 link.origin_slot 由 updatePorts 末尾回填；若那次没走到，
+          // 这里补一次，避免下一次进函数时下标对不上。
+          if (isOutput && L.origin_slot != null && Number(L.origin_slot) !== Number(si)) {
+            try { L.origin_slot = si; } catch (_) {}
+          }
+        }
+      });
+      if (Array.isArray(s.links)) { try { s.links = keep.length ? keep : null; } catch (_) {} }
+      if (!isOutput && s.link != null && keep.indexOf(s.link) < 0) { try { s.link = keep.length ? keep[0] : null; } catch (_) {} }
+    });
+  };
+  pruneSide(node.outputs, true);
+  pruneSide(node.inputs, false);
+  return n;
+}
+
 // ===== 预设库 API（服务器 user_data，按节点名共享）=====
 export async function apiGet(path) { try { const r = await (api && api.fetchApi ? api.fetchApi(path) : fetch(path)); return r && r.ok ? await r.json() : []; } catch (_) { return []; } }
 export async function apiPost(path, body) { try { await (api && api.fetchApi ? api.fetchApi(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) : fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })); } catch (_) {} }
@@ -298,8 +391,12 @@ export async function deletePreset(apiPath, name) {
 // 真正穿透的空白交给画布（LiteGraph / Vue 节点）原生处理；滚动容器等被放开命中的区域由这里兜住，
 // 这样滚动条能拖、滚轮能滚，同时空白处仍能拖动节点。
 const _BLANK_SKIP = 'button,select,input,textarea,label,a,[contenteditable="true"],'
-  + '.eml-media,.eml-tab,.eml-card,.eml-card-head,.eml-empty,.eml-addbar,.eml-grip,.eml-preset-item,'
+  + '.eml-media,.eml-tab,.eml-cards,.eml-card,.eml-card-head,.eml-empty,.eml-addbar,.eml-grip,.eml-preset-item,'
+  + '.eml-bblist,.eml-bbtree,'
   + '.eph-card,.ezg-tri-row,.ezc-handle,.ezpc-handle,.ezo-value,.ezpv-prev,.ezpv-handle,.mc-grip,'
+  + '.eztl-tb,.eztl-card,.eztl-cardhd,.eztl-cardall,.eztl-li,.eztl-lith,.eztl-lanehd,.eztl-addlane,.eztl-lanex,'
+  + '.eztl-pane,.eztl-ruler,.eztl-cell,.eztl-th,.eztl-playbar,.eztl-zoombar,.eztl-lane,.eztl-mseg,.eztl-cbar,'
+  + '.rzr-card,.rzr-grip,.rzr-idx,.rzr-name,.rzr-dot,'
   + '.fl-handle,.fl-canvas-size,.fl-canvas-select,.ezfx-resize-handle';
 function installBlankDrag(node, shell) {
   if (!node || !shell || shell._ezBlankDrag) return;
@@ -333,7 +430,14 @@ function installBlankDrag(node, shell) {
       window.removeEventListener('pointermove', move, true);
       window.removeEventListener('pointerup', up, true);
       window.removeEventListener('pointercancel', up, true);
-      if (!moved && canvas && canvas.selectNode) { try { canvas.selectNode(node, false); } catch (_) {} }
+      // 面板内点空白（没拖动）：面板吞了 pointerdown，画布收不到「点空白取消选中」→ 这里手动补，
+      // 否则选中节点后点面板空白，选中框一直不消失。（拖动了就是移节点，不动选中。）
+      if (!moved) {
+        try {
+          const c = app.canvas;
+          if (c) { if (c.deselectAllNodes) c.deselectAllNodes(); else if (c.selectNode) c.selectNode(null, false); if (c.setDirty) c.setDirty(true, true); }
+        } catch (_) {}
+      }
     };
     window.addEventListener('pointermove', move, true);
     window.addEventListener('pointerup', up, true);
@@ -341,24 +445,35 @@ function installBlankDrag(node, shell) {
   });
 }
 
+// 真正「能滚」的元素：overflow 必须是 auto/scroll。只看 scrollHeight>clientHeight 会把
+// overflow:hidden 的省略号文本（媒体文件名 .fname 这类 scrollWidth 超宽）当滚动容器 ——
+// 滚轮落在它上面时滚的是它自己（看不见）、还 preventDefault，外层列表就「卡住」不动了。
+function _scrollCap(el) {
+  try {
+    const cs = getComputedStyle(el);
+    const oy = String(cs.overflowY), ox = String(cs.overflowX);
+    return {
+      canY: (oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 1,
+      canX: (ox === 'auto' || ox === 'scroll') && el.scrollWidth > el.clientWidth + 1,
+    };
+  } catch (_) { return { canY: false, canX: false }; }
+}
 // 面板内滚轮：手动滚动最近的滚动容器，并挡掉画布的缩放。
 // Nodes 2.0 下画布/节点会吞滚轮，导致「鼠标放上去滚不动」；这里统一兜住（经典模式等价于原生滚动）。
 function installPanelWheel(shell) {
   if (!shell || shell._ezWheel) return;
   shell._ezWheel = true;
   shell.addEventListener('wheel', (e) => {
-    let el = e.target;
-    let s = null;
+    let el = e.target, s = null, cap = null;
     while (el && el !== shell) {
-      if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) { s = el; break; }
+      const c = _scrollCap(el);
+      if (c.canY || c.canX) { s = el; cap = c; break; }
       el = el.parentElement;
     }
     if (!s) return;   // 没有滚动容器 → 交给画布（缩放）
-    const canY = s.scrollHeight > s.clientHeight + 1;
-    const canX = s.scrollWidth > s.clientWidth + 1;
     const mult = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? s.clientHeight : 1);
-    if (canY) s.scrollTop += e.deltaY * mult;
-    if (canX) s.scrollLeft += (e.deltaX || (canY ? 0 : e.deltaY)) * mult;
+    if (cap.canY) s.scrollTop += e.deltaY * mult;
+    if (cap.canX) s.scrollLeft += (e.deltaX || (cap.canY ? 0 : e.deltaY)) * mult;
     e.preventDefault();
     e.stopPropagation();
   }, { capture: true, passive: false });
@@ -375,9 +490,156 @@ function installVuePanel(node, shell) {
   installVueWheel();
 }
 
-const _SCROLL_SEL = '.eml-cards,.eml-tabs,.eph-list,.mc-list,.ezc-list,.ezg-list,.ezm-list,.ezpc-list,.ezo-list,.ezpv-list,.emoo-list';
+// ===== 面板内复制/粘贴「抢在画布前头」（所有含可编辑内容的面板共用）=====
+// 症状：在面板的输入框 / contentEditable 编辑器里 Ctrl+C，选中节点会被一起复制；Ctrl+V 会往画布贴节点。
+// 机制（在**实跑**的前端 1.45.21 上核对过；见 MEMORY.md §0.2）：
+//   前端 useCopy/usePaste 在 document 上挂 copy/paste 监听（**冒泡阶段**，VueUse 默认 capture=false），
+//   只有 shouldIgnoreCopyPaste(target) 为真才放过：
+//     isTextInput = target instanceof HTMLTextAreaElement || (HTMLInputElement 且 type 不是按钮类)
+//     return isTextInput || linearMode || hasTextSelection()
+//   ⇒ 只认 <textarea>/<input>；contentEditable 的 div/span 一律 false，唯一兜底是「已选中一段文字」。
+//   ⇒ 光标折叠（没选字）按 Ctrl+C → 前端 preventDefault（吃掉系统复制）+ 把选中节点写进剪贴板。
+//   而 LiteGraph 的 LGraphCanvas.processKey 只挡 `localName == 'input'` → textarea/contentEditable 全漏。
+// 修法：在 **document 捕获阶段** 拦 copy/cut/paste；目标落在 EzFlex 面板外壳或 EzFlex 弹窗内时，
+//       stopImmediatePropagation() → 前端那个（冒泡阶段的）document 监听收不到，画布完全不动。
+//       ★ 不 preventDefault → 浏览器默认复制/粘贴照常发生（选中文字照常进/出剪贴板）。
+// 识别 EzFlex 区域：① 面板外壳带 `.ezfx-panel-shell`（由 _applyPanelHitThrough 打标，最可靠）；
+//                  ② 面板/弹窗的根类名前缀（见下表）——弹窗挂在 body 下、不在外壳里，只能靠类名。
+//                  ③ 祖先链逐层同上（编辑器/输入框通常嵌在 root/body/modal 里）。
+// 本项目类名统一前缀（全库实测，新增面板若用新前缀记得补进来）：
+//   ezfx-(框架外壳) eph-(提示词助手) eml-(素材加载器) emoo-(素材输出) ezc-(节点控制) ezg-(开关组)
+//   ezm-(总控) ezpc-(参数预设控制) ezo-(参数输出) ezpv-(任意预览) eztl-(时间轴) ezlp-(循环)
+//   ezl-(列表弹窗壳) fl-(FreeLatent) rzr-(转接) mc-(模型组合) ez-(音频播放器等)
+const _EZ_CLS_PREFIX = /(^|\s)(ezfx-|eph-|eml-|emoo-|ezc-|ezg-|ezm-|ezpc-|ezo-|ezpv-|eztl-|ezlp-|ezl-|fl-|rzr-|mc-|ez-ap)/;
+const _EZ_SHELL_CLS = 'ezfx-panel-shell';
+function _ezInOurUi(node) {
+  let el = node;
+  let hops = 0;
+  while (el && el.nodeType === 1 && el !== document.body && hops < 24) {
+    const cls = el.className;
+    if (typeof cls === 'string' && cls) {
+      if (cls.split(/\s+/).indexOf(_EZ_SHELL_CLS) >= 0) return true;
+      if (_EZ_CLS_PREFIX.test(cls)) return true;
+    }
+    el = el.parentElement; hops++;
+  }
+  return false;
+}
+function _ezClipGuardInit() {
+  if (typeof document === 'undefined' || document._ezClipGuard) return;
+  document._ezClipGuard = true;
+  const swallow = (e) => {
+    // 只在「确定性可编辑元素」上兜底：textarea/input/contentEditable。
+    // （不在普通按钮/卡片上抢，免得影响面板自身的点击/选择逻辑。）
+    const t = e.target;
+    if (!t || t.nodeType !== 1) return;
+    let editable = false;
+    try { editable = !!t.isContentEditable; } catch (_) {}
+    if (!editable) {
+      // 编辑器根/输入框本身即可编辑，或目标是编辑器内的不可编辑子元素（如 @引用媒体芯片，
+      // contentEditable="false"，但光标/焦点仍在编辑器里，copy 事件 target 可能是它）。
+      try {
+        editable = !!(t.closest && t.closest('textarea,input,[contenteditable=""],[contenteditable="true"],.eph-editor,.eph-all-editor,.eph-all-block-body'));
+      } catch (_) {}
+    }
+    if (!editable) return;
+    if (!_ezInOurUi(t)) return;
+    // 抢在前端 document（冒泡）监听之前；不 preventDefault，浏览器默认复制/粘贴继续。
+    e.stopImmediatePropagation();
+  };
+  document.addEventListener('copy', swallow, true);
+  document.addEventListener('cut', swallow, true);
+  document.addEventListener('paste', swallow, true);
+}
+export function installPanelClipboardGuard() { _ezClipGuardInit(); }
+
+// ===== 面板内 Ctrl+Z / Ctrl+Y「不让画布撤销/重做」（所有含可编辑内容的面板共用）=====
+// 症状：在面板的输入框 / contentEditable 编辑器里按 Ctrl+Z（或 Ctrl+Y）想撤销自己的输入，
+//       结果整个**画布**被撤销/重做（节点位置、连线全回退）。
+// 机制（在**实跑**的前端 1.45.21 上核对过；见 MEMORY.md §0.2）：
+//   ★ 关键：`Comfy.Undo` / `Comfy.Redo` 这两个命令**没有默认快捷键**（coreKeybindings/defaults.ts 里
+//     没有它们）→ 画布撤销**不是**走 keybinding 服务，而是走 `scripts/changeTracker.ts#ChangeTracker.init()`：
+//       window.addEventListener('keydown', (e) => { ... requestAnimationFrame(async () => {
+//         if (activeEl.tagName==='INPUT' || activeEl.type==='textarea') return;   // ← 只挡 <input>（textarea 判据写错成 type，等于没挡）
+//         ...
+//         if (await changeTracker.undoRedo(e)) return;                            // ← 这里真的会 undo/redo 整个画布
+//       }) }, true)
+//     undoRedo(e) 判据：ctrl/meta && !alt，再按 key 分派（Z=undo，Y 或 Shift+Z=redo）。
+//   ⇒ contentEditable 编辑器里按 Ctrl+Z，activeEl 不是 INPUT → 画布被撤销。
+//   ⚠️ 不能用「捕获阶段 stopImmediatePropagation」拦：changeTracker 的监听在 **window 捕获**，
+//      且真正干活的部分被包在 `requestAnimationFrame` 里（事件已捕获、rAF 已排队，拦事件拦不掉它）。
+//   正解：直接**猴补 `ChangeTracker.prototype.undoRedo`**——前端把它挂在公开扩展 API 上
+//        `window.comfyAPI.changeTracker.ChangeTracker`（官方暴露，非私有路径）。
+//        命中「焦点在 EzFlex 区域的可编辑元素 + 当前是撤销/重做键」时直接 `return true`：
+//        调用点 `if (await i.undoRedo(t)) return` 就此打住（不撤画布、不抓快照）；
+//        ★ 我们不 preventDefault → 浏览器**原生**的 contentEditable/输入框撤销照常发生。
+//        焦点在画布上（非 EzFlex 区域）时原样透传 → 画布的 Ctrl+Z/Ctrl+Y 完全不受影响。
+const _EZ_UNDO_GUARD_FLAG = '_ezUndoRedoGuard';
+// 与 changeTracker.undoRedo 的判据**逐字对齐**（只拦它真正会动手的组合，避免把无关按键也短路掉）：
+//   ctrl/meta && !alt && (key==='Z' 任意 shift)          → undo / redo
+//   ctrl/meta && !alt && (key==='Y' 且 !shift)           → redo
+//   ⇒ Ctrl+Shift+Y 前端本来就 no-op，我们也不拦（透传，行为完全一致）。
+function _ezIsUndoRedoKey(e) {
+  if (!e || !(e.ctrlKey || e.metaKey) || e.altKey) return false;
+  const k = String(e.key || '').toUpperCase();
+  if (k === 'Z') return true;                  // Ctrl+Z / Ctrl+Shift+Z
+  if (k === 'Y' && !e.shiftKey) return true;   // Ctrl+Y（Ctrl+Shift+Y 非重做 → 不拦）
+  return false;
+}
+// 焦点是否落在「EzFlex 面板/弹窗内的可编辑元素」上（与剪贴板守卫同判据）。
+function _ezFocusIsOurEditable() {
+  let t = null;
+  try { t = document.activeElement; } catch (_) { return null; }
+  if (!t || t.nodeType !== 1) return null;
+  let editable = false;
+  try { editable = !!t.isContentEditable; } catch (_) {}
+  if (!editable) {
+    try {
+      editable = !!(t.closest && t.closest('textarea,input,[contenteditable=""],[contenteditable="true"],.eph-editor,.eph-all-editor,.eph-all-block-body'));
+    } catch (_) {}
+  }
+  if (!editable) return null;
+  if (!_ezInOurUi(t)) return null;
+  return t;
+}
+function _ezUndoGuardInit() {
+  if (typeof window === 'undefined' || window[_EZ_UNDO_GUARD_FLAG]) return;
+  const api = window.comfyAPI && window.comfyAPI.changeTracker;
+  const CT = api && api.ChangeTracker;
+  // 前端可能比扩展先/后加载：ChangeTracker 未就位就下次再试（幂等）。
+  if (!CT || !CT.prototype || typeof CT.prototype.undoRedo !== 'function') return;
+  if (CT.prototype[_EZ_UNDO_GUARD_FLAG]) { window[_EZ_UNDO_GUARD_FLAG] = true; return; }
+  const orig = CT.prototype.undoRedo;
+  CT.prototype.undoRedo = function (e) {
+    if (_ezIsUndoRedoKey(e) && _ezFocusIsOurEditable()) {
+      // 假称「已处理」→ changeTracker 调用点直接 return（不撤画布、不抓快照）。
+      // 不 preventDefault → 浏览器原生撤销继续作用于我们自己的编辑器。
+      return true;
+    }
+    return orig.call(this, e);
+  };
+  CT.prototype[_EZ_UNDO_GUARD_FLAG] = true;
+  window[_EZ_UNDO_GUARD_FLAG] = true;
+}
+export function installPanelUndoRedoGuard() { _ezUndoGuardInit(); }
+// 兜底重试：面板可能在 `window.comfyAPI.changeTracker` 就位之前就被创建（首次 _ezUndoGuardInit 会空跑）。
+// 有界轮询（最多 ~60s），成功后自行停止；不依赖面板创建时机。
+(function _ezUndoGuardRetry() {
+  if (typeof window === 'undefined') return;
+  let tries = 0;
+  const tick = () => {
+    if (window[_EZ_UNDO_GUARD_FLAG]) return;      // 已装好 → 停
+    try { _ezUndoGuardInit(); } catch (_) {}
+    if (window[_EZ_UNDO_GUARD_FLAG]) return;
+    if (++tries > 240) return;                    // 240 × 250ms = 60s 上限
+    setTimeout(tick, 250);
+  };
+  setTimeout(tick, 250);
+})();
+
+const _SCROLL_SEL = '.eml-cards,.eml-tabs,.eml-bblist,.eml-bbtree,.eph-list,.mc-list,.ezc-list,.ezg-list,.ezm-list,.ezpc-list,.ezo-list,.ezpv-list,.emoo-list,.eztl-libbody,.eztl-trow,.eztl-vp';
 // 祖先链判断用的类名集合（比用选择器逐层 matches 便宜）
-const _SCROLL_CLASSES = ['eml-cards', 'eml-tabs', 'eph-list', 'mc-list', 'ezc-list', 'ezg-list', 'ezm-list', 'ezpc-list', 'ezo-list', 'ezpv-list', 'emoo-list'];
+const _SCROLL_CLASSES = ['eml-cards', 'eml-tabs', 'eml-bblist', 'eml-bbtree', 'eph-list', 'mc-list', 'ezc-list', 'ezg-list', 'ezm-list', 'ezpc-list', 'ezo-list', 'ezpv-list', 'emoo-list', 'eztl-libbody', 'eztl-trow', 'eztl-vp'];
 // 已挂载的面板外壳：Vue 全局滚轮只在这些外壳里找滚动容器（不再每次 document.querySelectorAll 扫全页）
 const _panelShells = new Set();
 let _vueWheelBound = false;
@@ -536,9 +798,47 @@ function injectSocketPanelBaseCSS() {
 .ezfx-is-vue [class*="-root"] .ezo-value,
 .ezfx-is-vue [class*="-root"] .ezpv-prev,
 .ezfx-is-vue [class*="-root"] .ezpv-handle,
+/* TimeLine 面板：Nodes 2.0 下整块 root 是 pointer-events:none，素材卡片/轨道/刻度尺不进白名单就点不动、拖不了 */
+.ezfx-is-vue [class*="-root"] .eztl-tb,
+.ezfx-is-vue [class*="-root"] .eztl-lib,
+.ezfx-is-vue [class*="-root"] .eztl-libhd,
+.ezfx-is-vue [class*="-root"] .eztl-ports,
+.ezfx-is-vue [class*="-root"] .eztl-libgrid,
+.ezfx-is-vue [class*="-root"] .eztl-tile,
+.ezfx-is-vue [class*="-root"] .eztl-bottom,
+.ezfx-is-vue [class*="-root"] .eztl-vsplit,
+.ezfx-is-vue [class*="-root"] .eztl-libbody,
+.ezfx-is-vue [class*="-root"] .eztl-card,
+.ezfx-is-vue [class*="-root"] .eztl-cardhd,
+.ezfx-is-vue [class*="-root"] .eztl-cardall,
+.ezfx-is-vue [class*="-root"] .eztl-li,
+.ezfx-is-vue [class*="-root"] .eztl-lith,
+.ezfx-is-vue [class*="-root"] .eztl-audio,
+.ezfx-is-vue [class*="-root"] .eztl-pane,
+.ezfx-is-vue [class*="-root"] .eztl-trow,
+.ezfx-is-vue [class*="-root"] .eztl-heads,
+.ezfx-is-vue [class*="-root"] .eztl-lanehd,
+.ezfx-is-vue [class*="-root"] .eztl-addlane,
+.ezfx-is-vue [class*="-root"] .eztl-lanex,
+.ezfx-is-vue [class*="-root"] .eztl-vp,
+.ezfx-is-vue [class*="-root"] .eztl-content,
+.ezfx-is-vue [class*="-root"] .eztl-ruler,
+.ezfx-is-vue [class*="-root"] .eztl-lane,
+.ezfx-is-vue [class*="-root"] .eztl-mseg,
+.ezfx-is-vue [class*="-root"] .eztl-cell,
+.ezfx-is-vue [class*="-root"] .eztl-th,
+.ezfx-is-vue [class*="-root"] .eztl-playbar,
+.ezfx-is-vue [class*="-root"] .eztl-zoombar,
 .ezfx-is-vue [class*="-root"] .mc-grip,
 .ezfx-is-vue [class*="-root"] .fl-canvas-size,
 .ezfx-is-vue [class*="-root"] .fl-canvas-select,
+/* Reroute 面板：卡片/拖手/序号/输入框/圆点/名字放进白名单，否则 Vue 下点不动、拖不了、改不了名（面板本身 pointer-events:none） */
+.ezfx-is-vue [class*="-root"] .rzr-card,
+.ezfx-is-vue [class*="-root"] .rzr-grip,
+.ezfx-is-vue [class*="-root"] .rzr-idx,
+.ezfx-is-vue [class*="-root"] .rzr-input,
+.ezfx-is-vue [class*="-root"] .rzr-dot,
+.ezfx-is-vue [class*="-root"] .rzr-name,
 .ezfx-is-vue [class*="-root"] .fl-handle{pointer-events:auto!important;}
 /* 经典模式：以上一条都不加（经典没有任何 Vue 专属样式）。 */
 /* 普通模式同理：面板里**后建**的按钮/输入也要能点 —— 一次性 querySelectorAll 快照管不到动态重建的行
@@ -561,6 +861,8 @@ function _applyPanelHitThrough(element) {
   try { element.classList.add('ezfx-panel-shell'); _panelShells.add(element); } catch (_) {}
   try { if (window.__ezflexIsVueNodes && window.__ezflexIsVueNodes()) element.classList.add('ezfx-is-vue'); } catch (_) {}
   injectSocketPanelBaseCSS();
+  try { _ezClipGuardInit(); } catch (_) {}   // 面板内复制/粘贴不落到画布（全局一次性安装）
+  try { _ezUndoGuardInit(); } catch (_) {}   // 面板内 Ctrl+Z/Ctrl+Y 不撤画布（全局一次性安装）
   try { element.style.setProperty('pointer-events', 'none', 'important'); } catch (_) {}
   try {
     let cur = element.parentElement;
@@ -576,6 +878,29 @@ function _applyPanelHitThrough(element) {
 }
 
 export function makeDomWidgetHitThrough(element) { _applyPanelHitThrough(element); }
+
+// ===== 关掉 ComfyUI/LiteGraph **自带**的端口名文字（所有面板共用）=====
+// 症状：节点上出现 `input_1` / `output_1` / `media_in_1` 这类自带文字，从面板的边距/圆角处露出来。
+// 机制（在**实跑**的前端上核对过；见 MEMORY.md §0/§4e）：
+//   NodeSlot.draw()：`const hideLabel = lowQuality || this.isWidgetInputSlot`
+//                    `const text = this.renderingLabel`
+//   get renderingLabel() { return this.label || this.localized_name || this.name || '' }
+//   LabelPosition 枚举只有 Left | Right（**没有 hidden**）
+//   ⚠️ **根本没有 `hideName` 这个字段**（1.45.21 与 1.52.7 grep 均 0 命中）→ 以前写
+//      `slot.hideName = true` 是**空操作**；而 `label` 被清成 `''`（falsy）后 renderingLabel
+//      就回落到 `localized_name`（ComfyUI 建 def 槽时写的 `"input_1"`）→ 文字照画。
+// 正解：把 `label` 设成**非空但不可见**的字符（空格），renderingLabel 就停在它上面。
+//   `name` 绝不能动（后端按 name 取 kwargs / 端口）；`localized_name` 留着给 i18n 用（label 优先）。
+//   `hideName` 保留（将来前端若真实现该字段就当双保险），但**不能只靠它**。
+// ⚠️ 读 `sock.label` 的地方要注意：`' '` 是 truthy，直接 `sock.label || sock.name` 会拿到空格
+//    → 判断请用 `String(x).trim()`（见 loop_nodes.js 的 upstreamLabel）。
+export function hideNativeSlotText(slot) {
+  try {
+    if (!slot) return;
+    slot.label = ' ';
+    slot.hideName = true;
+  } catch (_) {}
+}
 
 // ===== 节点外黑框 socket 标签（共享）=====
 // 把端口名画在节点边缘：DOM 覆盖层，与画布同帧对齐端口圆点、随画布缩放（纵向也按画布缩放，节点拉高不压间距）。
@@ -654,7 +979,10 @@ export function installEdgeLabels(node, opts) {
   };
   node._ezEdgeUpdate = update;
   const prevDraw = node.onDrawForeground;
-  node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); update(); pumpFrames(); };
+  // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）；
+  // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍，
+  // 且每帧把 _pumpUntil 推后 300ms 会让 rAF 链永不空闲（静止时 60fps 空转）。
+  node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); update(); };
   scheduleOnRedraw(update);
   pumpFrames();
   update();
@@ -762,6 +1090,12 @@ export function enlargeSocketHitArea(radius) {
 // 内嵌面板基础布局 CSS：shell 全节点穿透；root 居中（左右留 SIDE=20px 端口列）；端口列绝对穿透。
 
 
+// 3D 模型图标：和其它图标同一套 SVG（TYPE_ICONS.model_3d），只按需改宽高。
+// 别用位图：黑框标签会随画布缩放改 font-size，位图尺寸写死会显得突兀。
+export function model3dIcon(size) {
+  const s = Math.max(8, Math.round(size || 16));
+  return TYPE_ICONS.model_3d.replace('width="16" height="16"', 'width="' + s + '" height="' + s + '"');
+}
 export const TYPE_ICONS = {
   image: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="16" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M3 17l4-5 4 4 3-3 4 4"/></svg>',
   video: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5"/><path d="M10 9l5 3-5 3z" fill="currentColor"/></svg>',

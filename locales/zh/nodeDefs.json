@@ -37,8 +37,47 @@
   "EzFlex-MediaOut": {
     "description": "素材输出",
     "inputs": {
-      "card": { "tooltip": "来自 EzFlex-MediaLoader 的某张「素材卡片」端口（深红输入）。" },
+      "card": { "tooltip": "来自 EzFlex-MediaLoader 的 list 端口（每个列表项拆成一个输出口）。" },
       "config": { "tooltip": "「素材输出」面板配置（局部禁用文件 id 集合）。" }
+    }
+  },
+  "EzFlex-MergeList": {
+    "description": "列表合并",
+    "outputs": { "0": { "name": "list", "tooltip": "按顺序拼好的列表，可直接接 StartLoop 的 List 模式。" } }
+  },
+  "EzFlex-TimeLine": {
+    "description": "时间轴规划",
+    "inputs": {
+      "materials": { "tooltip": "参考素材列表（MediaLoader / MergeList）。" }
+    },
+    "outputs": {
+      "0": { "name": "frames", "tooltip": "每段帧数列表（列表输出，可直接喂循环按段迭代）。" },
+      "1": { "name": "overlap_frames", "tooltip": "对齐到模型网格后的过渡帧数。" }
+    }
+  },
+  "EzFlex-SplitList": {
+    "description": "拆分列表",
+    "inputs": {
+      "list": { "tooltip": "任意列表值（例如 EzFlex-MergeList 的输出）。" }
+    }
+  },
+  "EzFlex-Reroute": {
+    "description": "转接点",
+    "outputs": {
+      "0": { "tooltip": "第 1 张转接卡的输出，原样透传同序号入口的值。" }
+    }
+  },
+  "EzFlex-LoopStart": {
+    "description": "循环起点",
+    "outputs": {
+      "0": { "name": "flow", "tooltip": "循环锚点，连到 LoopEnd 的 flow 输入。" }
+    }
+  },
+  "EzFlex-LoopEnd": {
+    "description": "循环终点",
+    "inputs": {
+      "flow": { "tooltip": "来自 LoopStart 的 flow 锚点（用来回溯循环体）。" },
+      "condition": { "tooltip": "循环条件：为真继续下一轮，为假收束并返回最终结果。" }
     }
   },
   "EzFlex-PromptHelper": {

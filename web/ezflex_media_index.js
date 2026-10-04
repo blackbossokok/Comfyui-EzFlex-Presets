@@ -6,7 +6,7 @@
 // 多生成节点：各自独立编号（互不冲突），节点标识 = 画布上看到的节点标题（重命名后用新名字）。
 // PromptHelper 的每个提示词卡片绑定一个生成节点，@ 引用按该节点自己的编号表算。
 import { app } from "../../scripts/app.js";
-import { EZ_PERF } from "./ezflex_service.js";
+import { EZ_PERF, scheduleOnRedraw } from "./ezflex_service.js";
 
 const BUILTIN_WORDS = { image: '图片', video: '视频', audio: '音频', model: '模型' };
 const TAG_WORDS = { image: 'Picture', video: 'Video', audio: 'Audio' };
@@ -103,14 +103,20 @@ function widgetMediaOfNode(n) {
   let subfolder = '';
   widgets.forEach((w) => { if (/subfolder|folder/i.test(String((w && w.name) || '')) && typeof w.value === 'string' && w.value) subfolder = w.value; });
   widgets.forEach((w) => {
-    const v = w && w.value;
+    let v = w && w.value;
     if (typeof v !== 'string' || !v) return;
-    const base = v.split(/[\\/]/).pop();
+    const anno = / \[(input|output|temp)\]$/i.exec(v);   // LoadImageOutput 这类标注值：name.png [output]
+    if (anno) v = v.slice(0, -anno[0].length);
+    const viewType = anno ? anno[1].toLowerCase() : 'input';
+    const parts = v.split(/[\\/]/); const base = parts.pop();
     const mt = base.match(/\.([a-z0-9]{2,5})$/i);
     if (!mt) return;
     const typ = kindOfName(base) || null;
     if (!typ) return;
-    const url = '/view?filename=' + encodeURIComponent(base) + (subfolder ? '&subfolder=' + encodeURIComponent(subfolder) : '') + '&type=input';
+    // LoadImage 的 value 自带相对子目录（sub/name.png），别把它当普通文件名丢掉；绝对路径不算子目录
+    const dir = ((/^[A-Za-z]:[\\/]/.test(v) || /^[\\/]/.test(v)) ? '' : parts.join('/'));
+    const sub = subfolder || dir;
+    const url = '/view?filename=' + encodeURIComponent(base) + (sub ? '&subfolder=' + encodeURIComponent(sub) : '') + '&type=' + viewType;
     out.push({ name: base, path: v, type: typ, url });
   });
   return out;
@@ -157,9 +163,16 @@ function ezMediaFilesOfNode(n, g) {
 const _srcReaders = new Map();
 export function registerMediaSource(type, read, opts) { _srcReaders.set(String(type), { read: read, terminal: !(opts && opts.relay) }); }
 function readLoaderSlot(up, slot) {
+  const sock = (up.outputs || [])[slot];
+  // 前端盖章的端口项最准：它是「这个输出口实际承载的文件」，和输出模式（按卡片/卡片组/分组）无关。
+  // 没有盖章（还没铺开面板 / 纯 API 载入）才退回读 config —— 那条路只有「按卡片」模式下 slot↔card 才对得上。
+  const stamped = sock && sock._ezItems;
+  if (Array.isArray(stamped) && stamped.length) {
+    const out = []; stamped.forEach((f) => { try { pushMediaFile(out, f); } catch (_) {} });
+    if (out.length) return out;
+  }
   let cfg = {}; try { const w = (up.widgets || []).find((x) => x.name === 'config'); cfg = JSON.parse((w && w.value) || '{}') || {}; } catch (_) { cfg = {}; }
   const cards = []; (cfg.groups || []).forEach((gr) => (gr.cards || []).forEach((c) => cards.push(c)));
-  const sock = (up.outputs || [])[slot];
   const cardId = sock && sock._ezCardId;
   const card = cardId != null ? cards.find((c) => String(c.id) === String(cardId)) : cards[slot];
   const out = []; if (card) (card.items || []).forEach((it) => (it.files || []).forEach((f) => pushMediaFile(out, f)));
@@ -170,15 +183,19 @@ function readMediaOutSlot(up, slot) {
   const sock = (up.outputs || [])[slot];
   // MediaOut 面板会把该输出端口实际承载的文件盖到 socket 上（拆分口=1 个文件，卡片/分组口=该组全部文件）。
   const stamped = sock && sock._ezFiles;
-  if (stamped && stamped.length) { const out = []; stamped.forEach((f) => { if (!off[f.id]) pushMediaFile(out, f); }); return out; }
+  // 盖章项优先；但旧工作流/旧前端存的项可能缺 path（pushMediaFile 会整条丢掉）——
+  // 这时不能直接 return []，要继续走下面的兜底（从上游 MediaLoader 的 config 读），否则「MediaOut 接生成节点」识别不出来。
+  if (stamped && stamped.length) { const out = []; stamped.forEach((f) => { if (!off[f.id]) pushMediaFile(out, f); }); if (out.length) return out; }
   // 没盖到章（面板还没铺开 / 链接指向的槽位已失效）：只做能精确对上的兜底 —— 按 _ezMediaId 找那一个文件，
   // 或拆分模式按槽位序号取。**绝不退回「整张卡片的文件列表」**：那会把 MediaLoader 里没接入生成节点、
   // 或已被「关」掉的素材一起带进编号表和引用媒体（实测踩过）。
   const all = ezMediaFilesOfNode(up, up.graph) || [];
   const mid = sock && sock._ezMediaId;
+  // 端口有身份（_ezMediaId）就只认按身份找到的那一个文件：找不到 = 该口没有素材（循环模式的空槽位就是这样）。
+  // 不能退回 all[slot] —— 那是 config 里的文件顺序，和槽位顺序对不上，会把「图片口」读成第一段视频。
   if (mid != null) {
     const hit = all.find((f, i) => String(f.id == null ? 'f' + i : f.id) === String(mid));
-    if (hit) return off[hit.id] ? [] : [hit];
+    return (hit && !off[hit.id]) ? [hit] : [];
   }
   if ((up._ezMode || 'split') === 'split') { const f = all[slot]; if (f) return off[f.id] ? [] : [f]; }
   return [];
@@ -290,7 +307,11 @@ function scanTargetPorts(node) {
     let files = [];
     try { files = filesOnInput(node, inp) || []; } catch (_) { files = []; }
     if (!files.length) return;
-    const type = portMediaType(inp) || kindFromFiles(files);
+    // 声明类型是标量（INT/FLOAT/STRING/…）的端口不能靠"上游文件扩展名"升格成媒体口：
+    // GetVideoComponents 这类中继节点的 fps/bit_depth/color_space 会把同一段 mp4 算成 @视频1（幽灵编号）。
+    const decl = String(inp.type || '').toUpperCase();
+    const scalar = decl === 'INT' || decl === 'FLOAT' || decl === 'STRING' || decl === 'BOOLEAN' || decl === 'COMBO';
+    const type = portMediaType(inp) || (scalar ? null : kindFromFiles(files));
     if (!type) return;
     counts[type] = (counts[type] || 0) + 1;
     ports.push({ slot: slot, name: name, type: type, n: counts[type], label: mediaLabelOf(type, counts[type]), tag: mediaTagOf(type, counts[type]), files: files });
@@ -397,19 +418,26 @@ function installIndexHooks() {
     }
   } catch (_) {}
   try { window.addEventListener('ezflex:config-changed', () => { try { markIndexDirty(); } catch (_) {} }); } catch (_) {}
+  // 画布每轮重绘 / 指针操作后也合并刷一次：管线（setDirty → pumpFrames）经典和 Nodes 2.0 都覆盖，
+  // 不依赖某个节点有没有 onDrawForeground，引用媒体窗口因此能一直实时跟。
+  try { scheduleOnRedraw(() => refreshIndexSoon()); } catch (_) {}
 }
 let _watch = 0;
 // 事件驱动为主，低频轮询兜底（保证不漏：面板/第三方节点改了 config 但没发事件也能跟上）。
 export function startIndexWatcher(node) {
   installIndexHooks();
-  if (_watch) return;
-  try { refreshIndex(); } catch (_) {}
   // 兜底不再用定时轮询：由消费者节点的画布重绘（onDrawForeground）触发一次合并刷新，
   // 覆盖「标题改名 / 第三方节点内部换素材」这类没有事件的情况；全静止时零开销。
-  if (node) {
+  // 每个消费者节点只挂一次：后加的 PromptHelper（载入工作流后新建的节点）也要有这条兜底，
+  // 否则只靠 dirty 钩子 —— 钩子一旦没装上（或该节点的连线变更走了类自己的 onConnectionsChange），
+  // 引用媒体窗口就不会实时跟。
+  if (node && !node._ezIdxDrawHooked) {
+    node._ezIdxDrawHooked = true;
     const prevDraw = node.onDrawForeground;
     node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); refreshIndexSoon(); };
     if (typeof node._ezIdxCleanup !== 'function') node._ezIdxCleanup = () => {};
   }
+  if (_watch) return;
+  try { refreshIndex(); } catch (_) {}
   if (EZ_PERF.indexPollMs > 0) _watch = setInterval(() => { try { refreshIndex(); } catch (_) {} }, EZ_PERF.indexPollMs);
 }

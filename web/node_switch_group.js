@@ -65,7 +65,7 @@ const CSS = `
    平时隐藏、鼠标悬停才显形；展开态朝上、收起态朝下。 */
 .ezg-tri-row{display:flex;align-items:center;justify-content:center;height:12px;flex:0 0 auto;cursor:pointer;opacity:0;transition:opacity .15s;background:transparent;margin:-10px 0;}   /* 负 margin 吃掉 .ezg-root 的 10px gap：三角正好夹在两行中间、不占额外位置 */
 .ezg-tri-row.no-above{margin-top:0;}   /* 上面那行收起了：不要再往上顶，否则会和上一行叠在一起（会闪烁、点不中） */
-.ezg-tri-row:hover{opacity:1;background:var(--ez-surface-3);}
+.ezg-tri-row:hover{opacity:1;background:var(--ez-surface-3);}   /* 合并态也走这条：仍悬停才显形 */
 .ezg-tri-row i{display:block;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:6px solid var(--ez-border-strong);transition:transform .15s;}
 .ezg-hd.collapsed,.ezg-filters.collapsed{display:none;}
 `;
@@ -113,7 +113,8 @@ function discoverGroups(node) {
   const f = st.filters;
   // 以「这个 NSG 自己所在的图」为准：复制节点 / 在子图里操作时当前视图会变，不能用 getCurrentGraph 当基准。
   const own = (node && node.graph) || (app.canvas && app.canvas.getCurrentGraph && app.canvas.getCurrentGraph()) || app.graph;
-  let groups = allGraphGroups(own);
+  let groups = [];
+  try { groups = allGraphGroups(own) || []; } catch (_) { groups = []; }   // 子图结构异常/新前端 subgraphs 形状变了，也不能把画布重绘带崩
   if (!f.showAllGraphs) {
     groups = groups.filter((g) => (g.graph || own) === own);
   }
@@ -234,13 +235,60 @@ async function deletePresetFromLib(node) {
 
 // ===== 渲染 =====
 // 行的收起/展开：一条单独的三角行（放在要收起的那行下面），悬停才显形；状态存 config.filters
+// ★ 本节点有两组可收起行（预设行 hd + 匹配过滤行 filters），两条三角条挨在一起：
+//   全收起时两条「一模一样的空三角」会并排出现 → 分不清点哪条。和 PromptHelper 的折叠条一样做「合并」：
+//   两条都收起 → 只留最下面那条（matchTri），它变成「全部展开」（点一下把本节点两组折叠项都展开）；
+//   只要还有一组展开 → 两条照常显示、各管各的。
+function triBarsOf(root) {
+  if (!root || !root.querySelectorAll) return [];
+  return Array.prototype.slice.call(root.querySelectorAll('.ezg-tri-row'));
+}
+function syncTriGroup(root) {
+  if (!root) return;
+  const bars = triBarsOf(root);
+  if (bars.length < 2) return;
+  const allCollapsed = bars.every((b) => !!b._ezTriCollapsed);
+  if (!allCollapsed) {
+    bars.forEach((b) => { b.classList.remove('ezg-tri-merged'); b.style.display = ''; });
+    return;
+  }
+  bars.forEach((b, i) => {
+    const isLast = (i === bars.length - 1);
+    b.classList.toggle('ezg-tri-merged', isLast);
+    b.style.display = isLast ? '' : 'none';
+  });
+  bars[bars.length - 1].title = ezT('Expand all');
+}
 function triRow(node, getRow, key) {
   const bar = el('div', 'ezg-tri-row');
+  bar._ezTriKey = key;
+  bar._ezTriRow = getRow;
   bar.appendChild(el('i'));
-  bar.addEventListener('click', (e) => { e.stopPropagation(); const st = stateFor(node); st.filters[key] = !st.filters[key]; syncToConfig(node); applyTri(bar, getRow(), st.filters[key]); });
+  bar.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (bar.classList.contains('ezg-tri-merged')) { expandTriGroup(node); return; }
+    const st = stateFor(node); st.filters[key] = !st.filters[key];
+    syncToConfig(node);
+    applyTri(bar, getRow(), st.filters[key]);
+    syncTriGroup(bar.parentNode);
+  });
   return bar;
 }
+// 合并态：展开本节点所有折叠行（点最下面那条三角 = 全部展开）
+function expandTriGroup(node) {
+  const st = stateFor(node);
+  const root = (node && node._ezRoot) ? (node._ezRoot.querySelector ? (node._ezRoot.querySelector('.ezg-root') || node._ezRoot) : node._ezRoot) : null;
+  if (!root) return;
+  triBarsOf(root).forEach((b) => {
+    const k = b._ezTriKey; if (!k) return;
+    st.filters[k] = false;
+    applyTri(b, b._ezTriRow ? b._ezTriRow() : null, false);
+  });
+  syncToConfig(node);
+  syncTriGroup(root);
+}
 function applyTri(bar, row, collapsed) {
+  bar._ezTriCollapsed = !!collapsed;
   bar.classList.toggle('no-above', !!collapsed);   // 收起 = 上面那行不在了，三角不能再往上拉
   if (row) row.classList.toggle('collapsed', !!collapsed);
   const i = bar.querySelector('i'); if (i) i.style.transform = collapsed ? 'rotate(180deg)' : '';
@@ -268,6 +316,15 @@ function buildRoot(node) {
   const list = el('div', 'ezg-list');
 
   root.appendChild(hd); root.appendChild(presetTri); root.appendChild(filters); root.appendChild(matchTri); root.appendChild(list);
+  // 收起状态要能在 onConfigure（载入工作流）后重新贴回 DOM：buildRoot 只在建节点时跑一次，
+  // 而 configure 之后 st.filters 被 loadFromConfig 换掉、但 DOM 还是建时的样子 → 折叠保持不住。
+  node._ezApplyCollapse = () => {
+    const s = stateFor(node);
+    applyTri(presetTri, hd, s.filters.presetCollapsed);
+    applyTri(matchTri, filters, s.filters.matchCollapsed);
+    syncTriGroup(root);
+  };
+  syncTriGroup(root);   // 建节点时就按当前收起状态合并（载入的工作流可能本来就是「全收起」）
 
   async function render() {
     const st = stateFor(node);
@@ -483,10 +540,12 @@ function scheduleScan(node) {
   clearTimeout(node._ezScanTimer);
   const run = () => {
     node._ezScanAt = Date.now();
-    const st = stateFor(node);
-    const groups = discoverGroups(node);
-    const sig = sigOf(groups);
-    if (sig !== st._lastSig) { st._lastSig = sig; st._groups = groups; refreshRows(node); }
+    try {
+      const st = stateFor(node);
+      const groups = discoverGroups(node);
+      const sig = sigOf(groups);
+      if (sig !== st._lastSig) { st._lastSig = sig; st._groups = groups; refreshRows(node); }
+    } catch (e) { console.error('[NodeSwitchGroup] scan failed:', e); }
   };
   const gap = 400 - (Date.now() - (node._ezScanAt || 0));
   if (gap <= 0) { run(); return; }
@@ -497,7 +556,7 @@ function startAutoScan(node) {
   if (node._ezScanBound) return;
   node._ezScanBound = true;
   const prevDraw = node.onDrawForeground;
-  node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); scheduleScan(this); };
+  node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); try { scheduleScan(this); } catch (e) { console.error('[NodeSwitchGroup] scan failed:', e); } };
   scheduleOnRedraw(() => scheduleScan(node));
   onLocaleChange(() => { try { refreshUI(node); } catch (_) {} scheduleScan(node); });   // 语言切换即时重画
   if (EZ_PERF.groupPollMs > 0) node._ezScanIv = setInterval(() => scheduleScan(node), EZ_PERF.groupPollMs);
@@ -542,6 +601,8 @@ function hookPrototype(nt) {
     loadFromConfig(this);
     // 复制/载入：setupNode 可能先于 configure 跑（面板那时用的是默认 match），配置到位后要同步过滤器 DOM + 重扫行
     try { if (this._ezSyncFilters) this._ezSyncFilters(); } catch (_) {}
+    // 收起状态也要贴回 DOM（buildRoot 只在建节点时跑，configure 后 DOM 还是旧的）
+    try { if (this._ezApplyCollapse) this._ezApplyCollapse(); } catch (_) {}
     try { refreshUI(this); } catch (_) {}
     return r;
   };

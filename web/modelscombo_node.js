@@ -506,17 +506,26 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     Object.keys(FOLDER_BY_TYPE).forEach((type) => { if (!st.files[type] || !st.files[type].length) st.files[type] = []; });
   }
 
+  // 读一个模型文件夹的文件列表：先用 ComfyUI 内核的 /models/<folder>；它 404（旧版没这个路由、
+  // 或整合包只注册了 unet/clip 旧别名）时退回插件自己的 /models_combo/files —— 否则"下载了也读不到"。
+  async function fetchFolderList(fetcher, folder) {
+    try {
+      const res = await fetcher('/models/' + folder);
+      if (res && res.ok) { const list = await res.json(); if (Array.isArray(list)) return list; }
+    } catch (_) { /* 换兜底 */ }
+    try {
+      const res = await fetcher('/models_combo/files?folder=' + encodeURIComponent(folder));
+      if (res && res.ok) { const list = await res.json(); if (Array.isArray(list)) return list; }
+    } catch (_) { /* 忽略 */ }
+    return null;
+  }
+
   async function fetchFiles(node) {
     const st = stateFor(node);
     const fetcher = api && typeof api.fetchApi === 'function' ? (p) => api.fetchApi(p) : (p) => fetch(p);
     await Promise.all(Object.entries(FOLDER_BY_TYPE).map(async ([type, folder]) => {
-      try {
-        const res = await fetcher('/models/' + folder);
-        if (res && res.ok) {
-          const list = await res.json();
-          if (Array.isArray(list) && list.length) st.files[type] = list;
-        }
-      } catch (_) { /* 忽略 */ }
+      const list = await fetchFolderList(fetcher, folder);
+      if (list) st.files[type] = list;   // 空列表也要写：否则删完模型还留着旧列表
     }));
     render(node);
   }
@@ -529,11 +538,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const folder = FOLDER_BY_TYPE[type];
     try {
       const fetcher = api && typeof api.fetchApi === 'function' ? (p) => api.fetchApi(p) : (p) => fetch(p);
-      const res = await fetcher('/models/' + folder);
-      if (res && res.ok) {
-        const list = await res.json();
-        if (Array.isArray(list)) st.files[type] = list;
-      }
+      const list = await fetchFolderList(fetcher, folder);
+      if (list) st.files[type] = list;
     } catch (_) { /* 忽略 */ }
     return st.files;
   }
@@ -1950,9 +1956,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       const prevDraw = node.onDrawForeground;
       node.onDrawForeground = function (ctx) {
         if (prevDraw) prevDraw.call(this, ctx);
-        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）
+        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）；
+        // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍
         update();
-        pumpFrames();
       };
       scheduleOnRedraw(update);
       onLocaleChange(() => { try { render(node); } catch (_) {} update(); });   // 语言切换即时重画
@@ -2116,6 +2122,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
           if (node.graph) node.graph.setDirtyCanvas(true, true);
         }
       }, 250);
+      node._mcSettleIv = settleIv;   // 节点被删时 cleanupMcNode 要能停掉它
       let retry = 0;
       (function retryOverlay() {
         applySocketOverlayLayout(node);
@@ -2163,6 +2170,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
 
   // 节点删除时清理：停掉 rAF + 移除外部黑框标签 + 移除 DOM 面板
   function cleanupMcNode(node) {
+    try { clearInterval(node._mcSettleIv); } catch (_) { /* 忽略 */ }
     (node._mcOutEls || []).forEach((el) => { try { el.remove(); } catch (_) { /* 忽略 */ } });
     node._mcOutEls = [];
     try { if (node._mcRoot) node._mcRoot.remove(); } catch (_) { /* 忽略 */ }

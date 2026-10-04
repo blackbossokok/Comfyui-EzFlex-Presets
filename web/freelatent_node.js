@@ -686,9 +686,9 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       const prevDraw = node.onDrawForeground;
       node.onDrawForeground = function (ctx) {
         if (prevDraw) prevDraw.call(this, ctx);
-        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）
+        // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）；
+        // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍
         update();
-        pumpFrames();
       };
       scheduleOnRedraw(update);
       onLocaleChange(update);

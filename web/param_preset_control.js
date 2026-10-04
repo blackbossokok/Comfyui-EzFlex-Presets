@@ -10,7 +10,7 @@ import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig,
-  loadPresets, savePreset, deletePreset, uiPrompt, uiConfirm, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels,
+  loadPresets, savePreset, deletePreset, uiPrompt, uiConfirm, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText, ezPruneDanglingLinks,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.PARAM_CTRL;
@@ -564,7 +564,7 @@ function updatePorts(node, noRedraw) {
     if (sock._ezGroupId !== w.id) { sock._ezGroupId = w.id; changed = true; }
     if (sock.name !== w.name) { sock.name = w.name; changed = true; }
     if (sock.type !== w.type) { try { sock.type = w.type; } catch (_) {} changed = true; }
-    try { sock.label = ''; } catch (_) {} // 只露圆点，不显示 socket 文字
+    try { hideNativeSlotText(sock); } catch (_) {} // 只露圆点，不显示自带 socket 文字
     sock.hideName = true;
     sock.hidden = false;
     // 输出端口圆点：输出多个生效参数=红，仅输出一个=灰
@@ -573,6 +573,7 @@ function updatePorts(node, noRedraw) {
     seq.push(sock);
   });
   // 删除未被复用的旧 socket（含 _ezGroupId 不在 want 的；其连线随 removeOutput 一并清掉）
+  ezPruneDanglingLinks(node);   // 先拆坏线（target_slot 越界），否则 removeOutput 会踩空槽崩掉
   old.forEach((o, i) => {
     if (!used.has(i)) {
       const idx = node.outputs.indexOf(o);

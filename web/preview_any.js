@@ -5,10 +5,11 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { ezT, onLocaleChange, ezRelabel } from "./ezflex_i18n.js";
+import { openEzListPreview } from "./ezflex_listview.js";
 import { ezThemeInit } from "./ezflex_theme.js";
 import {
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
-  configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels,
+  configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText, ezPushModal, ezPopModal, ezIsTopModal, makeAudioPlayer, ezPruneDanglingLinks,
 } from "./ezflex_service.js";
 
 const NODE = NODE_TYPES.PREVIEW_ANY;
@@ -47,6 +48,16 @@ const CSS = `
 .ezpv-prev.img .ezpv-badge{position:absolute;top:5px;right:5px;}
 .ezpv-prev.img .ezpv-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:30px;height:30px;border-radius:50%;background:var(--ez-strong);color:var(--ez-on-strong);font-size:14px;display:flex;align-items:center;justify-content:center;padding-left:2px;}
 .ezpv-prev .ph{color:var(--ez-fg-muted);font-family:Inter,sans-serif;font-style:italic;}
+.ezpv-lmain{position:relative;display:flex;align-items:center;justify-content:center;width:100%;height:100%;}
+.ezpv-lmain img{max-width:100%;max-height:100%;border-radius:8px;display:block;}
+.ezpv-prev.audio{display:flex;align-items:center;justify-content:center;padding:6px 10px;background:var(--ez-surface-3);cursor:pointer;}
+.ezpv-prev.audio .ez-ap{width:100%;max-width:320px;padding:2px 8px;gap:6px;border-radius:6px;min-height:0;}
+.ezpv-prev.audio .ez-ap-track{height:4px;}
+.ezpv-prev.audio .ez-ap-time{font-size:10px;}
+.ezpv-prev.d3{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:8px;background:var(--ez-surface-3);cursor:pointer;}
+.ezpv-prev.d3 .ezpv-d3ic{font-size:32px;line-height:1;color:var(--ez-fg-muted);}
+.ezpv-prev.d3 .ezpv-d3btn{background:var(--ez-strong);border:1px solid var(--ez-strong);color:var(--ez-on-strong);border-radius:9px;padding:5px 13px;font-size:12px;cursor:pointer;font-family:inherit;}
+.ezpv-prev.d3 .ezpv-d3btn:hover{filter:brightness(1.06);}
 .ezpv-empty{color:var(--ez-fg-muted);font-size:12px;text-align:center;padding:14px;}
 .ezpv-ph{height:0;border-top:3px solid var(--ez-fg-3);border-radius:2px;margin:1px 0;opacity:.9;box-shadow:0 1px 6px rgba(43,58,74,.35);}
 .ezpv-ph.hidden{display:none;}
@@ -134,7 +145,7 @@ function bindOutsideClose(popup, closeFn) {
 
 // ===== 状态 / 配置 =====
 function stateFor(node) {
-  if (!node._ezPrev) node._ezPrev = { save: false, savePath: '', saveFormats: {}, batchModes: {}, entries: [] };
+  if (!node._ezPrev) node._ezPrev = { save: false, savePath: '', saveFormats: {}, batchMode: 'auto', previewMode: 'normal', entries: [] };
   return node._ezPrev;
 }
 function loadFromConfig(node) {
@@ -143,12 +154,13 @@ function loadFromConfig(node) {
   st.save = !!cfg.save;
   st.savePath = typeof cfg.savePath === 'string' ? cfg.savePath : '';
   st.saveFormats = (cfg.saveFormats && typeof cfg.saveFormats === 'object') ? cfg.saveFormats : {};
-  st.batchModes = (cfg.batchModes && typeof cfg.batchModes === 'object') ? cfg.batchModes : {};
+  st.batchMode = ['auto', 'images', 'video', 'animation'].indexOf(cfg.batchMode) >= 0 ? cfg.batchMode : 'auto';
+  st.previewMode = cfg.previewMode === 'list' ? 'list' : 'normal';   // 默认「普通」：只有显式存过 list 才用列表模式
   st.dirty = false;
 }
 function syncToConfig(node) {
   const st = stateFor(node);
-  writeConfig(node, { save: st.save, savePath: st.savePath, saveFormats: st.saveFormats, batchModes: st.batchModes || {} });
+  writeConfig(node, { save: st.save, savePath: st.savePath, saveFormats: st.saveFormats, batchMode: st.batchMode || 'auto', previewMode: st.previewMode || 'normal' });
 }
 
 // ===== socket：动态「连一个加一个」= 已连接输入前置 + 末尾 1 个空槽；输出与卡片 1:1。
@@ -199,13 +211,14 @@ function syncSockets(node) {
     if (node.graph) node.graph.setDirtyCanvas(true, true);
   }
   while (node.inputs.length < desiredIn) { node.addInput(`input_${node.inputs.length + 1}`, '*'); if (node.graph) node.graph.setDirtyCanvas(true, true); }
-  node.inputs.forEach((i, idx) => { try { i.name = `input_${idx + 1}`; i.label = ''; i.hideName = true; i.hidden = false; } catch (_) {} });
+  node.inputs.forEach((i, idx) => { try { i.name = `input_${idx + 1}`; hideNativeSlotText(i); i.hidden = false; } catch (_) {} });
 
   // ---- 输出：与已连接卡片 1:1，且跟着对应卡片走（处理中间断开后卡片的输出仍跟卡） ----
   // 由“链接卡片的原输入下标”回溯它配对的输出 socket，按卡片顺序重组；未配对的旧输出用 removeOutput 连 line 一起清掉。
   const cardOutputs = linkedInputs.map((inp) => origOutputs[origInputs.indexOf(inp)]).filter(Boolean);
   const newOuts = cardOutputs.slice(0, conn);
   const wantOut = new Set(newOuts);
+  ezPruneDanglingLinks(node);   // 先拆坏线（target_slot 越界），否则 removeOutput 会踩空槽崩掉
   for (let i = node.outputs.length - 1; i >= 0; i--) {
     if (!wantOut.has(node.outputs[i])) { node.removeOutput(i); if (node.graph) node.graph.setDirtyCanvas(true, true); }
   }
@@ -214,7 +227,7 @@ function syncSockets(node) {
     if (node.graph) node.graph.setDirtyCanvas(true, true);
   }
   while (node.outputs.length < conn) { node.addOutput(`output_${node.outputs.length + 1}`, '*'); if (node.graph) node.graph.setDirtyCanvas(true, true); }
-  node.outputs.forEach((o, idx) => { try { o.name = `output_${idx + 1}`; o.label = ''; o.hideName = true; o.hidden = false; } catch (_) {} });
+  node.outputs.forEach((o, idx) => { try { o.name = `output_${idx + 1}`; hideNativeSlotText(o); o.hidden = false; } catch (_) {} });
 
   // ---- 回写 slot（链路已就绪，链接对象在）----
   node.inputs.forEach((i, idx) => { if (i.link != null && node.graph && node.graph.links && node.graph.links[i.link]) { try { node.graph.links[i.link].target_slot = idx; } catch (_) {} } });
@@ -487,14 +500,15 @@ function mediaEl() {
     });
     showImage();
   };
-  window.addEventListener('keydown', (e) => {
+  document.addEventListener('keydown', (e) => {
     if (!_media.classList.contains('active') || !_imgs || _imgs.length < 2) return;
+    if (!_mediaTok || !ezIsTopModal(_mediaTok)) return;   // 上面还有弹窗时不动
     const ae = document.activeElement;
     if (ae && (ae.tagName === 'VIDEO' || ae.tagName === 'AUDIO')) return;
-    if (e.key === 'ArrowLeft') { e.preventDefault(); _media._imgPrev(); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); _media._imgNext(); }
-  });
-  const closeMedia = () => { pauseMedia(); resetZoom(); _media.classList.remove('active'); };
+    if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopImmediatePropagation(); _media._imgPrev(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopImmediatePropagation(); _media._imgNext(); }
+  }, true);   // 捕获阶段：先于画布的左右键处理，翻批次图时底下画布不动
+  const closeMedia = () => { pauseMedia(); resetZoom(); _media.classList.remove('active'); if (_mediaTok) { ezPopModal(_mediaTok); _mediaTok = null; } };
   closeBtn.addEventListener('click', closeMedia);
   attachFullscreen(_media, closeMedia, pauseMedia, closeBtn);
   bindOutsideClose(_media, () => { if (_media.classList.contains('active')) closeMedia(); });
@@ -518,6 +532,7 @@ function openMediaPreview(payload) {
   try { ezRelabel(m); } catch (_) {}   // meta 摘要同样是英文源串
   if (m._resetZoom) m._resetZoom();
   m.classList.add('active');
+  _mediaTok = ezPushModal({});
 }
 
 function ext3d(url) {
@@ -528,6 +543,7 @@ function ext3d(url) {
     return m ? m[1] : '';
   } catch (_) { return ''; }
 }
+let _mediaTok = null;
 let _threeModal = null;
 function open3DViewer(url, title) {
   if (_threeModal && _threeModal.parentNode) _threeModal.remove();
@@ -939,6 +955,13 @@ function open3DViewer(url, title) {
   })();
 }
 
+// 「生成信息」角标：卡片和列表弹窗主区共用
+function genInfoBadge(entry) {
+  const g = el('span', 'ezpv-gen'); g.textContent = ezT('Generation info');
+  g.style.cssText = 'position:absolute;top:4px;right:4px;z-index:5;background:var(--ez-surface);border:1px solid var(--ez-border);border-radius:7px;padding:1px 7px;font-size:10px;cursor:pointer;color:var(--ez-info-fg);box-shadow:0 1px 3px rgba(0,0,0,.12);';
+  g.addEventListener('click', (e) => { e.stopPropagation(); try { openKeyValueModal((entry.caption || '') + ezT(' Generation info'), JSON.parse(entry.gen_meta)); } catch (_) { openTextModal((entry.caption || '') + ezT(' Generation info'), entry.gen_meta); } });
+  return g;
+}
 function renderPreview(entry) {
   if (!entry) {
     const box = el('div', 'ezpv-prev'); return box;
@@ -946,10 +969,18 @@ function renderPreview(entry) {
   const val = entry.value || '';
   const full = entry.full_value || val;
   const type = (entry.type || '').toUpperCase();
-  if (entry.audio || entry.audio_src) {
-    const box = el('div', 'ezpv-prev'); const ph = el('span', 'ph'); ph.textContent = val || ezT('Audio'); box.appendChild(ph);
-    box.title = ezT('Click to play audio');
-    box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ audio: entry.audio, audio_src: entry.audio_src, caption: (entry.caption || '') + '  ' + val }); });
+  if (entry.audio || entry.audio_src) {   // 卡片上直接给播放控件（以前是一行占位字，还得再点开）
+    const box = el('div', 'ezpv-prev audio');
+    const ap = makeAudioPlayer(entry.audio_src || entry.audio || '');
+    ap.style.cssText = 'width:100%;';
+    box.appendChild(ap);
+    box.title = ((entry.caption || '') + '  ' + val).trim();
+    // 控件左右收窄、上下居中，两边留灰：点灰边（不是播放控件）开大预览弹窗；列表卡片整块由 list 的捕获点击先接管
+    box.addEventListener('click', (e) => {
+      if (e.target && e.target.closest && e.target.closest('.ez-ap')) return;
+      e.stopPropagation();
+      openMediaPreview({ audio: entry.audio, audio_src: entry.audio_src, caption: ((entry.caption || '') + '  ' + val).trim() });
+    });
     return box;
   }
   if (entry.video || entry.video_src) {
@@ -971,20 +1002,25 @@ function renderPreview(entry) {
       const b = el('span', 'ezpv-badge'); b.textContent = imgs.length + ezT(entry.batch_kind === 'frames' ? ' frames' : ' images');
       b.style.left = '5px'; b.style.right = 'auto'; box.appendChild(b);
     }
-    if (entry.gen_meta) {
-      const g = el('span', 'ezpv-gen'); g.textContent = ezT('Generation info');
-      g.style.cssText = 'position:absolute;top:4px;right:4px;z-index:5;background:var(--ez-surface);border:1px solid var(--ez-border);border-radius:7px;padding:1px 7px;font-size:10px;cursor:pointer;color:var(--ez-info-fg);box-shadow:0 1px 3px rgba(0,0,0,.12);';
-      g.addEventListener('click', (e) => { e.stopPropagation(); try { openKeyValueModal((entry.caption || '') + ezT(' Generation info'), JSON.parse(entry.gen_meta)); } catch (_) { openTextModal((entry.caption || '') + ezT(' Generation info'), entry.gen_meta); } });
-      box.appendChild(g);
-    }
+    if (entry.gen_meta) box.appendChild(genInfoBadge(entry));
     box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ images: imgs, batch_total: entry.batch_total, image: img.src, image_src: entry.image_src, caption: (entry.caption || '') + '  ' + val, meta: entry.meta, frames: entry.frames, type }); });
     return box;
   }
   if (type === 'MODEL_3D' || type === 'FILE_3D' || type === 'MESH') {   // MESH：顶点/面张量已在后端导成临时 OBJ
-    const box = el('div', 'ezpv-prev long');
-    box.textContent = val;
+    if (!entry.model3d) {   // 没导出 url 才退回文字（正常都有）
+      const box = el('div', 'ezpv-prev long');
+      box.textContent = val;
+      return box;
+    }
+    // 和 MediaLoader 同款：卡片 = 3D 图标 + 「打开 3D 查看器」，摘要文字挪进查看器标题
+    const box = el('div', 'ezpv-prev d3');
+    const open = () => open3DViewer(entry.model3d, ((entry.caption || '') + '  ' + val).trim());
+    const ic = el('div', 'ezpv-d3ic'); ic.textContent = '🧊'; box.appendChild(ic);
+    const btn = el('button', 'ezpv-d3btn', { type: 'button' }); btn.textContent = ezT('Open 3D viewer');
+    btn.addEventListener('click', (e) => { e.stopPropagation(); open(); });
+    box.appendChild(btn);
     box.title = ezT('Click to open the 3D viewer (drag to rotate, wheel to zoom)');
-    box.addEventListener('click', (e) => { e.stopPropagation(); if (entry.model3d) open3DViewer(entry.model3d, (entry.caption || '') + '  ' + val); });
+    box.addEventListener('click', (e) => { e.stopPropagation(); open(); });
     return box;
   }
   if (entry.meta || type === 'MODEL' || type === 'CLIP' || type === 'VAE') {
@@ -1022,45 +1058,116 @@ function renderEntries(node) {
   const conn = linked.length;
   list.innerHTML = '';
   if (!conn) { list.appendChild(el('div', 'ezpv-empty')).textContent = ezT('Drag a wire from an input port on the left to auto-create preview cards'); return; }
-  for (let i = 0; i < conn; i++) list.appendChild(renderCard(node, i, (st.entries || [])[i], linked[i]));
+  const ents = st.entries || [];
+  // 后端每个已连输入口发一条 entry（带 input = 端口名），按端口名对位；老后端没有 input 字段时才退回按下标取。
+  const legacy = !ents.some((e) => e && e.input);
+  for (let i = 0; i < conn; i++) {
+    const inp = linked[i];
+    const key = inp && inp.name;
+    const own = key ? ents.filter((e) => e && e.input === key) : [];   // 该端口的全部条目（循环多轮 / 列表广播都会有多条）
+    const entry = own.length ? own[0] : (legacy ? (ents[i] || null) : null);   // 卡片主图固定显示第 1 条（对齐内置 imageIndex=0）；全部条目点开列表看
+    list.appendChild(renderCard(node, i, entry, inp));
+  }
   attachDnD(list, '.ezpv-card', '.ezpv-handle', (from, to) => reorderCard(node, from, to));
   fitNode(node);
   try { ezRelabel(root); } catch (_) {}   // 后端返回的是英文源串，按当前语言就地译一次（切语言时各面板重画后再走这里）
 }
-
+function entriesOfInput(node, input, entry) {
+  const key = (entry && entry.input) || (input && input.name) || '';
+  if (!key) return entry ? [entry] : [];
+  return (stateFor(node).entries || []).filter((e) => e && e.input === key);
+}
+// 本节点没声明 INPUT_IS_LIST，ComfyUI 会对 list 输入逐项广播执行（每次一条 ui），前端再把多次 ui
+// 合成一个数组 —— 同一端口的 entry 会重复 N 遍，连没接 list 的口也跟着重复。这里按「端口 + 内容签名」
+// 收敛：内容一样的重复项只留一条，内容不同的才是真列表项（不用改输入类型就能判断出这是广播重复）。
+// 一次性临时件（每次执行都重新随机命名，内容再一样 URL 也变）：不参与签名，否则 list 广播产生的
+// 同值重复项永远收敛不掉 —— 一张图会被撑成 N 份（图/蒙版/内存音频都走这条路）。
+const SIG_TMP = /ezpv_(img|mask|audio)_[0-9a-f]{32}/g;
+function sigUrl(u) { return String(u || '').replace(SIG_TMP, 'ezpv_$1_*'); }
+function entrySig(e) {
+  if (!e) return '';
+  return [e.type, e.value, e.full_value, e.preview, e.audio, sigUrl(e.audio_src), sigUrl(e.video), sigUrl(e.video_src),
+    sigUrl(e.image_src), sigUrl(e.model3d), (e.images || []).length, e.frames || 0, e.batch_total || 0].join('|');
+}
+function collapseEntries(entries) {
+  const out = []; const seen = {};
+  (entries || []).forEach((e) => {
+    if (!e) return;
+    const key = String(e.input || '') + '#' + entrySig(e);
+    if (seen[key]) return;
+    seen[key] = 1;
+    out.push(e);
+  });
+  return out;
+}
+function listThumb(e) {
+  const th = el('div'); th.style.cssText = 'position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;background:var(--ez-surface-3);display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--ez-fg-muted);cursor:pointer;flex:0 0 auto;border:2px solid transparent;box-sizing:border-box;';
+  if (e && e.preview) { const im = el('img'); im.src = 'data:image/png;base64,' + e.preview; im.style.cssText = 'width:100%;height:100%;object-fit:cover;'; th.appendChild(im); }
+  else th.textContent = ({ IMAGE: '🖼', VIDEO: '🎬', AUDIO: '🎵', MODEL_3D: '🧊', FILE_3D: '🧊' })[String((e && e.type) || '').toUpperCase()] || '📄';
+  return th;
+}
+// 列表弹窗主区：能直接播的直接放（图/视/音都和 MediaLoader 一样一眼就是媒体），
+// 只有「拼好的图片张量」和「3D 模型」保留卡片（前者点开看整批、后者点「打开 3D 查看器」）。
+function listMainItem(e) {
+  if (e && (e.audio || e.audio_src)) {   // 列表弹窗里的音频就地给播放器，不再套一层弹窗（和 MediaLoader 一样）
+    const wrap = el('div', 'ezpv-lmain');
+    wrap.style.cssText = 'width:100%;padding:0 44px;box-sizing:border-box;';   // 左右让开悬停翻页箭头
+    const ap = makeAudioPlayer(e.audio_src || e.audio || '');
+    ap.style.cssText = 'width:100%;max-width:520px;';
+    wrap.appendChild(ap);
+    return wrap;
+  }
+  if (e && (e.video || e.video_src)) {
+    const v = el('video'); v.controls = true; v.src = e.video || e.video_src;
+    v.style.cssText = 'max-width:100%;max-height:100%;border-radius:8px;background:#000;';
+    if (e.preview) v.poster = 'data:image/png;base64,' + e.preview;
+    return v;
+  }
+  if (e && e.preview && ((e.images || []).length <= 1)) {   // 单图直接铺在主区（批次图仍是卡片：点开看整批）
+    const wrap = el('div', 'ezpv-lmain');
+    const img = el('img'); img.src = 'data:image/png;base64,' + e.preview; img.alt = e.value || '';
+    wrap.appendChild(img);
+    if (e.gen_meta) wrap.appendChild(genInfoBadge(e));
+    return wrap;
+  }
+  return renderPreview(e);
+}
+function openListPreview(entries, caption) {
+  if (!entries || !entries.length) return;
+  openEzListPreview({
+    title: caption || ezT('List'),
+    items: entries,
+    renderItem: (e) => listMainItem(e),
+    thumb: (e) => listThumb(e),
+    footer: (e) => [e && e.caption, e && e.value, e && e.type].filter(Boolean).join('   '),
+  });
+}
 function renderCard(node, index, entry, input) {
   const row = el('div', 'ezpv-card');
   const handle = el('span', 'ezpv-handle'); handle.textContent = '⠿';
   const body = el('div', 'ezpv-body');
   const crow = el('div', 'ezpv-crow');
-  const name = el('span', 'ezpv-cname'); name.textContent = (entry && entry.caption) || `${ezT('Input')} ${index + 1}`;
-  const badge = el('span', 'ezpv-badge'); badge.textContent = (entry && entry.type) || 'ANY';
+  // 只算「自己这个输入端口」的条目：以前按全局下标兜底，一个列表项的条目会铺到所有卡上（连数量一起变成最大值）
+  const listMode = (stateFor(node).previewMode || 'normal') === 'list';   // 全局的「卡片视图」设置；默认「普通」（列表模式收敛重复项，看着不像真实输出）
+  const grp = listMode ? collapseEntries(entriesOfInput(node, input, entry)) : entriesOfInput(node, input, entry);   // 列表模式：收敛广播重复；普通模式：原样收，重复项也留着
+  const isList = grp.length > 1;
+  const name = el('span', 'ezpv-cname');
+  name.textContent = ((entry && entry.caption) || (ezT('Input') + ' ' + (index + 1))) + (isList ? (' (' + grp.length + ')') : '');
+  // 列表/普通模式 + 多图保存类型都挪到「保存选项」弹窗里了（卡片上只留名字/角标/打开位置）
+  const badge = el('span', 'ezpv-badge'); badge.textContent = isList ? 'LIST' : ((entry && entry.type) || 'ANY');
   const fldr = el('button', 'ezpv-fldr'); fldr.title = ezT('Open the save location and select the file');
   fldr.innerHTML = '<svg width="14" height="12" viewBox="0 0 24 20" fill="currentColor"><path d="M2 3h7l2 2h11v12H2z"/></svg>';
   fldr.addEventListener('click', () => { if (entry && entry.saved_path) openSavedFile(entry.saved_path); });
-  crow.appendChild(name); crow.appendChild(badge);
-  // 「多图」存档方式：和 ANY 同一行，夹在它和「打开位置」之间。按输入名存在节点 config 里。
-  // 没跑过时不知道类型，也在卡片上给出来（先配好再跑）；跑过以后只在 IMAGE 卡片上显示。
-  if (!entry || entry.type === 'IMAGE') {
-    const st = stateFor(node);
-    const key = (entry && entry.input) || (input && input.name) || String(index);
-    const msel = el('select'); msel.title = ezT('Multi-image save type'); msel.style.cssText = 'flex:0 1 auto;max-width:92px;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:100px;padding:0 6px;height:16px;font-size:10px;font-family:inherit;color:var(--ez-fg);';
-    [['auto', ezT('Auto')], ['images', ezT('Image sequence')], ['video', ezT('Video')], ['animation', ezT('Animated')]].forEach(([v, t]) => {
-      const o = document.createElement('option'); o.value = v; o.textContent = t; msel.appendChild(o);
-    });
-    msel.value = (st.batchModes && st.batchModes[key]) || 'auto';
-    msel.addEventListener('change', () => { if (!st.batchModes) st.batchModes = {}; st.batchModes[key] = msel.value; syncToConfig(node); });
-    crow.appendChild(msel);
-  }
-  crow.appendChild(fldr);
+  crow.appendChild(name); crow.appendChild(badge); crow.appendChild(fldr);
   body.appendChild(crow);
   const prev = renderPreview(entry);
-  if (prev) body.appendChild(prev);
+  if (prev) {
+    if (isList) prev.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); openListPreview(grp, (entry && entry.caption) || ''); }, true);
+    body.appendChild(prev);
+  }
   row.appendChild(handle); row.appendChild(body);
   return row;
 }
-
-// ===== 文件系统 =====
 function openSavedFile(path) {
   fetchApi('/preview_any/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) }).catch(() => {});
 }
@@ -1075,25 +1182,28 @@ function formatModalEl() {
   _fmtModal = document.createElement('div');
   _fmtModal.style.cssText = 'position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99999;background:rgba(0,0,0,.35);';
   const box = document.createElement('div');
-  box.style.cssText = 'background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:92%;max-width:420px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
+  box.style.cssText = 'background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:92%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
-  const title = document.createElement('b'); title.textContent = ezT('Save types');
+  const title = document.createElement('b'); title.textContent = ezT('Save options');
   const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const fields = document.createElement('div'); fields.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto;';
-  const opts = { image: ['', 'png', 'jpeg', 'webp', 'bmp', 'tiff'], audio: ['', 'wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac'], video: ['', 'mp4', 'webm', 'mov', 'gif', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'], model3d: ['', 'glb', 'gltf', 'obj', 'fbx'] };
-  const labels = { image: ezT('Image'), audio: ezT('Audio'), video: ezT('Video'), text: ezT('Text'), model3d: ezT('3D model') };
-  // 只有有损格式才显示「质量 / 码率」：png/bmp/tiff 无损、wav/flac 无损（码率由内容决定）、gif 没有 CRF。
-  // 音频不再单独选编码器 —— 后端按容器自己映射（选 mp3 就是 libmp3lame，原先那个 Encoder 是多余的。
+  // 图片只列静态图格式；动图独立成一项（对齐内置 SaveAnimatedWEBP/PNG：格式 + 帧率 + 无损 + 质量，
+  // 无损是勾选框不是 Yes/No 下拉）。gif 不作为「视频」容器：真视频→gif 要抽帧，后端不做。
+  const opts = { image: ['', 'png', 'jpeg', 'webp', 'bmp', 'tiff'], animated: ['webp', 'png', 'gif'], audio: ['', 'wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac', 'opus'], video: ['', 'mp4', 'webm', 'mov', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'], model3d: [''] };
+  const labels = { image: ezT('Image'), animated: ezT('Animated'), audio: ezT('Audio'), video: ezT('Video'), text: ezT('Text'), model3d: ezT('3D model') };
+  // 只有有损格式才显示「质量」：png/bmp/tiff 无损、wav/flac 无损（码率由内容决定）。
+  // 数值参数一律可手输（number + 常用值 datalist），枚举才用下拉
   const subDefs = {
-    image: [
-      { key: 'animfmt', label: ezT('Animated format'), values: ['webp', 'png', 'gif'] },
-      { key: 'afps', label: ezT('Frame rate'), values: ['', '6', '12', '24', '30'] },
-      { key: 'alossless', label: ezT('Lossless'), values: ['', 'no'], labels: { '': ezT('Yes'), no: ezT('No') } },
-      { key: 'quality', label: ezT('Quality'), values: ['90', '95', '100'], when: (f) => f === 'jpeg' || f === 'webp' },
+    image: [{ key: 'quality', label: ezT('Quality'), number: { min: 1, max: 100, step: 1, presets: ['90', '95', '100'] }, when: (f) => f === 'jpeg' || f === 'webp' }],
+    animated: [
+      { key: 'afps', label: ezT('Frame rate'), number: { min: 0.01, max: 1000, step: 0.01, presets: ['6', '12', '24', '30'] } },
+      { key: 'alossless', label: ezT('Lossless'), check: true },
+      { key: 'quality', label: ezT('Quality'), number: { min: 1, max: 100, step: 1, presets: ['80', '90', '95', '100'] }, when: (f) => f === 'webp' },
+      { key: 'method', label: ezT('Compression'), values: ['', 'fastest', 'default', 'slowest'], when: (f) => f === 'webp' },
     ],
-    audio: [{ key: 'bitrate', label: ezT('Bitrate'), values: ['128k', '192k', '320k'], when: (f) => f !== 'wav' && f !== 'flac' }, { key: 'sr', label: ezT('Sample rate (Hz)'), values: ['', '44100', '48000', '22050'] }],
-    video: [{ key: 'codec', label: ezT('Encoder'), values: ['', 'h264', 'vp9', 'av1'], when: (f) => f !== 'gif' }, { key: 'crf', label: ezT('Quality CRF'), values: ['', '18', '23', '28'], when: (f) => f !== 'gif' }, { key: 'fps', label: ezT('Frame rate'), values: ['', '24', '30'] }],
+    audio: [{ key: 'bitrate', label: ezT('Bitrate (kbps)'), number: { min: 8, max: 512, step: 1, presets: ['128', '192', '320'] }, when: (f) => f !== 'wav' && f !== 'flac' }, { key: 'sr', label: ezT('Sample rate (Hz)'), number: { min: 0, max: 384000, step: 1, presets: ['22050', '44100', '48000'] } }],
+    video: [{ key: 'codec', label: ezT('Encoder'), values: ['', 'h264', 'vp9', 'av1'] }, { key: 'crf', label: ezT('Quality CRF'), number: { min: 0, max: 51, step: 1, presets: ['18', '23', '28'] } }, { key: 'fps', label: ezT('Frame rate'), number: { min: 0.01, max: 240, step: 0.01, presets: ['24', '30', '60'] } }],
     text: [], model3d: []
   };
   const selects = {}; const subSelects = {}; const subRows = [];
@@ -1110,8 +1220,23 @@ function formatModalEl() {
     (subDefs[cat] || []).forEach((sd) => {
       const srow = document.createElement('div'); srow.style.cssText = 'display:flex;align-items:center;gap:8px;';
       const sl = document.createElement('span'); sl.textContent = sd.label; sl.style.cssText = 'flex:0 0 62px;font-size:11px;color:var(--ez-fg-3);';
-      const ss = document.createElement('select'); ss.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:3px 8px;font-size:11px;font-family:inherit;';
-      sd.values.forEach((v) => { const o = document.createElement('option'); o.value = v; o.textContent = (sd.labels && sd.labels[v]) || v || ezT('Keep original'); ss.appendChild(o); });
+      let ss;
+      if (sd.check) {
+        ss = document.createElement('input'); ss.type = 'checkbox'; ss.checked = true;
+        ss.style.cssText = 'width:14px;height:14px;accent-color:var(--ez-strong);cursor:pointer;margin:0;flex:0 0 auto;';
+      } else if (sd.number) {
+        ss = document.createElement('input'); ss.type = 'number';
+        ss.min = String(sd.number.min); ss.max = String(sd.number.max); ss.step = String(sd.number.step);
+        ss.style.cssText = 'flex:1 1 auto;min-width:0;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:3px 8px;font-size:11px;font-family:inherit;color:var(--ez-fg);';
+        if (sd.number.presets && sd.number.presets.length) {
+          const dl = document.createElement('datalist'); dl.id = 'ezpv-dl-' + cat + '-' + sd.key;
+          sd.number.presets.forEach((v) => { const o = document.createElement('option'); o.value = v; dl.appendChild(o); });
+          ss.setAttribute('list', dl.id); sub.appendChild(dl);
+        }
+      } else {
+        ss = document.createElement('select'); ss.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:3px 8px;font-size:11px;font-family:inherit;';
+        sd.values.forEach((v) => { const o = document.createElement('option'); o.value = v; o.textContent = (sd.labels && sd.labels[v]) || v || ezT('Keep original'); ss.appendChild(o); });
+      }
       if (sd.when) { srow._when = sd.when; subRows.push({ cat: cat, row: srow, when: sd.when }); }
       srow.appendChild(sl); srow.appendChild(ss); sub.appendChild(srow);
       subSelects[cat + '.' + sd.key] = ss;
@@ -1121,24 +1246,41 @@ function formatModalEl() {
     fields.appendChild(wrap);
     selects[cat] = sel;
   });
-  const subVals = (cat) => { const o = {}; (subDefs[cat] || []).forEach((sd) => { const ss = subSelects[cat + '.' + sd.key]; if (ss) o[sd.key] = ss.value; }); return o; };
+  const subVals = (cat) => { const o = {}; (subDefs[cat] || []).forEach((sd) => { const ss = subSelects[cat + '.' + sd.key]; if (ss) o[sd.key] = sd.check ? !!ss.checked : ss.value; }); return o; };
   const applySubs = () => { subRows.forEach((g) => { g.row.style.display = (!g.when || g.when(selects[g.cat].value, subVals(g.cat))) ? 'flex' : 'none'; }); };
   Object.keys(selects).forEach((cat) => selects[cat].addEventListener('change', applySubs));
   Object.keys(subSelects).forEach((k) => subSelects[k].addEventListener('change', applySubs));
   applySubs();
   // 文件名模板（%year% %month% %day% %hour% %minute% %second%），空 = 用卡片名
   const nameRow = document.createElement('div'); nameRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
-  const nameLab = document.createElement('span'); nameLab.textContent = ezT('File name'); nameLab.style.cssText = 'flex:0 0 62px;font-size:11px;color:var(--ez-fg-3);';
-  const nameInput = document.createElement('input'); nameInput.type = 'text'; nameInput.placeholder = '%year% %month% %day% ...';
+  const nameLab = document.createElement('span'); nameLab.textContent = ezT('File name prefix'); nameLab.style.cssText = 'flex:0 0 96px;font-size:12px;color:var(--ez-fg);';
+  const nameInput = document.createElement('input'); nameInput.type = 'text';
   nameInput.style.cssText = 'flex:1 1 auto;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:4px 8px;font-size:11px;font-family:inherit;';
   nameRow.appendChild(nameLab); nameRow.appendChild(nameInput);
   const ft = document.createElement('div'); ft.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;border-top:1px solid var(--ez-border-2);padding-top:10px;';
   const save = document.createElement('button'); save.textContent = ezT('OK'); save.style.cssText = 'background:var(--ez-strong);color:var(--ez-on-strong);border:1px solid var(--ez-strong);border-radius:9px;padding:4px 12px;font-size:12px;cursor:pointer;font-family:inherit;';
   ft.appendChild(save);
-  box.appendChild(hd); box.appendChild(fields); box.appendChild(nameRow); box.appendChild(ft);
+  // 全局设置（一行搞定，不按输入口分开）：多图保存为 + 卡片视图
+  const gbox = document.createElement('div'); gbox.style.cssText = 'display:flex;flex-direction:column;gap:6px;border:1px solid var(--ez-border-2);border-radius:10px;padding:6px 8px;';
+  const mkGlobal = (labelText, options, cur) => {
+    const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:center;gap:8px;';
+    const lab = document.createElement('span'); lab.textContent = labelText; lab.style.cssText = 'flex:0 0 96px;font-size:12px;color:var(--ez-fg);';
+    const sel = document.createElement('select'); sel.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:5px 10px;font-size:12px;font-family:inherit;';
+    options.forEach(([v, t]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); });
+    sel.value = cur;
+    row.appendChild(lab); row.appendChild(sel); gbox.appendChild(row);
+    return sel;
+  };
+  const batchSel = mkGlobal(ezT('Multi-image save type'), [['auto', ezT('Auto')], ['images', ezT('Image sequence')], ['video', ezT('Video')], ['animation', ezT('Animated')]], 'auto');
+  const modeSel = mkGlobal(ezT('List / Normal'), [['normal', ezT('Normal')], ['list', ezT('List')]], 'normal');
+  batchSel.addEventListener('change', () => { const n = _fmtModal._node; if (!n) return; stateFor(n).batchMode = batchSel.value; syncToConfig(n); });
+  modeSel.addEventListener('change', () => { const n = _fmtModal._node; if (!n) return; stateFor(n).previewMode = modeSel.value === 'list' ? 'list' : 'normal'; syncToConfig(n); renderEntries(n); });
+  fields.insertBefore(gbox, fields.firstChild);   // 全局两块放最上面
+  fields.appendChild(nameRow);
+  box.appendChild(hd); box.appendChild(fields); box.appendChild(ft);
   _fmtModal.appendChild(box); document.body.appendChild(_fmtModal);
   attachFullscreen(box, () => { _fmtModal.style.display = 'none'; }, close);
-  _fmtModal._selects = selects; _fmtModal._subSelects = subSelects; _fmtModal._subDefs = subDefs; _fmtModal._subVals = subVals; _fmtModal._applySubs = applySubs; _fmtModal._nameInput = nameInput; _fmtModal._node = null;
+  _fmtModal._selects = selects; _fmtModal._subSelects = subSelects; _fmtModal._subDefs = subDefs; _fmtModal._subVals = subVals; _fmtModal._applySubs = applySubs; _fmtModal._nameInput = nameInput; _fmtModal._batchSel = batchSel; _fmtModal._modeSel = modeSel; _fmtModal._node = null;
   close.addEventListener('click', () => { _fmtModal.style.display = 'none'; });
   _fmtModal.addEventListener('click', (e) => { if (e.target === _fmtModal) _fmtModal.style.display = 'none'; });
   save.addEventListener('click', () => {
@@ -1148,7 +1290,7 @@ function formatModalEl() {
     Object.keys(_fmtModal._selects).forEach((cat) => {
       const o = { fmt: _fmtModal._selects[cat].value };
       const sv = _fmtModal._subVals(cat);
-      (_fmtModal._subDefs[cat] || []).forEach((sd) => { const ss = _fmtModal._subSelects[cat + '.' + sd.key]; if (ss && (!sd.when || sd.when(_fmtModal._selects[cat].value, sv))) o[sd.key] = ss.value; });
+      (_fmtModal._subDefs[cat] || []).forEach((sd) => { const ss = _fmtModal._subSelects[cat + '.' + sd.key]; if (ss && (!sd.when || sd.when(_fmtModal._selects[cat].value, sv))) o[sd.key] = sd.check ? !!ss.checked : ss.value; });
       st.saveFormats[cat] = o;
     });
     syncToConfig(_fmtModal._node);
@@ -1162,10 +1304,18 @@ function openFormatModal(node) {
   const st = stateFor(node);
   Object.keys(m._selects).forEach((cat) => {
     const v = st.saveFormats[cat];
-    if (v && typeof v === 'object') { if (v.fmt) m._selects[cat].value = v.fmt; (m._subDefs[cat] || []).forEach((sd) => { const ss = m._subSelects[cat + '.' + sd.key]; if (ss && v[sd.key]) ss.value = v[sd.key]; }); }
-    else if (typeof v === 'string') m._selects[cat].value = v;
+    if (v && typeof v === 'object') {
+      if (v.fmt) m._selects[cat].value = v.fmt;
+      (m._subDefs[cat] || []).forEach((sd) => {
+        const ss = m._subSelects[cat + '.' + sd.key]; if (!ss) return;
+        if (sd.check) ss.checked = !(v[sd.key] === false || String(v[sd.key]).toLowerCase() === 'no' || String(v[sd.key]).toLowerCase() === 'false');
+        else if (v[sd.key] != null && String(v[sd.key]) !== '') ss.value = v[sd.key];
+      });
+    } else if (typeof v === 'string') m._selects[cat].value = v;
   });
   if (m._nameInput) m._nameInput.value = st.saveFormats._name || '';
+  if (m._batchSel) m._batchSel.value = st.batchMode || 'auto';
+  if (m._modeSel) m._modeSel.value = st.previewMode === 'list' ? 'list' : 'normal';
   if (m._applySubs) m._applySubs();   // 按当前格式显示/隐藏质量、码率等
   m.style.display = 'flex';
 }
@@ -1208,6 +1358,15 @@ function openDataPreviewModal() {
 }
 
 // ===== 渲染面板 =====
+// 卡片「名称」开关：全局偏好（localStorage ezflex.pvLabels）
+const PV_LABELS_LS = 'ezflex.pvLabels';
+let _pvLabels = null;
+function pvLabelsOn() { if (_pvLabels === null) { try { _pvLabels = window.localStorage.getItem(PV_LABELS_LS) !== '0'; } catch (_) { _pvLabels = true; } } return _pvLabels; }
+function pvLabelsSet(on) {
+  _pvLabels = !!on;
+  try { window.localStorage.setItem(PV_LABELS_LS, _pvLabels ? '1' : '0'); } catch (_) {}
+  try { if (app && app.graph) app.graph.setDirtyCanvas(true, true); } catch (_) {}   // 黑框标签每帧重算，重绘即可隐/显
+}
 function buildRoot(node) {
   injectStyle();
   const shell = el('div', 'ezpv-shell');
@@ -1219,7 +1378,10 @@ function buildRoot(node) {
   const locBtn = el('button', 'ezpv-btn ezpv-loc'); locBtn.textContent = ezT('Save location');
   const fmtBtn = el('button', 'ezpv-btn'); fmtBtn.textContent = ezT('Save options');
   const infoBtn = el('button', 'ezpv-btn'); infoBtn.textContent = ezT('Data preview');
-  hd.appendChild(saveBtn); hd.appendChild(locBtn); hd.appendChild(fmtBtn); hd.appendChild(infoBtn);
+  const nameBtn = el('button', 'ezpv-btn'); nameBtn.textContent = ezT('Names');
+  const syncName = () => { const on = pvLabelsOn(); nameBtn.style.background = on ? 'var(--ez-ok-bg)' : ''; nameBtn.style.borderColor = on ? 'var(--ez-ok-border)' : ''; nameBtn.style.color = on ? 'var(--ez-ok-fg)' : ''; };
+  nameBtn.addEventListener('click', () => { pvLabelsSet(!pvLabelsOn()); syncName(); });
+  hd.appendChild(saveBtn); hd.appendChild(locBtn); hd.appendChild(fmtBtn); hd.appendChild(infoBtn); hd.appendChild(nameBtn); syncName();
   const list = el('div', 'ezpv-list');
   root.appendChild(hd); root.appendChild(list);
   saveBtn.addEventListener('click', () => {
@@ -1363,6 +1525,7 @@ function setupNode(node) {
     installEdgeLabels(node, {
       side: 'both',
       labelOf: (sock, index) => {
+        if (!pvLabelsOn()) return '';                   // 「名称」关掉就不画端口黑框标签
         if (index >= connectedCount(node)) return '';   // 末尾那个空输入槽还没有卡片
         const e = (stateFor(node).entries || [])[index];
         return (e && e.caption) || (ezT('Input') + ' ' + (index + 1));
@@ -1382,7 +1545,9 @@ function hookPrototype(nt) {
   };
   const prevExec = nt.prototype.onExecuted; nt.prototype.onExecuted = function (message) {
     const r = prevExec ? prevExec.apply(this, arguments) : undefined;
-    try { if (message && message.entries) { stateFor(this).entries = message.entries; renderEntries(this); if (this._ezEdgeUpdate) this._ezEdgeUpdate(); } } catch (_) {}
+    // 循环展开时每轮都会来一次 onExecuted（都挂在本节点 id 上）：累加各轮，换一次执行再清空 ——
+    // 直接覆盖会只剩最后一轮的值。原样存，去不去重在卡片上的模式里决定。
+    try { if (message && message.entries) { const st = stateFor(this); st.entries = (Array.isArray(st.entries) ? st.entries : []).concat(message.entries); renderEntries(this); if (this._ezEdgeUpdate) this._ezEdgeUpdate(); } } catch (_) {}
     return r;
   };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPrevSetup = false; return r; };
@@ -1392,6 +1557,15 @@ function hookPrototype(nt) {
 onLocaleChange(() => {
   ((app && app.graph && app.graph._nodes) || []).forEach((n) => { if (n && n.type === NODE) { try { refreshUI(n); } catch (_) {} } });
 });
+
+// 一次执行 = 一个 prompt：execution_start 时清空所有 PreviewAny 的 entries（循环累加只在一轮执行内生效）
+function previewAnyNodes() { return ((app && app.graph && app.graph._nodes) || []).filter((n) => n && nodeTypeOf(n) === NODE); }
+function resetPreviewEntries() {
+  previewAnyNodes().forEach((n) => {
+    try { stateFor(n).entries = []; renderEntries(n); if (n._ezEdgeUpdate) n._ezEdgeUpdate(); } catch (_) {}
+  });
+}
+try { api.addEventListener('execution_start', resetPreviewEntries); } catch (_) {}
 
 app.registerExtension({
   name: 'Comfy.EzFlex.PreviewAny',
