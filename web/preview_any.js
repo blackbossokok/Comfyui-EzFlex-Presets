@@ -1271,7 +1271,7 @@ function formatModalEl() {
     row.appendChild(lab); row.appendChild(sel); gbox.appendChild(row);
     return sel;
   };
-  const batchSel = mkGlobal(ezT('Multi-image save type'), [['auto', ezT('Auto')], ['images', ezT('Image sequence')], ['video', ezT('Video')], ['animation', ezT('Animated')]], 'auto');
+  const batchSel = mkGlobal(ezT('Multi-image display / save'), [['auto', ezT('Auto')], ['images', ezT('Image sequence')], ['video', ezT('Video')], ['animation', ezT('Animated')]], 'auto');
   const modeSel = mkGlobal(ezT('List / Normal'), [['normal', ezT('Normal')], ['list', ezT('List')]], 'normal');
   batchSel.addEventListener('change', () => { const n = _fmtModal._node; if (!n) return; stateFor(n).batchMode = batchSel.value; syncToConfig(n); });
   modeSel.addEventListener('change', () => { const n = _fmtModal._node; if (!n) return; stateFor(n).previewMode = modeSel.value === 'list' ? 'list' : 'normal'; syncToConfig(n); renderEntries(n); });

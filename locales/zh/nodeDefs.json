@@ -48,11 +48,13 @@
   "EzFlex-TimeLine": {
     "description": "时间轴规划",
     "inputs": {
-      "materials": { "tooltip": "参考素材列表（MediaLoader / MergeList）。" }
+      "index": { "tooltip": "段号（0 起）：接 EzFlex-LoopStart.index，第几轮就输出第几段的帧数。" },
+      "video": { "tooltip": "分段成片列表（一项一段）。面板按 index 用第 i 项预览第 i 段；节点本身不用它。" }
     },
     "outputs": {
-      "0": { "name": "frames", "tooltip": "每段帧数列表（列表输出，可直接喂循环按段迭代）。" },
-      "1": { "name": "overlap_frames", "tooltip": "对齐到模型网格后的过渡帧数。" }
+      "0": { "name": "frames", "tooltip": "该段的生成帧数（含过渡帧），喂给视频模型节点的 length。" },
+      "1": { "name": "overlap_frames", "tooltip": "对齐到模型帧网格后的过渡帧数。" },
+      "2": { "name": "segments", "tooltip": "总段数（按 总时长 / 每段时长 切出来的段数）。" }
     }
   },
   "EzFlex-SplitList": {
@@ -68,16 +70,24 @@
     }
   },
   "EzFlex-LoopStart": {
-    "description": "循环起点",
+    "description": "循环起点（把上一轮 LoopEnd 收到的值回喂给本轮）",
+    "inputs": {
+      "index": { "tooltip": "起始轮次（0 = 从头）。运行期每展开一轮 +1；它同时作为 index 输出口的值给下游。" },
+      "initial value1": { "tooltip": "初值口：第 1 轮（还没有上一轮产物）时 value1 输出什么。不接就是空。" }
+    },
     "outputs": {
-      "0": { "name": "flow", "tooltip": "循环锚点，连到 LoopEnd 的 flow 输入。" }
+      "0": { "name": "index", "tooltip": "本轮轮号（0 起），喂给 PromptHelper / MediaLoader / TimeLine 的 index 口。" },
+      "1": { "name": "value1", "tooltip": "上一轮 LoopEnd 第 1 口收到的值（第 1 轮 = initial value1）。回喂是隐式的，画布上别连 End→Start。" }
     }
   },
   "EzFlex-LoopEnd": {
-    "description": "循环终点",
+    "description": "循环终点（总轮数在这里设）",
     "inputs": {
-      "flow": { "tooltip": "来自 LoopStart 的 flow 锚点（用来回溯循环体）。" },
-      "condition": { "tooltip": "循环条件：为真继续下一轮，为假收束并返回最终结果。" }
+      "value1": { "tooltip": "这口收什么，下一轮 LoopStart 同编号口就输出什么。想攒列表就接 EzFlex-MergeList 的输出。" },
+      "rounds": { "tooltip": "总轮数（含第 1 轮）：0 或 1 = 只跑 1 次；N = 一共跑 N 次。" }
+    },
+    "outputs": {
+      "0": { "name": "out1", "tooltip": "跑完后的最终值（最后一轮 value1 收到的值）。只能喂循环体外的节点，接进循环体会报 Dependency cycle detected。" }
     }
   },
   "EzFlex-PromptHelper": {

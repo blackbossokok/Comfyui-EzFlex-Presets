@@ -64,7 +64,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.3.0"   # 1.3.0: 循环节点端口重做 + 预览图独立文件存储（tag_preview · card_preview）+ Ctrl+Z/Y 画布守卫
+__version__ = "1.3.0"   # 1.3.6: MergeList 的拼接顺序改成**画布上从上到下的端口顺序**（= prompt 键顺序），不再按 input_N 的数字排 —— 面板会回收空口 + 补「最小空闲编号」的新口，名字顺序和上下顺序会错位，用户「把线换到上面那一口，结果顺序没变」（2026-10-05）；配套：面板 `renumberMergeInputs` 把已连口按数组顺序重命名成 input_1..n（不动连线），并在面板上写明「按端口顺序拼接 · 最上面那口在最前」；1.3.5: LoopEnd 的 `__ezround` 不再显示 —— 它原来声明成普通 INT，前端会给它建一个数字框挂在节点上（用户反馈「不需要显示」）；改成 `forceInput: True` 后前端不建 widget，前端面板再兜底 `hideOneWidget(node,'__ezround')`（老工作流/已加载的图也立刻不显示）。它不参与序列化：首轮没有这个键时 cur 就是 0（真内核实测 3 轮照常推进并收束）；1.3.4: PreviewAny 的「多图显示 / 保存」现在同时管**显示**（选「图片序列」时，张量列表这类多帧图像按图片序列渲染，不再一律编成视频；auto 保持原样）+ 支持「张量列表」容器（新增 `_image_frames` 摊平逐帧，IMAGE 分支统一按帧列表处理）；LoopStart / LoopEnd 面板改成极简版（只有最上面一个居中的数字框：index / 次数，标题行·徽标·提示文字全部去掉）；文档补「内核原生 AddGuide 的长视频接法 + tolerance 必须为 0」；1.3.3: 循环累积收尾 —— MergeList 把「整份全是 None」的输入当成没接（LoopStart 某个 valueK 第 1 轮没给初值时吐的是 [None]，累积时会把整份列表顶偏一位；只跳「整份全 None」，不逐个丢，SplitList 的 None 占位保留）；更正 LoopEnd「次数」语义与全部文案（是**总轮数**：0/1 = 只跑 1 次、N = 一共 N 次，之前 tooltip / README / 面板提示都写成「1 = 再跑一次（总共 2 次）」，与实现不符）；文档写清 outK 只能喂循环体外的节点、TimeLine.video 必须接 LoopStart.valueK（接 LoopEnd.outK 会在校验期报 Dependency cycle detected，因为 TimeLine 吃 LoopStart.index 属于循环体内）；1.3.2: ★ 循环跨轮累积修好（LoopStart.valueK 列表输出 + LoopEnd 列表输入；之前「列表有几项就多跑几轮」、回喂变标量、out 拿不到完整列表）+ LoopEnd outK 镜像入口媒体项（TimeLine 可分段回看）； 平铺模式拖拽卡顿/切卡第一下失效/引用媒体跟随 + 标签提示回车多一行（并改成大小写不敏感）+ 新增「标签提示自动符号跟随」设置（输入框与开关同一行）；标签筛选增强（排除热度阈值 / 排除分类改用真实分类树 / 三个「…」项统一改成右侧弹面板、再点收起、层级抬到菜单之上；分类层级一律「点击展开」（不再悬停遮挡）；排除关键词框去掉 placeholder、「－」只删自己那一行；修「打开筛选面板后列表变空」的空关键词 bug）；1.3.1: 修「光标在最后一处时回车失效一次 / 保存后换行丢失 / 中间空行被删 / 选完标签提示候选再打逗号变两个逗号」+ 回车自动滚进视野 + 标签面板编辑框贴底去拖拽图标；1.3.0: 循环节点端口重做 + 预览图独立文件存储（tag_preview · card_preview）+ Ctrl+Z/Y 画布守卫
 
 WEB_DIRECTORY = "./web"
 
@@ -611,8 +611,15 @@ except Exception:
 
 # ===== ComfyUI user 目录下的 EzFlex 子目录：ezflex_*.json 与提示词卡片都收在 user/EzFlex/ =====
 def _ezflex_user_base():
-    base = getattr(folder_paths, 'user_directory', None) or os.path.join(os.path.dirname(getattr(folder_paths, 'models_dir', '')), 'user')
-    return base or ''
+    """ComfyUI 的官方 user 目录（`folder_paths.user_directory`）。
+
+    ★ 只用官方字段，**不做兜底**：`user_directory` 从 2024-01（ComfyUI #2160「多用户 / 用户数据存服务端」）
+    就存在，而本插件要求 ComfyUI ≥ 0.3.13（2025）⇒ 任何受支持的版本都必然有这个字段。
+    ⚠️ 原来那句兜底 `os.path.join(os.path.dirname(models_dir), 'user')` 在拿不到 `models_dir` 时
+    （例如测试里的 folder_paths 桩）会退化成**相对路径** `'user'` —— 相对路径跟着**当前工作目录**走，
+    于是跑测试（cwd = 插件根）就在插件目录里凭空造出一个空的 `user/EzFlex`（用户反馈「这个目录总会出现」）。
+    删掉后拿不到就是 ''，各调用点都已有 `if not d` 守卫，不会再产生相对路径。"""
+    return getattr(folder_paths, 'user_directory', '') or ''
 
 
 def _ezflex_user_dir(sub=''):
@@ -1588,7 +1595,7 @@ class PreviewAnyNode:
         wf_meta = PreviewAnyNode._workflow_gen_meta((extra_pnginfo or {}).get("workflow", {}))
         entries, outputs = [], []
         for i, (name, label, upstream) in enumerate(connected):
-            entry = self._entry(label or f"Input {i + 1}", kwargs.get(name), upstream, wf_meta)
+            entry = self._entry(label or f"Input {i + 1}", kwargs.get(name), upstream, wf_meta, cfg)
             entry["input"] = name      # 卡片上的「多图保存类型」按这个名称存在节点 config 里
             entry = self._maybe_save(entry, cfg, label or f"card_{i + 1}", extra_pnginfo)
             entries.append(entry)
@@ -1662,7 +1669,7 @@ class PreviewAnyNode:
         return names
 
     # ── 单卡解析 ────────────────────────────────────────────────────
-    def _entry(self, caption, value, upstream=None, wf_meta=None):
+    def _entry(self, caption, value, upstream=None, wf_meta=None, cfg=None):
         entry = {"caption": caption or "", "type": "", "value": "", "full_value": None, "preview": None,
                  "audio": None, "frames": 0, "meta": None}
         if value is None:
@@ -1671,23 +1678,41 @@ class PreviewAnyNode:
             return entry
         try:
             type_name = self._infer_type(value)
+            # ★★ 「多帧图像」的呈现形态由节点设置里的「多图显示 / 保存」决定（默认 auto = 按类型推断）：
+            #   一串图像（4D 批次张量 / 张量列表）既能当图片序列看，也能编成视频看 ——
+            #   以前一律判成 VIDEO 编视频，用户选了「图片序列」却还是视频（2026-10-05 用户反馈）。
+            #   auto 保持原样：批次张量 → 图片序列；张量列表 → 视频（那是视频帧的常见形态）。
+            frames_probe = PreviewAnyNode._image_frames(value)
+            if frames_probe is not None:
+                mode = str((cfg or {}).get("batchMode") or "auto")
+                if mode == "images":
+                    type_name = "IMAGE"
+                elif mode == "video":
+                    type_name = "VIDEO"
             entry["type"] = type_name
             if type_name == "IMAGE":
-                entry["preview"] = self._image_to_base64(value)
-                src = self._export_image_url(value)
+                # 支持两种容器：4D 批次张量、张量列表（循环累积出来的那种）
+                frames = PreviewAnyNode._image_frames(value)
+                first = frames[0] if frames else value
+                entry["preview"] = self._image_to_base64(first)
+                src = self._export_image_url(first)
                 if src:
                     entry["image_src"] = src
-                count = int(value.shape[0]) if isinstance(value, torch.Tensor) and value.dim() == 4 else 1
+                count = len(frames) if frames else (int(value.shape[0]) if isinstance(value, torch.Tensor) and value.dim() == 4 else 1)
                 if count > 1:
                     # 批次：逐帧导出临时文件（弹窗翻页 + 存档都要用）；batch_kind 只按上游节点类名猜来源。
-                    entry["images"] = [u for u in (self._export_image_url(value[i]) for i in range(min(count, _PREVIEW_MAX_BATCH))) if u]
+                    entry["images"] = [u for u in (self._export_image_url(f) for f in (frames or [])[:min(count, _PREVIEW_MAX_BATCH)]) if u]
                     entry["batch_kind"] = self._image_batch_kind(upstream)
                     if count > _PREVIEW_MAX_BATCH:
                         entry["batch_total"] = count
-                val, full = self._image_summary(value)
-                entry["value"] = val
-                if full:
-                    entry["full_value"] = full
+                if frames:
+                    h, w = int(frames[0].shape[0]), int(frames[0].shape[1])
+                    entry["value"] = (f"{w} x {h} × {count}" if count > 1 else f"{w} x {h}")
+                else:
+                    val, full = self._image_summary(value)
+                    entry["value"] = val
+                    if full:
+                        entry["full_value"] = full
                 gm = PreviewAnyNode._image_gen_meta(upstream)
                 if gm:
                     entry["gen_meta"] = json.dumps(gm, ensure_ascii=False, default=str)
@@ -1983,6 +2008,42 @@ class PreviewAnyNode:
             if cls == "VAE" or "VAE" in cls:
                 return "VAE"
         return cls.upper()
+
+    @staticmethod
+    def _image_frames(value):
+        """把「一串图像」摊成逐帧张量列表（每项 [H,W,C]）；不是图像序列时返回 None。
+
+        支持两种容器（都是「多帧图像」的合法写法）：
+          · 4D 批次张量 [N,H,W,C] → N 帧；3D 单图 → 1 帧；
+          · 张量列表 [t1, t2, …]（每个 t 是 4D/3D）→ 逐帧摊平（**循环累积出来的就是这种**）。
+        用途：① 让「多图显示/保存 = 图片序列」能把张量列表按图片序列渲染（不再一律编视频）；
+              ② IMAGE 分支统一按「帧列表」处理，两种容器走同一条路。
+        ⚠️ 列表里混了非张量（例如视频对象）→ 返回 None，交回原类型推断（那确实是视频）。
+        """
+        try:
+            def dims_ok(t):
+                return isinstance(t, torch.Tensor) and t.dim() in (3, 4) and int(t.shape[-1]) in (1, 3, 4)
+            if isinstance(value, torch.Tensor):
+                if value.dim() == 4 and dims_ok(value):
+                    return [value[i] for i in range(int(value.shape[0]))]
+                if value.dim() == 3 and dims_ok(value):
+                    return [value]
+                return None
+            if isinstance(value, (list, tuple)):
+                if not value:
+                    return None
+                out = []
+                for t in value:
+                    if not dims_ok(t):
+                        return None
+                    if t.dim() == 4:
+                        out.extend(t[i] for i in range(int(t.shape[0])))
+                    else:
+                        out.append(t)
+                return out or None
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _image_to_base64(tensor):
@@ -9061,7 +9122,8 @@ _EZ_LIST_MAX = 16
 
 class MergeListNode:
     """EzFlex-MergeList：把若干输入按顺序拼成一个列表（列表展开并入，非列表追加为一项）。
-    输入口动态（前端按需增删，后端声明到 _EZ_LIST_MAX），输出固定一个 list，可直接喂 StartLoop 的 List 模式。"""
+    输入口动态（前端按需增删，后端声明到 _EZ_LIST_MAX），输出固定一个 list，可直接喂 StartLoop 的 List 模式。
+    「整份都是 None」的输入视为没接（LoopStart 没给初值的 valueK 吐 [None]，见 merge 里的注释）。"""
 
     @classmethod
     def INPUT_TYPES(s):
@@ -9080,11 +9142,28 @@ class MergeListNode:
     def merge(self, **kwargs):
         self.OUTPUT_IS_LIST = (True,)   # 实例级：UI 里出口保持圆点，执行仍是"一份 list"
         out = []
-        for i in range(1, _EZ_LIST_MAX + 1):
-            v = kwargs.get("input_%d" % i)
+        # ★★ 拼接顺序 = **画布上从上到下**的端口顺序，也就是 kwargs 的键顺序。
+        #   为什么不能按 input_N 的**数字**排：前端面板会回收空口、再在末尾补一个「最小空闲编号」的新口
+        #   （`syncMergeInputs`），于是**名字顺序可能和上下顺序不一致** —— 用户把线换到上面那一口，
+        #   合并顺序却没变（2026-10-05 用户「我换了顺序最后还是倒过来的」就是这个）。
+        #   而前端序列化 prompt 时是 `for (const [i, input] of node.inputs.entries()) inputs[input.name] = …`
+        #   ⇒ JSON 键顺序 = 端口数组顺序 = 视觉顺序；Python dict 保序 ⇒ kwargs 保序。
+        #   （面板同时会把名字重排成 input_1..n，两边口径一致。）
+        #   ⚠️ 只认 input_N，别的键（将来若加 hidden）跳过。
+        for name, v in kwargs.items():
+            if not (isinstance(name, str) and name.startswith("input_") and name[6:].isdigit()):
+                continue
             if v is None:
                 continue
             if isinstance(v, (list, tuple)):
+                # ★ 整份都是 None 的输入当成「没接」：LoopStart 的某个 valueK 在第 1 轮没有初值
+                #   （initial valueK 空着）时，它按「列表输出」吐出来的是 [None]（见
+                #   LoopStartNode._as_items）—— 累积时若把这个 None 当成第 0 项，整份列表就会
+                #   错位一格（TimeLine 的「第 i 项 = 第 i 段」整体偏一位）。
+                #   ⚠️ 只跳过「全是 None」的整份，**不**逐个丢 None：SplitList 补的 None 占位
+                #      （[a, None, c]）必须原样保留，否则 Split→Merge 往返会掉项。
+                if v and all(x is None for x in v):
+                    continue
                 out.extend(v)
             else:
                 out.append(v)
@@ -9261,6 +9340,8 @@ class LoopStartNode:
 
     RETURN_TYPES = ("INT",) + ("*",) * _EZ_LOOP_MAX
     RETURN_NAMES = ("index",) + tuple("value%d" % (i + 1) for i in range(_EZ_LOOP_MAX))
+    # ⚠️ OUTPUT_IS_LIST 不写在这里（那是给 /object_info 看的）：见 loop_open 里写在**实例**上，
+    #    这样内核能拿到、而面板端口样式不变（同 MergeList / MediaLoader 的惯例）。
     FUNCTION = "loop_open"
     CATEGORY = "EzFlex"
     DESCRIPTION = "Loop Start"
@@ -9302,6 +9383,15 @@ class LoopStartNode:
             return 0
 
     def loop_open(self, config="{}", index=0, **kwargs):
+        # ★★ index 是标量；value1..N 声明成「列表输出」（每轮的值按「项」返回，见 _as_items）。
+        #   为什么必须这样：内核 merge_result_data 对**非** OUTPUT_IS_LIST 的口会把结果包一层
+        #   （`[o[i] for o in results]`）—— 标量无所谓，但**列表值会被多包一层**：
+        #   MergeList(INPUT_IS_LIST=True) 收到 [[0,1]] 会把它当成「一个元素」→ 累积变成嵌套
+        #   `[[[0,1],2],3]` 而不是平铺 `[0,1,2,3]`。声明成 True 后内核用 extend 平铺，链路上
+        #   「上一轮累积的列表」始终是平的（实测 rounds=3 → out1=[0,1,2,3]）。
+        #   ⚠️ 按本项目惯例写在**实例**上（同 MergeList / MediaLoader）：内核读的就是实例，
+        #      而 /object_info 看不到 → 面板端口保持原来的圆点样式，UI 无变化。
+        self.OUTPUT_IS_LIST = (False,) + (True,) * _EZ_LOOP_MAX
         try:
             cfg = json.loads(config) if isinstance(config, str) else (config or {})
         except Exception:
@@ -9315,10 +9405,18 @@ class LoopStartNode:
             if idx <= self._start_round(cfg) or v is None:
                 # 还没有回喂（第 1 轮 / 起始轮之前）：用初值口兜底。
                 # ★ 别直接给 None：下游若是 torch.cat / VAE 这类吃实值的节点，收到 None 会直接报错。
-                out.append(kwargs.get(self._init_name(k)))
-            else:
-                out.append(v)
+                v = kwargs.get(self._init_name(k))
+            out.append(self._as_items(v))
         return tuple(out)
+
+    @staticmethod
+    def _as_items(v):
+        """valueK 出口是「列表输出」（OUTPUT_IS_LIST=True，在 loop_open 里按实例设置）：内核会把返回的
+        每一项 `value.extend(该项)` 拼起来，所以这里要按「项的列表」返回：
+          · 值本身是 list/tuple ⇒ 当成多项（**累积列表继续平铺往下传**，这是累积能成立的关键）；
+          · 其它（标量 / latent / 图 …）⇒ 当成一项 [v]。
+        ⚠️ 别直接返回标量：OUTPUT_IS_LIST=True 时内核会对它 `extend` → TypeError。"""
+        return list(v) if isinstance(v, (list, tuple)) else [v]
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -9326,14 +9424,22 @@ class LoopStartNode:
 
 
 class LoopEndNode:
-    """EzFlex-LoopEnd：循环触发器 + 终点。面板只有一个「次数」框（总轮数）：
-    0 = 不循环（只跑第一次，等于普通运行）；1 = 再点一次运行（总共 2 次）；以此类推。
+    """EzFlex-LoopEnd：循环触发器 + 终点。面板只有一个「次数」框，语义是**总轮数**（含第 1 轮）：
+    0 或 1 = 只跑 1 次（等于普通运行）；N = 一共跑 N 次（`loop_close` 的收尾条件是 `cur + 1 >= total`，
+    cur 从 0 起，所以 rounds=2 → index 0/1 两轮）。
+    ⚠️ 早先的文案写成「1 = 再点一次运行（总共 2 次）」是错的，实际是「1 = 总共 1 次」。
 
     输入口是动态的 value1 / value2 / …，和 LoopStart 的输出口一一对应：
       · 每个口收什么 → 下一轮 LoopStart 同编号的 valueK 就输出什么（段间参考 / 尾帧钉入这类用法）。
       · 正向管线是「Start.valueK → 本轮某个节点的输入端 → 本轮产物 → End.valueK」，
         所以 valueK 常常一开始没接（值是 None），第一轮起就能接、也允许先空着。
-    跑完总轮数就把这些值原样从 out1..outN 吐出去，供最后一段解码 / 收尾使用。
+    跑完总轮数就把**最后一轮**这些口收到的值原样从 out1..outN 吐出去（不是累积列表本身；
+    要拿「每轮一项的累积列表」就把 End.valueK 接 EzFlex-MergeList 的输出，outK 自然就是那份完整列表）。
+
+    ★ outK 只能在**循环体外**被消费：接到循环体里的节点上会成环（校验期 validate_inputs 就报
+      "Dependency cycle detected"）。例如 TimeLine 的 video 口在循环体内（它吃 LoopStart.index），
+      所以「LoopEnd.out1 → TimeLine.video」是**成环**的写法，正确写法是
+      「LoopStart.value1 → TimeLine.video」（valueK 是上一轮的累积值，天然不绕回）。
 
     OUTPUT_NODE 必须为 True：否则「没往本节点的出口接东西」（例如只在 body 里放预览）时它根本不会被调度到，
     循环就只跑一轮 —— 内置循环把 LoopResult 标成 is_output_node 也是这个原因。
@@ -9349,11 +9455,14 @@ class LoopEndNode:
         # 「次数」只是个可序列化的落点，面板画的是自绘数字框。★ 必须放 required：
         #   放 optional 会被当成一个可选输入口 + 不可序列化，值一存就丢。
         req = {"rounds": ("INT", {"default": 1, "min": 0,
-                                  "tooltip": "Total rounds (including the first run). 0 = no loop, 1 = run once more (2 runs total), and so on."})}
+                                  "tooltip": "Total rounds including the first one. 0 or 1 = a single pass (plain run); N = N passes total."})}
         # ★ __ezround：轮次标记。展开时写进克隆节点的字面量输入（不是画布连线，面板也不画口）。
         #   必须声明成 optional，否则 get_input_data 会把未知键整个丢掉、传不进 kwargs；
         #   前端 stripCoreSockets 会把这个口摘掉，用户看不到它。
-        opt["__ezround"] = ("INT", {"default": 0, "min": 0,
+        #   ★★ forceInput：**别让前端建 widget** —— INT 类型不写 forceInput 时前端会做一个数字框，
+        #     于是节点上挂着一个 `__ezround` 给用户看（2026-10-05 用户反馈「不需要显示」）。
+        #     它也不需要序列化：第 1 轮没有这个键时 cur 就是 0（正确），之后每轮由展开器写字面量。
+        opt["__ezround"] = ("INT", {"default": 0, "min": 0, "forceInput": True,
                                     "tooltip": "Internal round marker written by the loop expander. Not a canvas port."})
         return {"required": req,
                 "optional": opt,
@@ -9368,6 +9477,31 @@ class LoopEndNode:
 
     _FWD = "__ezfwd"   # 展开时写进克隆 End 的「配对 Start 节点 id」标记（不是画布连线）
     _ROUND = "__ezround"   # 展开时写进克隆 End 的「下一轮轮号」标记（不是画布连线）
+
+    # ★★ INPUT_IS_LIST = True：让 valueK 能收到「**整个列表**」而不是被内核按项展开。
+    #   为什么必须这样：内核 _async_map_node_over_list 对**没有** INPUT_IS_LIST 的节点做列表展开
+    #   （execution.py:255-325：max_len_input 取各输入的最大长度，然后 for i in range(max_len) 逐项跑）。
+    #   于是「把上一轮累积的列表接回 LoopEnd.value1」会变成「列表有几项就多跑几轮」——
+    #   实测 rounds=3 + MergeList 累积：loop_open 被调用 **7 次**、回喂到的是**标量**、
+    #   最终 out1 = 0（累积彻底失效，还会随列表变长组合爆炸）。
+    #   置 True 后内核只跑一次、入参是原样值（list 保持 list），累积才成立。
+    #   ⚠️ 代价：所有入参都会是 list 包装（字面量/hidden 是 [值]，连线取上游缓存 —— 普通口 [值]、
+    #      list 口 [项1,项2…]），所以下面统一用 _unwrap 拆「单元素包装」。
+    INPUT_IS_LIST = True
+
+    @staticmethod
+    def _unwrap(v):
+        """拆掉内核的「单元素 list 包装」，但**保留真正的列表值**（累积就是靠它）。
+
+        规则：只有「恰好 1 个元素、且那个元素自己不是 list/tuple」时才拆。
+          · 普通标量 → 原值（回喂语义与旧版一致）；
+          · 累积列表（≥2 项）→ 原样保留整份列表 ⇒ 累积成立；
+          · 只有 1 项的累积列表 → 拆成那一项 —— 无害：MergeList 对「标量」是 append、对「1 项列表」
+            是 extend，两种写法得到的列表完全一样，所以下一轮照样接着累积。
+        """
+        if isinstance(v, (list, tuple)) and len(v) == 1 and not isinstance(v[0], (list, tuple)):
+            return v[0]
+        return v
 
     @staticmethod
     def _total_from(rounds, cfg):
@@ -9474,6 +9608,18 @@ class LoopEndNode:
         return body, display_of
 
     def loop_close(self, rounds=0, dynprompt=None, unique_id=None, execution_list=None, **kwargs):
+        # ★ INPUT_IS_LIST=True ⇒ 入参一律被内核装进 list（见 _unwrap 注释）：先把包装拆掉，
+        #   否则 rounds 会是 [3]、dynprompt 会是 [dynprompt]，后面 int()/get_node() 全崩。
+        rounds = self._unwrap(rounds)
+        dynprompt = self._unwrap(dynprompt)
+        unique_id = self._unwrap(unique_id)
+        execution_list = self._unwrap(execution_list)
+        kwargs[self._ROUND] = self._unwrap(kwargs.get(self._ROUND))
+        kwargs["config"] = self._unwrap(kwargs.get("config"))
+        for _k in range(1, _EZ_LOOP_MAX + 1):
+            _nk = "value%d" % _k
+            if _nk in kwargs:
+                kwargs[_nk] = self._unwrap(kwargs[_nk])
         try:
             raw = kwargs.get("config")
             cfg = json.loads(raw) if isinstance(raw, str) else (raw or {})

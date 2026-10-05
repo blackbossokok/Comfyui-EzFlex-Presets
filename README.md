@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets (V1.3.0 Beta)
+# Comfyui-EzFlex-Presets (V1.3.0 Beta-2)
 
 **English** | [中文](README_ZH.md)
 
@@ -258,10 +258,11 @@ Search `EzFlex` in the ComfyUI node list and pick the node you need.
 
 ### Loop End (`EzFlex-LoopEnd`):
 
-* What it does: the loop trigger and exit point. The panel has a single round counter: 0 = no loop (run once), 1 = run once more (2 runs total), and so on.
+* What it does: the loop trigger and exit point. The panel has a single round counter, and it counts **total** rounds (the first one included): 0 or 1 = a single pass (a plain run), N = N passes total.
 * Inputs `value1`, `value2`, … (dynamic — added one at a time as you connect, one-to-one with Loop Start's outputs): **whatever a port receives becomes the next round's Loop Start value N**.
-* Once the total round count is reached, these values are returned as-is on `out1`, `out2`, … for the final segment's decode / wrap-up.
+* Once the total round count is reached, these values are returned as-is on `out1`, `out2`, … (the values of the **last** round — wire a `EzFlex-MergeList` output into `valueN` if you want `outN` to be the accumulated per-round list).
 * ⚠️ Do not wire Loop End back into Loop Start on the canvas — the feed is automatic, and a real wire closes the graph cycle (`Dependency cycle detected`).
+* ⚠️ `outN` can only feed nodes **outside** the loop body: the body is everything downstream of Loop Start (up to Loop End), so `LoopEnd.out1 → TimeLine.video` is a cycle when TimeLine also takes `LoopStart.index`. Use `LoopStart.valueN → TimeLine.video` instead (valueN is the previous rounds' accumulated value).
 
 ### Time Line (`EzFlex-TimeLine`):
 
@@ -295,11 +296,6 @@ Comfyui-EzFlex-Presets/
     ├── ezflex\\\_listview.js      # list / text preview popup
     └── libs/ utils/ curves/    # three.js and loader/curve resources (local offline, for the 3D viewer)
 ```
-
-## Detailed references (docs/)
-- [Loop port contract & feed-back mechanism](docs/Loop_端口契约与回喂机制.md) | [Loop mechanics research & redesign](docs/Loop_循环机制调研与重做方案.md) | [Queued-loop design analysis](docs/Loop_队列式循环设计分析.md) | [ContextLoop deep dive](docs/ContextLoop_深度剖析与对比.md)
-- [LongVideo: the four nodes](docs/LongVideo_四节点详解与内置替代性.md) | [LongVideo: gap analysis](docs/LongVideo_缺口分析与分体节点方案.md)
-- [Director plugins: loop mechanics compared](docs/Director系插件_循环机制对比.md) | [Director H3 analysis & split-node proposal](docs/Director_H3_分析与分体节点建议.md)
 
 ## Notes
 

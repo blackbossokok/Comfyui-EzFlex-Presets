@@ -56,6 +56,10 @@ const CSS = `
 .ezlp-menu-item{display:block;width:100%;text-align:left;background:none;border:none;padding:6px 12px;font-size:12px;color:var(--ez-fg);cursor:pointer;border-radius:6px;font-family:inherit;}
 .ezlp-menu-item:hover{background:var(--ez-surface-3);}
 .ezlp-hint{font-size:10px;color:var(--ez-fg-muted);line-height:1.6;flex:0 0 auto;}
+/* LoopStart / LoopEnd 的「极简面板」：只有一个居中的数字框（见 setupLoopStart 注释） */
+.ezlp-root.ezlp-bare{gap:0;padding-top:9px;}
+.ezlp-row.only{justify-content:center;align-self:center;padding:5px 14px;}
+.ezlp-row.only .ezlp-num{width:58px;}
 /* TimeLine：工具条 / 素材库 / 分段轨道（配色与悬停信息参照 loop.HTML 原型） */
 .eztl-tb{display:flex;align-items:center;gap:10px;flex:0 0 auto;flex-wrap:wrap;padding-bottom:6px;border-bottom:1px solid var(--ez-border-2);}
 .eztl-fld{display:inline-flex;align-items:center;gap:6px;}
@@ -213,14 +217,18 @@ function hideConfigWidget(node) {
     try { w.computeSize = () => [0, 0]; w.computedHeight = 0; w.y = 0; w.last_y = 0; w.width = 0; w.draw = () => {}; w.hidden = true; w.options = w.options || {}; w.options.hidden = true; w.options.getMinHeight = () => 0; w.options.getMaxHeight = () => 0; if (w.element && w.element.style) { w.element.style.display = 'none'; w.element.style.height = '0'; } } catch (_) {}
   });
 }
-function mount(node, title, build) {
+function mount(node, title, build, opts) {
   if (!node || node._ezlpSetup) return;
   node._ezlpSetup = true;
   inject();
   const shell = el('div', 'ezlp-shell'); const root = el('div', 'ezlp-root'); shell.appendChild(root);
   node._ezlpRoot = shell;
+  // opts.bare：不要标题行 / 徽标（LoopStart · LoopEnd 的极简面板只要一个数字框）
+  const bare = !!(opts && opts.bare);
+  if (bare) root.classList.add('ezlp-bare');
   const hd = el('div', 'ezlp-hd'); const t = el('span', 'ezlp-title'); t.textContent = title; hd.appendChild(t);
-  const badge = el('span', 'ezlp-badge'); hd.appendChild(badge); root.appendChild(hd);
+  const badge = el('span', 'ezlp-badge'); hd.appendChild(badge);
+  if (bare) hd.style.display = 'none'; else root.appendChild(hd);
   build(root, badge);
   const widget = node.addDOMWidget(title, 'ezlp__' + Math.random().toString(36).slice(2), shell,
     { serialize: false, hideOnZoom: false, canvasOnly: !window.__ezflexIsVueNodes(), margin: 4, getMinHeight: () => 120, getValue: () => '{}', setValue: () => {} });
@@ -279,6 +287,22 @@ function upstreamTitle(node, slot) {
   } catch (_) { return ''; }
 }
 // ===== MergeList：输入口跟着连线自动增/减（末尾永远留一个空）=====
+// ★★ 拼接顺序 = **从上到下的端口顺序**（后端按 prompt 的键顺序拼，而键顺序就是端口数组顺序）。
+//    所以这里必须让**名字顺序 == 上下顺序**：面板会回收空口、再补一个「最小空闲编号」的新口，
+//    这会让名字顺序和上下顺序错位（用户在下面那口接的线其实叫 input_1 ⇒ 合并时排在最前）。
+//    做法：把已连口按数组顺序重命名为 input_1..n（先临时名再落最终名，避免中途撞名）。
+function renumberMergeInputs(node) {
+  try {
+    const re = /^input_\d+$/;
+    const list = (node.inputs || []).filter((s) => s && re.test(s.name));
+    if (list.length < 2) return;      // 只有一口不用动（名字已经是 input_1 或即将被补成 input_1）
+    let changed = false;
+    list.forEach((s, k) => { if (s.name !== 'input_' + (k + 1)) changed = true; });
+    if (!changed) return;
+    list.forEach((s, k) => { s.name = '__ezmg' + (k + 1); });
+    list.forEach((s, k) => { s.name = 'input_' + (k + 1); });
+  } catch (_) {}
+}
 function syncMergeInputs(node) {
   stripCoreSockets(node);
   const re = /^input_\d+$/;
@@ -286,6 +310,7 @@ function syncMergeInputs(node) {
   const have = new Set((node.inputs || []).filter((s) => re.test(s.name)).map((s) => (parseInt(s.name.replace(/\D/g, ''), 10) || 0)));
   const conn = have.size;
   if (conn < MAX_SLOT) { for (let n = 1; n <= MAX_SLOT; n++) { if (!have.has(n)) { node.addInput('input_' + n, '*'); break; } } }   // 只补一个空位
+  renumberMergeInputs(node);   // ★ 名字顺序 == 上下顺序（见 renumberMergeInputs 注释）
   sockStyle(node);
 }
 function cardRow(node, slot, opts) {
@@ -297,6 +322,9 @@ function cardRow(node, slot, opts) {
 // ===== MergeList 面板 =====
 function setupMergeList(node) {
   mount(node, ezT('Merge List'), (root, badge) => {
+    // ★ 用户踩过「顺序反了」：明确写出拼接顺序，别让人猜
+    const hint = el('div', 'ezlp-hint'); hint.textContent = ezT('merged in port order · the top port comes first');
+    root.appendChild(hint);
     const rows = el('div', 'ezlp-rows'); root.appendChild(rows);
     const render = () => {
       syncMergeInputs(node);
@@ -635,51 +663,62 @@ function slotRows(rows, node, side, noteEmpty) {
 // ===== LoopStart 面板：只有一个 index 框 =====
 // ★ 不画卡片行：端口黑框上已经写着 index / value1 / value2…，面板里再列一遍是重复信息（用户要求删掉）。
 //   端口增减照旧由 trimLoopSockets 在 render 里做，与面板 DOM 无关。
+// ★★ 极简面板（用户要求）：**只有一个居中的数字框** —— 没有标题行、没有徽标、没有「数据口跟着连线走」
+//    这类提示文字。动态口的增删照旧（`trimLoopSockets` 是功能不是显示），端口黑框标签也照旧。
+//    LoopStart 的框是 index（起始轮次），LoopEnd 的框是「次数」（总轮数）。
 function setupLoopStart(node) {
   migrateLoopSockets(node);
   stripInputWidgets(node, ['index']);
-  mount(node, ezT('Loop Start'), (root, badge) => {
-    const ctl = el('div', 'ezlp-ctl'); root.appendChild(ctl);
-    const hint = el('div', 'ezlp-hint'); root.appendChild(hint);
+  mount(node, ezT('Loop Start'), (root) => {
     const render = () => {
-      ctl.innerHTML = '';
-      ctl.appendChild(numRow('index', startRound(node), ezT('Start round · 0 = first'), (v) => { setStartRound(node, v); paint(); }).box);
-      const total = loopTotalRounds(node);
-      badge.textContent = (startRound(node) + 1) + ' / ' + (total > 0 ? total : '—');
-      // 先把口裁好，再按裁完的数量写提示（顺序别倒）
+      const { box, note } = numRow('index', startRound(node), '', (v) => { setStartRound(node, v); paint(); });
+      box.classList.add('only');
+      if (note && note.remove) note.remove();     // ⚠️ 别用 querySelector（测试的极简 DOM 没实现）
+      root.innerHTML = ''; root.appendChild(box);
       trimLoopSockets(node);
-      const nv = (node.outputs || []).filter((s) => /^value\d+$/.test(s.name)).length;
-      hint.textContent = ezT('value ports follow the wires · ') + nv + ezT(' now');
     };
     const paint = () => { try { render(); } catch (_) {} };
     node._ezlpUpdate = render;
     render();
-  });
+  }, { bare: true });
   sockStyle(node);
   installEdgeLabels(node, { side: 'both', rootOf: (n) => n._ezlpRoot, labelOf: (s) => portLabel(s) });
 }
 
 // ===== LoopEnd 面板：只有一个「次数」框 =====
-// ★ 同样不画卡片行（见 setupLoopStart 注释）。端口动态增减仍在 render 里。
+// ★ 同样不画卡片行、不画标题/徽标/提示（见 setupLoopStart 注释）。端口动态增减仍在 render 里。
 function setupLoopEnd(node) {
   migrateLoopSockets(node);
   hideOneWidget(node, 'rounds');
-  mount(node, ezT('Loop End'), (root, badge) => {
-    const ctl = el('div', 'ezlp-ctl'); root.appendChild(ctl);
-    const hint = el('div', 'ezlp-hint'); root.appendChild(hint);
+  hideOneWidget(node, '__ezround');   // 内部轮次标记：不是给用户看的（后端已改成 forceInput，这里兜老工作流/已加载的图）
+  mount(node, ezT('Loop End'), (root) => {
     const render = () => {
-      ctl.innerHTML = '';
-      ctl.appendChild(numRow(ezT('Rounds'), roundsOf(node), ezT('0 = no loop · 1 = run once more'), (v) => { setRounds(node, v); paint(); }).box);
-      badge.textContent = roundsOf(node) + ' ' + ezT('runs total');
+      const { box, note } = numRow(ezT('Rounds'), roundsOf(node), '', (v) => { setRounds(node, v); paint(); });
+      box.classList.add('only');
+      if (note && note.remove) note.remove();     // ⚠️ 别用 querySelector（测试的极简 DOM 没实现）
+      root.innerHTML = ''; root.appendChild(box);
       trimLoopSockets(node);
       hideOneWidget(node, 'rounds');
-      const nv = (node.inputs || []).filter((s) => /^value\d+$/.test(s.name)).length;
-      hint.textContent = ezT('value ports follow the wires · ') + nv + ezT(' now');
+      hideOneWidget(node, '__ezround');
+      // ★ 把 valueK 入口上的「媒体项」（_ezItems：MediaOut / MergeList / SplitList 会盖章）镜像到
+      //   对应的 outK 出口上 —— 下游 TimeLine 的 video 口读的正是**上游 socket 的 _ezItems**，
+      //   不镜像的话接到 LoopEnd 上预览是空的。
+      const outs = node.outputs || [];
+      outs.forEach((o) => { if (o) o._ezItems = []; });
+      (node.inputs || []).forEach((s, slot) => {
+        const m = /^value(\d+)$/.exec(s && s.name ? s.name : '');
+        if (!m) return;
+        const k = parseInt(m[1], 10) - 1;
+        if (k < 0 || k >= outs.length || !outs[k]) return;
+        const its = tlSlotItems(node, slot);
+        if (its && its.length) outs[k]._ezItems = its;
+      });
+      notifyOut(node);
     };
     const paint = () => { try { render(); } catch (_) {} };
     node._ezlpUpdate = render;
     render();
-  });
+  }, { bare: true });
   sockStyle(node);
   installEdgeLabels(node, { side: 'both', rootOf: (n) => n._ezlpRoot, labelOf: (s) => portLabel(s) });
 }

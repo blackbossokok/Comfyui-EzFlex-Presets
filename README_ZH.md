@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.3.0 测试版）
+# Comfyui-EzFlex-Presets（V1.3.0 测试版-2）
 
 [English](README.md) | **中文**
 
@@ -30,7 +30,6 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - 共 **17 个节点**
 
 ## 版本更新内容：
-
 - V1.3.0:优化随机tag，修复选择分类与库内分类不同的bug，新增重复分类提示（子分类与父分类重复），卡片管理新增生图功能，优化medialoader与mediaoutput端口类型与操作逻辑，优化previewany预览与保存逻辑，新增循环节点：合并列表（`EzFlex-MergeList`）、拆分列表（`EzFlex-SplitList`）、开启循环（`EzFlex-LoopStart`）、结束循环（`EzFlex-LoopEnd`）、时间轴规划（`EzFlex-TimeLine`）、转接节点（`EzFlex-Reroute`），素材加载器 medialoader、提示词助手 prompthelper 新增循环系统；标签/卡片预览图改为独立图片文件存储（`tag_preview` / `card_preview`），提示词助手新增快捷权重/预览图显示模式/卸载显存等功能，整体优化插件运行性能。
 - V1.2.12:标签系统性能优化、修复卡片内容无法填充的bug，优化标签提示与引用媒体冲突的显示问题、修复previewany无法保存某些类型媒体的bug,优化保存逻辑。
 - V1.2.11:修复prompthelper若干前端bug，修复api调用bug，新增api调用错误提示，全面优化标签系统：新增随机匹配/排除字段功能、相关标签功能、筛选增加隐藏nsfw、细化库内标签分类，新增anima2.9B标签库。
@@ -249,9 +248,11 @@ Comfyui节点列表中搜索EzFlex点击选择使用。
 
 ### 结束循环（`EzFlex-LoopEnd`）：
 
-- 主要功能：循环触发器 + 终点。面板只有一个「次数」框：0 = 不循环（只跑第一次）、1 = 再点一次运行（总共 2 次），以此类推。
+- 主要功能：循环触发器 + 终点。面板只有一个「次数」框，数是**总轮数**（含第 1 轮）：0 或 1 = 只跑 1 次（等于普通运行）、N = 一共跑 N 次。
 - 输入口 `value1`、`value2`……（动态，**连一个加一个**，与 Start 的输出一一对应）：**这口收什么，下一轮 Start 同编号口就输出什么**。
+- 跑完总轮数后这些值原样从 `out1`、`out2`…… 吐出（吐的是**最后一轮**这些口收到的值；想让 `outN` 就是「每轮一项的累积列表」，把 `EzFlex-MergeList` 的输出接进 `valueN`）。
 - ⚠️ 别在画布上把 End 连回 Start —— 连上会成环报错 `Dependency cycle detected`。
+- ⚠️ `outN` 只能喂**循环体外**的节点：循环体 = Start 的下游（到 End 为止）。TimeLine 的 `video` 口在循环体内（它吃 `LoopStart.index`），所以「LoopEnd.out1 → TimeLine.video」会成环；正确写法是「LoopStart.valueN → TimeLine.video」（valueN 就是前面几轮累积到的值）。
 
 ### 时间轴规划（`EzFlex-TimeLine`）：
 
@@ -285,11 +286,6 @@ Comfyui-EzFlex-Presets/
     ├── ezflex_listview.js      # 列表/文本预览弹窗
     └── libs/ utils/ curves/    # three.js 与加载器/曲线资源（本地离线，供 3D 查看器用）
 ```
-
-## 详细参考（docs/）
-- [循环端口契约与回喂机制](docs/Loop_端口契约与回喂机制.md)｜[循环机制调研与重做方案](docs/Loop_循环机制调研与重做方案.md)｜[循环队列式设计分析](docs/Loop_队列式循环设计分析.md)｜[ContextLoop 深度剖析](docs/ContextLoop_深度剖析与对比.md)
-- [LongVideo 四节点详解](docs/LongVideo_四节点详解与内置替代性.md)｜[LongVideo 缺口分析](docs/LongVideo_缺口分析与分体节点方案.md)
-- [Director 系插件循环机制对比](docs/Director系插件_循环机制对比.md)｜[Director H3 分析与分体节点建议](docs/Director_H3_分析与分体节点建议.md)
 
 ## 说明
 - 本插件为个人开发，使用 AI 辅助构建，仍在持续更新完善中，欢迎反馈问题与建议。
