@@ -52,9 +52,12 @@
       "video": { "tooltip": "分段成片列表（一项一段）。面板按 index 用第 i 项预览第 i 段；节点本身不用它。" }
     },
     "outputs": {
-      "0": { "name": "frames", "tooltip": "该段的生成帧数（含过渡帧），喂给视频模型节点的 length。" },
-      "1": { "name": "overlap_frames", "tooltip": "对齐到模型帧网格后的过渡帧数。" },
-      "2": { "name": "segments", "tooltip": "总段数（按 总时长 / 每段时长 切出来的段数）。" }
+      "0": { "name": "frames", "tooltip": "该段要生成的帧数（= 采样器 length；一定落在模型帧网格上，如 H3 的 5+17k）。" },
+      "1": { "name": "overlap_frames", "tooltip": "该段输出要剪掉的「头帧」数（= 从上一段尾巴接过来的重叠帧），已吸附到网格。" },
+      "2": { "name": "tolerance_frames", "tooltip": "为拼接顺滑额外多生成、也要剪掉的头帧数（在 overlap 之外）。" },
+      "3": { "name": "net_frames", "tooltip": "该段净增帧数 = frames - overlap_frames - tolerance_frames（真正接在时间轴上的长度）。" },
+      "4": { "name": "gen_start", "tooltip": "该段生成内容在净时间轴上的起点（秒）。gen_start = net_start - (overlap+tolerance)/fps。" },
+      "5": { "name": "segments", "tooltip": "总段数（按 总时长 / 每段时长 切出来的段数）。" }
     }
   },
   "EzFlex-SplitList": {

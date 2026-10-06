@@ -60,6 +60,8 @@ const CSS = `
 .ezlp-root.ezlp-bare{gap:0;padding-top:9px;}
 .ezlp-row.only{justify-content:center;align-self:center;padding:5px 14px;}
 .ezlp-row.only .ezlp-num{width:58px;}
+/* LoopEnd 的「续跑方式」开关（展开 / 队列），居中一行 */
+.ezlp-mode{display:flex;align-items:center;justify-content:center;gap:6px;flex:0 0 auto;}
 /* TimeLine：工具条 / 素材库 / 分段轨道（配色与悬停信息参照 loop.HTML 原型） */
 .eztl-tb{display:flex;align-items:center;gap:10px;flex:0 0 auto;flex-wrap:wrap;padding-bottom:6px;border-bottom:1px solid var(--ez-border-2);}
 .eztl-fld{display:inline-flex;align-items:center;gap:6px;}
@@ -432,6 +434,51 @@ function loopTotalRounds(node) {
   return 0;
 }
 
+// ===== 续跑方式（V1.3.7）：图展开 / 队列续跑 =====
+// ★ 模式存在**配对 LoopStart 的 config** 里（`queue: true`）。为什么不放 End 自己：
+//   End 没有 config 输入口，而给它新声明一个 widget 会让老工作流的 `widgets_values` **位置配对整体错位**
+//   （面板自绘框 + rounds + __ezround 三段，插一个就全串位）。Start 本来就有 config，零风险。
+//   配对方式与后端一致：图上**唯一**一个 LoopStart 才算数（多个就不敢猜）。
+function pairedLoopStart(node) {
+  const g = node.graph;
+  if (g && g._nodes) {
+    const starts = g._nodes.filter((n) => n && nodeTypeOf(n) === LOOP_START);
+    if (starts.length === 1) return starts[0];
+  }
+  return null;
+}
+function loopQueueMode(node) {
+  const s = pairedLoopStart(node);
+  if (!s) return false;
+  const d = readConfig(s) || {};
+  return !!d.queue;
+}
+function setLoopQueueMode(node, on) {
+  const s = pairedLoopStart(node);
+  if (!s) return false;
+  const d = readConfig(s) || {};
+  d.queue = !!on;
+  writeConfig(s, d);
+  return true;
+}
+function loopModeRow(node, onChange) {
+  const row = el('div', 'ezlp-mode');
+  const s = pairedLoopStart(node);
+  const seg = el('div', 'ezlp-seg');
+  const cur = loopQueueMode(node);
+  const mk = (on, label, tip) => {
+    const b = el('button', 'ezlp-segbtn' + (cur === on ? ' active' : ''));
+    b.textContent = label; b.title = tip;
+    b.addEventListener('click', () => { if (!s) return; setLoopQueueMode(node, on); onChange && onChange(); });
+    return b;
+  };
+  seg.appendChild(mk(false, ezT('Expand'), ezT('Unroll the whole loop inside one prompt (default).')));
+  seg.appendChild(mk(true, ezT('Queue'), ezT('One prompt per round, enqueued by Loop End. Flat memory, cancellable between rounds.')));
+  row.appendChild(seg);
+  if (!s) row.title = ezT('Add exactly one Loop Start node to switch the running mode');
+  return row;
+}
+
 function numberedSlots(node, re, side) {
   const arr = ((side === 'in' ? node.inputs : node.outputs) || []).filter((s) => s && re.test(s.name));
   const nums = arr.map((s) => parseInt(String(s.name).replace(/\D/g, ''), 10) || 0);
@@ -697,6 +744,7 @@ function setupLoopEnd(node) {
       box.classList.add('only');
       if (note && note.remove) note.remove();     // ⚠️ 别用 querySelector（测试的极简 DOM 没实现）
       root.innerHTML = ''; root.appendChild(box);
+      root.appendChild(loopModeRow(node, paint));   // 续跑方式（展开 / 队列）
       trimLoopSockets(node);
       hideOneWidget(node, 'rounds');
       hideOneWidget(node, '__ezround');
@@ -835,32 +883,51 @@ function tlPlan(node) {
   const fps = Math.max(1, parseInt(tlNum(node, 'fps', m.fps), 10) || m.fps);
   const T = Math.max(0.1, parseFloat(tlNum(node, 'total', 30)) || 30);
   const n = Math.max(0.1, parseFloat(tlNum(node, 'segment', 5)) || 5);
-  const raw = Math.max(1, parseInt(tlNum(node, 'overlap', 22), 10) || 1);
+  const raw = Math.max(0, parseInt(tlNum(node, 'overlap', 22), 10) || 0);
   const tol = Math.max(0, parseInt(tlNum(node, 'tolerance', 1), 10) || 0);
   const strict = String(tlNum(node, 'align', 'align')) === 'strict';
-  const grid = (f) => (f <= B ? B : B + S * Math.ceil((f - B) / S));
-  const ovF = grid(raw), oeff = ovF + tol;
+  const snapDown = (f) => (f <= B ? (f <= 0 ? 0 : B) : B + S * Math.floor((f - B) / S));
+  // ★ 与后端 _tl_plan 同步：overlap 吸附到网格（向下）；tolerance 是「生成后」额外剪掉的量
+  const ovF = raw <= 0 ? 0 : snapDown(raw);
+  const oeff = ovF + tol;
   const N = Math.max(1, Math.round(T / n)) - 1;
   const k1 = strict ? Math.max(1, Math.round((fps * n - B) / S)) : Math.max(1, Math.ceil((fps * n - B) / S));
   const F1 = B + S * k1;
-  const segs = [{ i: 1, gen: F1, net: F1, ov: 0, start: 0, dur: F1 / fps, netStart: 0, netDur: F1 / fps, exceed: F1 > maxF }];
+  const segs = [{ i: 1, gen: F1, net: F1, ov: 0, tol: 0, start: 0, dur: F1 / fps, netStart: 0, netDur: F1 / fps, exceed: F1 > maxF }];
   let cursor = F1 / fps;
-  const ovSec = oeff / fps;
+  // 把「第 2..N+1 段的总网格步数」平摊成 N 个整数步数（和恰为 mtot-k1）
+  const allocSteps = (mtot, kk1, NN) => {
+    const snet = mtot - kk1;
+    if (snet < NN) return new Array(NN).fill(Math.max(1, Math.floor(snet / NN)));
+    const mb = Math.floor(snet / NN), r = snet - NN * mb;
+    return Array.from({ length: NN }, (_, i) => (i < r ? mb + 1 : mb));
+  };
   if (N > 0) {
-    let mlist;
-    if (strict) mlist = new Array(N).fill(Math.max(1, Math.round((fps * n) / S)));
+    let klist;
+    if (strict) klist = new Array(N).fill(Math.max(1, Math.round((fps * n) / S)));
     else {
-      const snet = Math.round((fps * T - B) / S) - k1;
-      if (snet < N) mlist = new Array(N).fill(Math.max(1, Math.floor(snet / N)));
-      else { const base = Math.floor(snet / N), r = snet - N * base; mlist = Array.from({ length: N }, (_, i) => (i < r ? base + 1 : base)); }
+      // ★ 与后端同步：在「网格步数空间」解总步数（Σnet = (N+1)(B-oeff) + S·Σk），
+      //   再一次性平摊；逐段取整会把误差累乘导致总时长偏出十几帧。
+      const idealK = (fps * T - (N + 1) * (B - oeff)) / S;
+      const cands = Array.from(new Set([Math.floor(idealK), Math.floor(idealK) + 1, Math.round(idealK)]));
+      let best = null;
+      cands.forEach((mtot) => {
+        if (mtot < k1 + N) return;
+        const kl = allocSteps(mtot, k1, N);
+        const gens = [F1].concat(kl.map((k) => B + S * k));
+        const err = Math.abs(gens.reduce((a, g) => a + (g - oeff), 0) - fps * T);
+        if (!best || err < best[0]) best = [err, kl];
+      });
+      klist = best ? best[1] : allocSteps(k1 + N, k1, N);
     }
-    mlist.forEach((mm, i) => {
-      const net = S * mm, gen = net + oeff;
-      segs.push({ i: i + 2, gen, net, ov: oeff, start: cursor - ovSec, dur: gen / fps, netStart: cursor, netDur: net / fps, exceed: gen > maxF });
-      cursor += net / fps;
+    klist.forEach((kk, i) => {
+      const gen = B + S * kk;                    // gen 天然落在网格上（步数直接展开）
+      const netEff = Math.max(1, gen - oeff);    // 真实净增（允许不在网格上）
+      segs.push({ i: i + 2, gen, net: netEff, ov: ovF, tol, start: cursor - oeff / fps, dur: gen / fps, netStart: cursor, netDur: netEff / fps, exceed: gen > maxF });
+      cursor += netEff / fps;
     });
   }
-  return { segs, ovF, oeff, fps, maxF, model: key, actualTotal: cursor, targetFrames: Math.round(fps * T) };
+  return { segs, ovF, oeff, tol, fps, maxF, model: key, actualTotal: cursor, targetFrames: Math.round(fps * T) };
 }
 // 扩展名 → 媒体类型；认不出来返回 ''（别把上游节点里的普通字符串当素材）
 function tlMediaKind(name) {
@@ -1066,7 +1133,8 @@ function tlSegTip(sg, plan) {
   html += '<strong>' + ezT('Segment') + ' #' + sg.i + (sg.i === 1 ? ('（' + ezT('first') + '）') : '') + '</strong><br>';
   html += ezT('Generation length') + ': ' + sg.dur.toFixed(3) + 's（' + sg.gen + ezT(' frames') + '）<br>';
   html += ezT('Net increase') + ': ' + sg.netDur.toFixed(3) + 's（' + sg.net + ezT(' frames') + '）';
-  if (sg.ov > 0) html += '<br>' + ezT('Overlap') + ': ' + sg.ov + ezT(' frames') + '（' + (sg.ov / plan.fps).toFixed(3) + 's）';
+  if (sg.ov > 0) html += '<br>' + ezT('Overlap (trimmed off head)') + ': ' + sg.ov + ezT(' frames') + '（' + (sg.ov / plan.fps).toFixed(3) + 's）';
+  if (sg.tol > 0) html += '<br>' + ezT('Tolerance (extra trim)') + ': ' + sg.tol + ezT(' frames') + '（' + (sg.tol / plan.fps).toFixed(3) + 's）';
   if (sg.exceed) html += '<br><span style="color:var(--ez-warn-fg)">' + ezT('Over max by') + ' ' + (sg.gen - plan.maxF) + ezT(' frames') + '</span>';
   return html;
 }
@@ -1080,7 +1148,7 @@ function tlInfoTip(key, plan) {
     return ezT('Number of segments') + ': <strong>' + plan.segs.length + '</strong><br>' + (over.length ? ('<span style="color:var(--ez-warn-fg)">' + ezT('Over the limit') + ': ' + over.length + '（' + over.map((s) => '#' + s.i).join(', ') + '）</span>') : ezT('No segment over the limit'));
   }
   if (key === 'fps') return '<strong>' + ezT('Current FPS') + ': ' + plan.fps + '</strong><br>' + ezT('Default FPS') + ': ' + m.fps;
-  if (key === 'overlap') return ezT('Aligned to') + ': <strong>' + plan.ovF + ezT(' frames') + '</strong>（' + m.B + '+' + m.S + 'k）<br>' + ezT('Effective overlap') + ': <strong>' + plan.oeff + ezT(' frames') + '</strong><br>' + ezT('Tolerance') + ': ' + (plan.oeff - plan.ovF);
+  if (key === 'overlap') return ezT('Aligned to') + ': <strong>' + plan.ovF + ezT(' frames') + '</strong>（' + m.B + '+' + m.S + 'k）<br>' + ezT('Trimmed off head') + ': <strong>' + (plan.ovF + plan.tol) + ezT(' frames') + '</strong> = ' + ezT('overlap') + ' ' + plan.ovF + ' + ' + ezT('tolerance') + ' ' + plan.tol;
   return '';
 }
 function setupTimeLine(node) {
@@ -1190,7 +1258,7 @@ function setupTimeLine(node) {
       const items = tlAllItems(node);
       const lanes = [TL_LANES[0]];   // 只有「视频拼接」一条轨
       const fps = plan.fps;
-      badge.textContent = plan.segs.length + ' ' + ezT('segments') + ' · ' + plan.oeff + ' ' + ezT(' frames');
+      badge.textContent = plan.segs.length + ' ' + ezT('segments') + ' · ' + (plan.ovF + plan.tol) + ' ' + ezT(' trimmed');
       // ---- 工具条（文本框 + 悬停信息 i；输入框不带上下箭头）----
       tb.innerHTML = '';
       const field = (label, w, opts, unit, tipKey) => {
@@ -1217,7 +1285,7 @@ function setupTimeLine(node) {
       field(ezT('Segment s'), tlWidget(node, 'segment'), null, 's', 'seg');
       field(ezT('FPS'), tlWidget(node, 'fps'), null, '', 'fps');
       field(ezT('Overlap'), tlWidget(node, 'overlap'), null, ezT(' frames'), 'overlap');
-      field(ezT('Tolerance'), tlWidget(node, 'tolerance'), null, ezT(' frames'), null);
+      field(ezT('Tolerance'), tlWidget(node, 'tolerance'), null, ezT(' frames'), 'overlap');
       field(ezT('Align'), tlWidget(node, 'align'), [['align', ezT('Align total')], ['strict', ezT('Strict segment')]], '', null);
       // ---- 时间轴（比例尺按面板宽度自适应；zoom 只改 px/s）----
       const vw = Math.max(120, vp.clientWidth || 420);

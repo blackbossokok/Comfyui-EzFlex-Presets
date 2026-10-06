@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets (V1.3.0 Beta-2)
+# Comfyui-EzFlex-Presets (V1.3.0 Beta3)
 
 **English** | [中文](README_ZH.md)
 
@@ -30,7 +30,8 @@ Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV1T8hy6JEf4)
 * **17 nodes in total**
 
 ## Version history:
-
+* V1.3.0Beta3: Optimized the find/replace display in Prompt Assistant, and optimized PreviewAny’s save logic (to avoid overwriting).
+* V1.3.0Beta2: Optimized the operation logic of Prompt Assistant, and added a right-click quick tool feature.
 * V1.3.0 (earlier in this cycle): Optimized random tags; fixed category selection diverging from the in-library categories; added a duplicate-category warning (a child category duplicating its parent); the card manager gained image generation; reworked MediaLoader / MediaOut port types and interaction; reworked PreviewAny preview \& save logic; added loop nodes — Merge List (`EzFlex-MergeList`), Split List (`EzFlex-SplitList`), Loop Start (`EzFlex-LoopStart`), Loop End (`EzFlex-LoopEnd`), Time Line (`EzFlex-TimeLine`) — the Reroute node (`EzFlex-Reroute`), and a loop system for MediaLoader and PromptHelper; tag / card previews are stored as standalone image files (`tag\\\_preview` / `card\\\_preview`), with Ctrl+Z / Ctrl+Y guarded so panel undo does not touch the graph.
 * V1.2.12: Tag-system performance improvements; fixed cards failing to fill content; fixed the display conflict between the tag hint and "@" media reference; fixed PreviewAny failing to save some media types; improved the save logic.
 * V1.2.11: Fixed several PromptHelper frontend bugs and the API-call issue; added API-call error hints; overhauled the tag system: random match/exclude field filters, related tags, a "Hide NSFW" filter, finer in-library tag classification, and a new anima 2.9B tag library.

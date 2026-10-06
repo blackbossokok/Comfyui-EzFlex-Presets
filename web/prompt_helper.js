@@ -37,7 +37,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-10-05-v171';
+const PH_BUILD = '2026-10-06-v176';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -904,7 +904,7 @@ const CSS = `
 .eph-tools-sep{font-size:10px;color:var(--ez-fg-muted);padding:8px 10px 2px;letter-spacing:.5px;font-weight:500;}
 .eph-tools-head{font-size:10px;color:var(--ez-fg-muted);padding:8px 11px 2px;letter-spacing:.5px;font-weight:600;user-select:none;}
 .ph-mref-item{display:flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.eph-rp{position:fixed;z-index:100040;background:var(--ez-bg);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.2);padding:8px;width:240px;box-sizing:border-box;font-family:Inter,sans-serif;}
+.eph-rp{position:fixed;z-index:100210;background:var(--ez-bg);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.2);padding:8px;width:240px;box-sizing:border-box;font-family:Inter,sans-serif;}
 .eph-rp-media{display:block;width:100%;max-height:180px;border-radius:6px;object-fit:contain;background:var(--ez-strong);}
 .eph-rp-cap{font-size:10px;color:var(--ez-fg-3);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .eph-mv{position:fixed;inset:0;z-index:100080;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);}
@@ -926,7 +926,7 @@ audio.eph-mv-media::-webkit-media-controls-timeline,audio.eph-rp-media::-webkit-
 .eph-fr-match-n{flex:0 0 auto;color:var(--ez-fg-muted);font-size:10px;min-width:18px;text-align:right;}
 .eph-fr-match-t{flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;}
 .eph-ph-overlay{position:fixed;z-index:100006;background:var(--ez-strong);pointer-events:none;border-radius:2px;opacity:.5;}
-.eph-ph-overlay.current{background:var(--ez-strong);opacity:.62;}
+.eph-ph-overlay.current{background:var(--ez-warn);opacity:.5;}
 
 /* 对齐工具图标（Word 同款） */
 .eph-tb-btn svg{display:block;}
@@ -2455,6 +2455,20 @@ function ezInsertIndentedLine(ed) {
     if (!line || line === ed || line.parentNode !== ed) line = null;
     const nb = document.createElement('div');
     if (indent) nb.style.textIndent = indent + 'em';
+    // 新行继承光标处的文字样式（字体/字号/颜色/加粗…）：否则从网页粘进来的带样式文字一切行就回到默认。
+    // 只抄与编辑器默认值不同的项，避免每行写满一堆默认值。
+    try {
+      const caretEl = r.startContainer.nodeType === 1 ? r.startContainer : r.startContainer.parentNode;
+      if (caretEl && window.getComputedStyle) {
+        const st = window.getComputedStyle(caretEl), base = window.getComputedStyle(ed);
+        ['font-family', 'font-size', 'font-weight', 'font-style', 'color', 'background-color', 'text-decoration', 'text-transform', 'letter-spacing'].forEach((p) => {
+          const v = st.getPropertyValue(p);
+          if (!v || v === base.getPropertyValue(p)) return;
+          if (p === 'background-color' && /^rgba?\(0,\s*0,\s*0,\s*0\)$|^transparent$/i.test(v)) return;
+          nb.style.setProperty(p, v);
+        });
+      }
+    } catch (_) {}
     if (line) {
       // 把光标之后的半段内容切进新行（模拟回车拆段）；没内容时只是空行
       const tail = document.createRange();
@@ -2753,18 +2767,40 @@ function mediaRefLabel(m, targetId) {
   const hit = mediaIndex(mediaKeyOf(m), targetId);
   return hit ? hit.label : '';
 }
+// 芯片现在挂在哪个编号端口上、端口上现在是哪个文件：上游换素材后芯片存下的媒体键会失效，
+// 但芯片上的「引用目标 + 编号」没变，所以先按编号去实时编号表里找端口现在挂的文件，
+// 找不到（目标被删 / 编号没了）再退回按存下的键在所有目标里找。
+function chipCurrentTarget(sp) {
+  const label = ((sp.querySelector('.eph-mref-txt') || sp).textContent) || '';
+  const target = indexTargetById(sp.dataset.target || '');
+  const port = (target && label) ? target.ports.find((p) => p.label === label) : null;
+  if (port && port.files.length) return { target: target, port: port, file: port.files[0] };
+  const key = sp.dataset.key || sp.dataset.path || sp.dataset.url || '';
+  if (key) for (const t of indexTargets()) for (const p of t.ports) for (const f of p.files) if (mediaKeyOf(f) === key) return { target: t, port: p, file: f };
+  return null;
+}
 // 接线/换素材后编号表会变：把编辑器里已插入的 @引用芯片同步成新编号（同一个素材始终同一个号）。
+// 上游把端口上的文件换掉时，芯片存下的预览 url/类型/名字也要一起换，否则点开看的是旧文件。
 function refreshMediaChips() {
   const editors = new Set();
   document.querySelectorAll('.eph-mref').forEach((sp) => {
-    const hit = mediaIndex(sp.dataset.key || sp.dataset.path || sp.dataset.url || '', sp.dataset.target || '');
+    const cur = chipCurrentTarget(sp);
+    if (!cur) return;
     const lab = sp.querySelector('.eph-mref-txt');
-    if (!hit || (lab ? lab.textContent : sp.textContent) === hit.label) return;
-    sp.dataset.n = String(hit.n);
-    if (lab) lab.textContent = hit.label; else sp.textContent = hit.label;
-    if (hit.tag) { sp.dataset.tag = hit.tag; sp.title = ezT('Target node reference tag: ') + hit.tag; }
-    const ed = sp.closest ? sp.closest('.eph-editor, .eph-all-editor') : null;
-    if (ed) editors.add(ed);
+    if ((lab ? lab.textContent : sp.textContent) !== cur.port.label) {
+      sp.dataset.n = String(cur.port.n);
+      if (lab) lab.textContent = cur.port.label; else sp.textContent = cur.port.label;
+      const ed = sp.closest ? sp.closest('.eph-editor, .eph-all-editor') : null;
+      if (ed) editors.add(ed);
+    }
+    const key = mediaKeyOf(cur.file);
+    if (key && key !== sp.dataset.key) {
+      sp.dataset.key = key; sp.dataset.url = cur.file.url || ''; sp.dataset.type = cur.file.type || 'image';
+      sp.dataset.name = cur.file.name || ''; sp.dataset.path = cur.file.path || '';
+      sp.dataset.n = String(cur.port.n);
+    }
+    if (cur.port.tag) sp.dataset.tag = cur.port.tag;
+    sp.title = cur.target.title + ' · ' + cur.port.name + (cur.port.tag ? ' → ' + cur.port.tag : '');
   });
   editors.forEach((ed) => ed.dispatchEvent(new Event('input', { bubbles: true })));
 }
@@ -3148,8 +3184,15 @@ function refPreviewShow(btn, m) {
   if (media.className !== 'ez-ap') { media.className = 'eph-rp-media'; media.src = m.url; if (tag === 'video' || tag === 'audio') { media.controls = true; media.muted = true; media.autoplay = true; } }
   const cap = el('div', 'eph-rp-cap'); cap.textContent = m.name || '';
   elm.appendChild(media); elm.appendChild(cap);
+  // 挂在菜单右侧空当里：@ 菜单的 z-index 比预览高，放按钮下面会被菜单自己盖住。
+  // 右边放不下就往左翻，再按上下边界收，保证整块可见。
+  elm.style.display = 'block';
   const r = btn.getBoundingClientRect();
-  elm.style.left = r.left + 'px'; elm.style.top = (r.bottom + 4) + 'px'; elm.style.display = 'block';
+  const w = elm.offsetWidth || 240, h = elm.offsetHeight || 0;
+  let left = r.right + 8;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, r.left - w - 8);
+  elm.style.left = left + 'px';
+  elm.style.top = Math.max(8, Math.min(r.top, window.innerHeight - h - 8)) + 'px';
 }
 function refPreviewHide() {
   const elm = refPreviewEl(); elm.style.display = 'none';

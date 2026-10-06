@@ -64,7 +64,7 @@ import comfy.model_management
 
 from comfy_api.latest import io, InputImpl, Types
 
-__version__ = "1.3.0"   # 1.3.6: MergeList 的拼接顺序改成**画布上从上到下的端口顺序**（= prompt 键顺序），不再按 input_N 的数字排 —— 面板会回收空口 + 补「最小空闲编号」的新口，名字顺序和上下顺序会错位，用户「把线换到上面那一口，结果顺序没变」（2026-10-05）；配套：面板 `renumberMergeInputs` 把已连口按数组顺序重命名成 input_1..n（不动连线），并在面板上写明「按端口顺序拼接 · 最上面那口在最前」；1.3.5: LoopEnd 的 `__ezround` 不再显示 —— 它原来声明成普通 INT，前端会给它建一个数字框挂在节点上（用户反馈「不需要显示」）；改成 `forceInput: True` 后前端不建 widget，前端面板再兜底 `hideOneWidget(node,'__ezround')`（老工作流/已加载的图也立刻不显示）。它不参与序列化：首轮没有这个键时 cur 就是 0（真内核实测 3 轮照常推进并收束）；1.3.4: PreviewAny 的「多图显示 / 保存」现在同时管**显示**（选「图片序列」时，张量列表这类多帧图像按图片序列渲染，不再一律编成视频；auto 保持原样）+ 支持「张量列表」容器（新增 `_image_frames` 摊平逐帧，IMAGE 分支统一按帧列表处理）；LoopStart / LoopEnd 面板改成极简版（只有最上面一个居中的数字框：index / 次数，标题行·徽标·提示文字全部去掉）；文档补「内核原生 AddGuide 的长视频接法 + tolerance 必须为 0」；1.3.3: 循环累积收尾 —— MergeList 把「整份全是 None」的输入当成没接（LoopStart 某个 valueK 第 1 轮没给初值时吐的是 [None]，累积时会把整份列表顶偏一位；只跳「整份全 None」，不逐个丢，SplitList 的 None 占位保留）；更正 LoopEnd「次数」语义与全部文案（是**总轮数**：0/1 = 只跑 1 次、N = 一共 N 次，之前 tooltip / README / 面板提示都写成「1 = 再跑一次（总共 2 次）」，与实现不符）；文档写清 outK 只能喂循环体外的节点、TimeLine.video 必须接 LoopStart.valueK（接 LoopEnd.outK 会在校验期报 Dependency cycle detected，因为 TimeLine 吃 LoopStart.index 属于循环体内）；1.3.2: ★ 循环跨轮累积修好（LoopStart.valueK 列表输出 + LoopEnd 列表输入；之前「列表有几项就多跑几轮」、回喂变标量、out 拿不到完整列表）+ LoopEnd outK 镜像入口媒体项（TimeLine 可分段回看）； 平铺模式拖拽卡顿/切卡第一下失效/引用媒体跟随 + 标签提示回车多一行（并改成大小写不敏感）+ 新增「标签提示自动符号跟随」设置（输入框与开关同一行）；标签筛选增强（排除热度阈值 / 排除分类改用真实分类树 / 三个「…」项统一改成右侧弹面板、再点收起、层级抬到菜单之上；分类层级一律「点击展开」（不再悬停遮挡）；排除关键词框去掉 placeholder、「－」只删自己那一行；修「打开筛选面板后列表变空」的空关键词 bug）；1.3.1: 修「光标在最后一处时回车失效一次 / 保存后换行丢失 / 中间空行被删 / 选完标签提示候选再打逗号变两个逗号」+ 回车自动滚进视野 + 标签面板编辑框贴底去拖拽图标；1.3.0: 循环节点端口重做 + 预览图独立文件存储（tag_preview · card_preview）+ Ctrl+Z/Y 画布守卫
+__version__ = "1.3.0"   # 1.3.7: ★ 新增**队列续跑模式** —— LoopEnd 不再只能展开图：配对 LoopStart 的 config 里 `queue: true` 时，它把「本轮各 valueK 收到的值 + 下一轮轮号」写进一份**新 prompt** 塞回队列（等于自己再点一次运行），图不膨胀、每轮之间可停。回喂语义与展开模式一致（写 `_ezfeedK` 字面量）；list 必须包 `{"__value__": [...]}`，而队列的 prompt **不过内核校验** ⇒ LoopStart 自己拆这层包装（`_unwrap_literal`）。LoopEnd 面板加「展开 / 队列」两档开关（模式存配对 Start 的 config —— End 没有 config 口，新声明 widget 会让老工作流的 widgets_values 位置配对错位）。⚠️ 版本号按用户要求停在 1.3.0，这里只记内部变更；1.3.6: MergeList 的拼接顺序改成**画布上从上到下的端口顺序**（= prompt 键顺序），不再按 input_N 的数字排 —— 面板会回收空口 + 补「最小空闲编号」的新口，名字顺序和上下顺序会错位，用户「把线换到上面那一口，结果顺序没变」（2026-10-05）；配套：面板 `renumberMergeInputs` 把已连口按数组顺序重命名成 input_1..n（不动连线），并在面板上写明「按端口顺序拼接 · 最上面那口在最前」；1.3.5: LoopEnd 的 `__ezround` 不再显示 —— 它原来声明成普通 INT，前端会给它建一个数字框挂在节点上（用户反馈「不需要显示」）；改成 `forceInput: True` 后前端不建 widget，前端面板再兜底 `hideOneWidget(node,'__ezround')`（老工作流/已加载的图也立刻不显示）。它不参与序列化：首轮没有这个键时 cur 就是 0（真内核实测 3 轮照常推进并收束）；1.3.4: PreviewAny 的「多图显示 / 保存」现在同时管**显示**（选「图片序列」时，张量列表这类多帧图像按图片序列渲染，不再一律编成视频；auto 保持原样）+ 支持「张量列表」容器（新增 `_image_frames` 摊平逐帧，IMAGE 分支统一按帧列表处理）；LoopStart / LoopEnd 面板改成极简版（只有最上面一个居中的数字框：index / 次数，标题行·徽标·提示文字全部去掉）；文档补「内核原生 AddGuide 的长视频接法 + tolerance 必须为 0」；1.3.3: 循环累积收尾 —— MergeList 把「整份全是 None」的输入当成没接（LoopStart 某个 valueK 第 1 轮没给初值时吐的是 [None]，累积时会把整份列表顶偏一位；只跳「整份全 None」，不逐个丢，SplitList 的 None 占位保留）；更正 LoopEnd「次数」语义与全部文案（是**总轮数**：0/1 = 只跑 1 次、N = 一共 N 次，之前 tooltip / README / 面板提示都写成「1 = 再跑一次（总共 2 次）」，与实现不符）；文档写清 outK 只能喂循环体外的节点、TimeLine.video 必须接 LoopStart.valueK（接 LoopEnd.outK 会在校验期报 Dependency cycle detected，因为 TimeLine 吃 LoopStart.index 属于循环体内）；1.3.2: ★ 循环跨轮累积修好（LoopStart.valueK 列表输出 + LoopEnd 列表输入；之前「列表有几项就多跑几轮」、回喂变标量、out 拿不到完整列表）+ LoopEnd outK 镜像入口媒体项（TimeLine 可分段回看）； 平铺模式拖拽卡顿/切卡第一下失效/引用媒体跟随 + 标签提示回车多一行（并改成大小写不敏感）+ 新增「标签提示自动符号跟随」设置（输入框与开关同一行）；标签筛选增强（排除热度阈值 / 排除分类改用真实分类树 / 三个「…」项统一改成右侧弹面板、再点收起、层级抬到菜单之上；分类层级一律「点击展开」（不再悬停遮挡）；排除关键词框去掉 placeholder、「－」只删自己那一行；修「打开筛选面板后列表变空」的空关键词 bug）；1.3.1: 修「光标在最后一处时回车失效一次 / 保存后换行丢失 / 中间空行被删 / 选完标签提示候选再打逗号变两个逗号」+ 回车自动滚进视野 + 标签面板编辑框贴底去拖拽图标；1.3.0: 循环节点端口重做 + 预览图独立文件存储（tag_preview · card_preview）+ Ctrl+Z/Y 画布守卫
 
 WEB_DIRECTORY = "./web"
 
@@ -3637,19 +3637,22 @@ class PreviewAnyNode:
         空则用卡片名。返回 (base, counter)，counter 按目录里已有的 <base>_NNNNN_ 递增（与内置 Save Image 同款）。"""
         import time as _t
         pat = str((cfg.get("saveFormats") or {}).get("_name") or "").strip()
-        if not pat:
-            return PreviewAnyNode._sanitize_filename(name), 0
-        if "%" in pat:
-            now = _t.localtime()
-            for k, v in (("%year%", f"{now.tm_year}"), ("%month%", f"{now.tm_mon:02d}"), ("%day%", f"{now.tm_mday:02d}"),
-                         ("%hour%", f"{now.tm_hour:02d}"), ("%minute%", f"{now.tm_min:02d}"), ("%second%", f"{now.tm_sec:02d}")):
-                pat = pat.replace(k, v)
-        base = PreviewAnyNode._sanitize_filename(os.path.basename(pat.replace("\\", "/")))
+        if pat:
+            if "%" in pat:
+                now = _t.localtime()
+                for k, v in (("%year%", f"{now.tm_year}"), ("%month%", f"{now.tm_mon:02d}"), ("%day%", f"{now.tm_mday:02d}"),
+                             ("%hour%", f"{now.tm_hour:02d}"), ("%minute%", f"{now.tm_min:02d}"), ("%second%", f"{now.tm_sec:02d}")):
+                    pat = pat.replace(k, v)
+            base = PreviewAnyNode._sanitize_filename(os.path.basename(pat.replace("\\", "/")))
+        else:
+            base = PreviewAnyNode._sanitize_filename(name)   # 没写模板 → 用卡片名，同样要按目录里的编号接着排，别覆盖旧档
         counter = 0
         try:
             for fn in os.listdir(dirpath):
                 if fn.startswith(base + "_"):
-                    head = fn[len(base) + 1:].split("_")[0]
+                    # 单图存档是 <base>_00001.png（编号后面直接跟扩展名），要先去掉扩展名再认编号，
+                    # 否则 head 永远不是纯数字、counter 恒为 0 → 每次保存都覆盖同一个文件。
+                    head = fn[len(base) + 1:].split("_")[0].split(".")[0]
                     if head.isdigit():
                         counter = max(counter, int(head))
         except Exception:
@@ -9406,8 +9409,20 @@ class LoopStartNode:
                 # 还没有回喂（第 1 轮 / 起始轮之前）：用初值口兜底。
                 # ★ 别直接给 None：下游若是 torch.cat / VAE 这类吃实值的节点，收到 None 会直接报错。
                 v = kwargs.get(self._init_name(k))
-            out.append(self._as_items(v))
+            out.append(self._as_items(self._unwrap_literal(v)))
         return tuple(out)
+
+    @staticmethod
+    def _unwrap_literal(v):
+        """拆掉 `{"__value__": …}` 包装（队列续跑写回喂值时会给 list 包这一层，见 LoopEnd._wrap_literal）。
+
+        ⚠️ 队列模式塞回去的 prompt **不经过内核校验**（`execute_async` 不调 validate_prompt），
+        所以那层包装不会被 `validate_inputs` 解掉 —— 必须在这里自己拆，否则回喂值会变成
+        「一个 dict」而不是列表。展开模式的值是直接写的（没有包装），拆不动就原样返回。
+        """
+        if isinstance(v, dict) and "__value__" in v:
+            return v["__value__"]
+        return v
 
     @staticmethod
     def _as_items(v):
@@ -9502,6 +9517,108 @@ class LoopEndNode:
         if isinstance(v, (list, tuple)) and len(v) == 1 and not isinstance(v[0], (list, tuple)):
             return v[0]
         return v
+
+    # ── 队列续跑模式（V1.3.7）：End 自己往队列塞下一轮，不展开图 ────────────────
+    @staticmethod
+    def _queue_mode(dynprompt, start_id):
+        """配对 LoopStart 的 config 里 `queue: true` ⇒ 走队列续跑。
+
+        ⚠️ 模式存在 **Start 的 config** 里（不是 End）：End 没有 config 输入口，而给它新声明一个
+        widget 会让老工作流的 `widgets_values` **位置配对整体错位**（面板自绘框 + rounds + __ezround
+        三段，插进去一个就全串位），风险太大；Start 本来就有 config。
+        """
+        try:
+            info = dynprompt.get_node(start_id) or {}
+            raw = (info.get("inputs") or {}).get("config")
+            cfg = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            return bool(isinstance(cfg, dict) and cfg.get("queue"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _wrap_literal(v):
+        """写进下一个 prompt 的字面量：list/tuple 必须包 `{"__value__": [...]}`。
+
+        内核 `validate_inputs`（execution.py:982-990）把「长度 ≠ 2 的 list」当成坏连线
+        （`bad_linked_input`），只有 `{"__value__": …}` 会被解包并就地写回。前端序列化 list widget 同款。
+        """
+        if isinstance(v, (list, tuple)):
+            return {"__value__": list(v)}
+        return v
+
+    def _queue_next_round(self, dynprompt, unique_id, start_id, cur, total, kwargs, extra_pnginfo):
+        """把「下一轮」写进一份新 prompt 塞回队列，并返回本轮的值（下游照常拿到本轮结果）。
+
+        与展开模式共用同一套回喂语义：值写成 LoopStart 的 `_ezfeedK` **字面量**、轮号写成
+        `index` + LoopEnd 的 `__ezround`；区别只是这次是我们自己构造 prompt（不是内核展开器）。
+        任何失败都退化成「只跑一轮」并打印原因 —— 绝不静默。
+        """
+        import uuid as _uuid
+        values = tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+        try:
+            from server import PromptServer
+            server = getattr(PromptServer, "instance", None)
+        except Exception:
+            server = None
+        if server is None or getattr(server, "prompt_queue", None) is None:
+            print("[EzFlex-LoopEnd] queue mode: no PromptServer available (offline / headless) -> single pass.")
+            return values
+        try:
+            base = dynprompt.get_original_prompt() or {}
+        except Exception:
+            base = {}
+        if not base:
+            print("[EzFlex-LoopEnd] queue mode: cannot read the original prompt -> single pass.")
+            return values
+        try:
+            nxt = {}
+            for nid, info in base.items():
+                if not isinstance(info, dict):
+                    nxt[nid] = info
+                    continue
+                node = {"class_type": info.get("class_type"), "inputs": dict(info.get("inputs") or {})}
+                if "_meta" in info:
+                    node["_meta"] = info["_meta"]
+                if str(nid) == str(start_id):
+                    node["inputs"]["index"] = int(cur) + 1
+                    for k in range(1, _EZ_LOOP_MAX + 1):
+                        v = values[k - 1]
+                        if v is None:
+                            continue      # 没接的口不写（与「不写 = None」等价，省得 prompt 变胖）
+                        node["inputs"][LoopStartNode._feed_name(k)] = self._wrap_literal(v)
+                elif str(nid) == str(unique_id):
+                    node["inputs"][self._ROUND] = int(cur) + 1
+                nxt[str(nid)] = node
+            mod_nodes = _comfy_nodes
+            if mod_nodes is None:
+                try:
+                    import nodes as mod_nodes
+                except Exception:
+                    mod_nodes = None
+            if mod_nodes is None:
+                print("[EzFlex-LoopEnd] queue mode: cannot import ComfyUI nodes -> single pass.")
+                return values
+            outputs = [str(nid) for nid, info in base.items()
+                       if isinstance(info, dict)
+                       and getattr(mod_nodes.NODE_CLASS_MAPPINGS.get(info.get("class_type")), "OUTPUT_NODE", False) is True]
+            if not outputs:
+                print("[EzFlex-LoopEnd] queue mode: no output node in the prompt -> single pass.")
+                return values
+            number = getattr(server, "number", 0)
+            try:
+                server.number = number + 1
+            except Exception:
+                pass
+            extra = {"client_id": getattr(server, "client_id", None)}
+            if extra_pnginfo:
+                extra["extra_pnginfo"] = extra_pnginfo
+            server.prompt_queue.put((number, str(_uuid.uuid4()), nxt, extra, outputs, {}))
+            print("[EzFlex-LoopEnd] queue mode: round %d/%d done -> enqueued round %d/%d"
+                  % (int(cur) + 1, int(total), int(cur) + 2, int(total)))
+        except Exception as e:
+            print("[EzFlex-LoopEnd] queue mode: failed to enqueue the next round (%s: %s) -> single pass."
+                  % (type(e).__name__, e))
+        return values
 
     @staticmethod
     def _total_from(rounds, cfg):
@@ -9616,6 +9733,8 @@ class LoopEndNode:
         execution_list = self._unwrap(execution_list)
         kwargs[self._ROUND] = self._unwrap(kwargs.get(self._ROUND))
         kwargs["config"] = self._unwrap(kwargs.get("config"))
+        # 队列续跑要带着 extra_pnginfo（PreviewAny 靠它读端口标签，丢了预览面板会空）
+        extra_pnginfo = self._unwrap(kwargs.get("extra_pnginfo"))
         for _k in range(1, _EZ_LOOP_MAX + 1):
             _nk = "value%d" % _k
             if _nk in kwargs:
@@ -9670,6 +9789,14 @@ class LoopEndNode:
             return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
         if fwd is None:
             fwd = open_node   # 首次展开时把门牌号记下，下一轮的克隆 End 靠它定位（见 _find_start）
+        # ★★★ 队列续跑模式（V1.3.7）：配对 Start 的 config 里 `queue: true` 时**不展开图**，
+        #     而是把「本轮各 valueK 收到的值 + 下一轮轮号」写进一份**新的 prompt** 塞回队列，
+        #     等于「自己再点一次运行」。图不膨胀、每轮之间可停；代价是每轮独立执行（缓存复用≈0）
+        #     且面板看不到跨轮累积（`execution_start` 每轮清空 PreviewAny 的 entries）。
+        #     ⚠️ 与展开模式共用同一套回喂语义：值写进 LoopStart 的 `_ezfeedK` 字面量，只是这次
+        #        是我们自己构造 prompt（不是内核展开器）。见 docs/Loop_队列式循环设计分析.md §九。
+        if self._queue_mode(dynprompt, open_node):
+            return self._queue_next_round(dynprompt, unique_id, open_node, cur, total, kwargs, extra_pnginfo)
         # ★★ 循环体一律按「显示图」算：Start 的显示 id / End 的显示 id 都归一到画布门牌号。
         #    这一条是「回喂值传不下去」的根因修复：早先直接拿 unique_id（第 2 轮起是带前缀的
         #    克隆 id "P.Recurse"）去和 upstream 的键比较，克隆体的键是 "P.1"/"P.3"，两边对不上
@@ -9755,9 +9882,60 @@ _TL_MODELS = {
 }
 
 
+def _tl_snap_up(x, B, S):
+    """把帧数向上吸附到模型网格 B + S*k（x <= B 时取 B）。"""
+    if x <= B:
+        return B
+    return B + S * ((x - B + S - 1) // S)
+
+
+def _tl_alloc_steps(mtot, k1, N):
+    """把「第 2..N+1 段的总网格步数」平摊成 N 个整数步数（大段在前，和恰为 mtot - k1）。
+
+    ⚠️ 用 m_base/m_base+1 平摊（而不是 ceil）能让 Σk 恰好等于 mtot，
+       从而 Σgen 精确落在 (N+1)*B + S*mtot —— 这是总时长能对齐的前提。
+    """
+    snet = int(mtot) - int(k1)
+    if snet < N:
+        return [max(1, snet // N)] * N
+    mb, r = snet // N, snet - N * (snet // N)
+    return [(mb + 1) if i < r else mb for i in range(N)]
+
+
 def _tl_plan(model="minimax_h3", total=30.0, segment=5.0, fps=None, overlap=22, tolerance=1, align="align"):
     """按模型帧网格把总时长切成分段，返回每段的帧数表。
-    每段：index / genFrames（含过渡的生成帧数）/ netFrames（净帧数）/ overlapFrames / genStart / genDuration / exceed。"""
+
+    ★ 核心口径（2026-10-06 恢复原设计 + 修正扣减顺序）：
+
+    【生成帧 vs 净增帧】
+        genFrames  = 交给采样器的帧数 —— **必须落在网格** B + S*k（内核 `align_frame_count` 会吸附）
+        netFrames  = 裁掉头帧后的播放长度 = gen - overlap - tolerance —— **不必**在网格上
+      内核只约束「生成了几帧」，不管「播多久」。
+
+    【时长扣减顺序】容差在**生成之后**减去，不加进生成里：
+        net → gen = 吸附到网格(net + overlap + tolerance) → net = gen - overlap - tolerance
+
+    【总时长对齐 · 在「网格步数空间」求解】
+      每段帧数都写成 B + S*k_i，则
+        Σnet = Σ(B + S*k_i) - (N+1)*oeff = (N+1)*(B - oeff) + S * Σk_i
+      于是给定目标 Σnet ≈ fps*T，反解总步数：
+        ideal_k = (fps*T - (N+1)*(B - oeff)) / S
+      取 ideal_k 附近的整数 mtot（多取几个候选、挑 Σnet 最贴近目标者），
+      再把 mtot 平摊到 N+1 段上。首段固定 k1（按每段时长取整），其余 N 段由 `_tl_alloc_steps` 平摊。
+      ⇒ 每段 net 都含 S 的整数倍（+ 常数偏移），相位纯净、段边界稳定对齐。
+
+      ⚠️ 两个曾经的错法（都表现为「对齐时长逻辑丢了」）：
+        ① 用原始帧数相减（remaining = round(fps*T - F1)）⇒ net 出现 120 这种非 S 倍数 ⇒ 相位漂移。
+        ② 按 gen 目标均分（Σgen ≈ fps*T + N*oeff 后再逐段取整）⇒ 逐段取整把误差累乘，
+           总时长稳定偏出 16~33 帧。必须**先在步数空间解总数、再一次性平摊**。
+
+    【align 两档】
+        align  ：首段步数向上取整（≥ 目标段长），总时长对齐
+        strict ：首段与其余段都按「每段时长」取整 —— 段长稳定，但总时长会有余数
+
+    每段：index / genFrames / netFrames / overlapFrames / toleranceFrames /
+          genStart / netStart / genDuration / netDuration / exceed。
+    """
     m = _TL_MODELS.get(str(model)) or _TL_MODELS["minimax_h3"]
     B, S, maxF = m["B"], m["S"], m["maxF"]
     try:
@@ -9773,41 +9951,64 @@ def _tl_plan(model="minimax_h3", total=30.0, segment=5.0, fps=None, overlap=22, 
     except (TypeError, ValueError):
         n = 5.0
     try:
-        raw = max(1, int(overlap))
+        raw = max(0, int(overlap))
     except (TypeError, ValueError):
-        raw = 1
+        raw = 22
     try:
         tol = max(0, int(tolerance))
     except (TypeError, ValueError):
         tol = 0
-    overlap_frames = B if raw <= B else B + S * ((raw - B + S - 1) // S)   # 帧数对齐到网格
-    oeff = overlap_frames + tol
+    # overlap 帧数本身也要落在网格上（内核只认 0 或 B+S*k），向下取网格
+    if raw <= 0:
+        overlap_frames = 0
+    elif raw <= B:
+        overlap_frames = B
+    else:
+        overlap_frames = B + S * ((raw - B) // S)
+    oeff = overlap_frames + tol          # 每段要「多生成」的量：给上一段尾巴 + 拼接容差
     strict = str(align) == "strict"
-    x = max(1, int(T / n + 0.5))
-    N = x - 1
-    k1 = max(1, int(((fps * n - B) / S) + 0.5) if strict else -((-(fps * n - B)) // S))
+    N = max(1, int(T / n + 0.5)) - 1     # 除首段外的段数
+
+    # ---- 第 1 段：没有上一段的尾巴要接，gen 直接按「每段时长」吸附到网格 ----
+    want1 = fps * n
+    if strict:
+        k1 = max(1, int((want1 - B) / S + 0.5))   # 严格模式：四舍五入到最近的网格步
+    else:
+        k1 = max(1, -(-(want1 - B) // S))          # 对齐模式：向上取网格步（不少于目标时长）
     F1 = B + S * k1
-    out = [{"index": 1, "genFrames": F1, "netFrames": F1, "overlapFrames": 0,
-            "genStart": 0.0, "genDuration": F1 / fps, "exceed": F1 > maxF}]
+    out = [{"index": 1, "genFrames": F1, "netFrames": F1, "overlapFrames": 0, "toleranceFrames": 0,
+            "genStart": 0.0, "netStart": 0.0, "genDuration": F1 / fps, "netDuration": F1 / fps,
+            "exceed": F1 > maxF}]
+
     if N > 0:
+        # ---- 第 2..N+1 段：先在「网格步数空间」解出总步数，再一次性平摊 ----
         if strict:
-            mlist = [max(1, int((fps * n / S) + 0.5))] * N
+            klist = [max(1, int((fps * n) / S + 0.5))] * N     # 每段净增 = 每段时长的网格步数
         else:
-            f_target = fps * T
-            snet = int(((f_target - B) / S) + 0.5) - k1
-            if snet < N:
-                mlist = [max(1, snet // N)] * N
-            else:
-                m_base, r = snet // N, snet - N * (snet // N)
-                mlist = [(m_base + 1) if i < r else m_base for i in range(N)]
-        cursor = F1 / fps
-        ov = oeff / fps
-        for i, mm in enumerate(mlist):
-            net = S * mm
-            gen = net + oeff
-            out.append({"index": i + 2, "genFrames": gen, "netFrames": net, "overlapFrames": oeff,
-                        "genStart": cursor - ov, "genDuration": gen / fps, "exceed": gen > maxF})
-            cursor += net / fps
+            ideal_k = (fps * T - (N + 1) * (B - oeff)) / S     # 实数意义下的总步数
+            cands = sorted({int(ideal_k // 1), int(ideal_k // 1) + 1, int(round(ideal_k))})
+            best = None
+            for mtot in cands:
+                if mtot < k1 + N:                              # 每段至少 1 步
+                    continue
+                kl = _tl_alloc_steps(mtot, k1, N)
+                gens = [F1] + [B + S * k for k in kl]
+                err = abs(sum(g - oeff for g in gens) - fps * T)
+                if best is None or err < best[0]:
+                    best = (err, kl)
+            klist = best[1] if best is not None else _tl_alloc_steps(k1 + N, k1, N)
+
+        cursor = F1 / fps          # 时间轴游标（净增意义下：上一段净终点）
+        for i, kk in enumerate(klist):
+            gen = B + S * kk                                   # gen 天然落在网格上（步数直接展开）
+            net_eff = max(1, gen - oeff)                       # 真实净增（允许不在网格上）
+            out.append({"index": i + 2, "genFrames": gen, "netFrames": net_eff,
+                        "overlapFrames": overlap_frames, "toleranceFrames": tol,
+                        "genStart": cursor - (overlap_frames + tol) / fps,
+                        "netStart": cursor,
+                        "genDuration": gen / fps, "netDuration": net_eff / fps,
+                        "exceed": gen > maxF})
+            cursor += net_eff / fps
     return out
 
 
@@ -9820,23 +10021,34 @@ class TimeLineNode:
         return {
             "required": {
                 "model": (list(_TL_MODELS.keys()), {"default": "minimax_h3"}),
-                "total": ("FLOAT", {"default": 30.0, "min": 0.1, "step": 0.1}),
-                "segment": ("FLOAT", {"default": 5.0, "min": 0.1, "step": 0.1}),
+                "total": ("FLOAT", {"default": 30.0, "min": 0.1, "step": 0.1,
+                                    "tooltip": "Total length in seconds. Split into ceil(total / segment) segments."}),
+                "segment": ("FLOAT", {"default": 5.0, "min": 0.1, "step": 0.1,
+                                      "tooltip": "Target length of each segment in seconds (before overlap). Segment 1 is snapped up to the model grid; later segments get the remainder spread evenly."}),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
-                "overlap": ("INT", {"default": 22, "min": 1, "max": 200}),
-                "tolerance": ("INT", {"default": 1, "min": 0, "max": 5}),
-                "align": (["align", "strict"], {"default": "align"}),
+                "overlap": ("INT", {"default": 22, "min": 0, "max": 200,
+                                    "tooltip": "Frames re-used from the previous segment's tail. Snapped DOWN to the model grid (MiniMax H3: 0 or 5+17k). Fed to the sampler as extra frames, then trimmed off the head of each segment's output."}),
+                "tolerance": ("INT", {"default": 1, "min": 0, "max": 5,
+                                      "tooltip": "Extra frames generated ONLY to make the seam smooth, then trimmed off. Subtracted in addition to overlap: net = gen - overlap - tolerance. Does NOT push the generation length off the model grid."}),
+                "align": (["align", "strict"], {"default": "align",
+                                                 "tooltip": "align = snap generation length UP to the grid (never shorter than the target). strict = snap to the NEAREST grid step."}),
             },
             "optional": {
                 "index": ("INT", {"default": 0, "min": 0, "forceInput": True,
-                                   "tooltip": "Segment index (0-based). Wire EzFlex-LoopStart.index / easy forLoop index here; frames outputs that segment's frame count."}),
+                                   "tooltip": "Segment index (0-based). Wire EzFlex-LoopStart.index / easy forLoop index here; frames outputs that segment's frame count. Out of range = 0 (lets the loop finish)."}),
                 "video": ("*", {"tooltip": "Segment videos (a list, one item per segment). Wire the generated segments here; the panel previews segment i with item i."}),
             },
         }
 
-    RETURN_TYPES = ("INT", "INT", "INT")
-    RETURN_NAMES = ("frames", "overlap_frames", "segments")
-    OUTPUT_IS_LIST = (False, False, False)
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT")
+    RETURN_NAMES = ("frames", "overlap_frames", "tolerance_frames", "net_frames", "gen_start", "segments")
+    OUTPUT_IS_LIST = (False, False, False, False, False, False)
+    OUTPUT_TOOLTIPS = ("Frames to GENERATE for this segment (= ezSampler length; always on the model grid).",
+                       "Frames trimmed off the HEAD of this segment's output (= frames reused from the previous tail).",
+                       "Extra frames trimmed off the head on top of overlap (the seam tolerance).",
+                       "Net frames this segment contributes to the timeline (= frames - overlap_frames - tolerance_frames).",
+                       "Where this segment's generation starts inside the net timeline, in seconds (negative-free: gen_start = net_start - (overlap + tolerance) / fps).",
+                       "Total number of segments.")
     FUNCTION = "run"
     CATEGORY = "EzFlex"
     DESCRIPTION = "Time Line"
@@ -9849,9 +10061,14 @@ class TimeLineNode:
             idx = 0
         n = len(segs)
         if idx >= n:   # 越界 = 这一段不存在；给 0，让循环自己收尾
-            return (0, 0, n)
+            return (0, 0, 0, 0, 0.0, n)
         seg = segs[idx]
-        return (int(seg["genFrames"]), int(seg.get("overlapFrames") or 0), n)
+        return (int(seg["genFrames"]),
+                int(seg.get("overlapFrames") or 0),
+                int(seg.get("toleranceFrames") or 0),
+                int(seg.get("netFrames") or 0),
+                round(float(seg.get("genStart") or 0.0), 4),
+                n)
 
 
 NODE_CLASS_MAPPINGS = {

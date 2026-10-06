@@ -1,4 +1,4 @@
-# Comfyui-EzFlex-Presets（V1.3.0 测试版-2）
+# Comfyui-EzFlex-Presets（V1.3.0 测试版3）
 
 [English](README.md) | **中文**
 
@@ -30,7 +30,9 @@ B站演示视频：[点击观看](https://www.bilibili.com/video/BV1T8hy6JEf4)
 - 共 **17 个节点**
 
 ## 版本更新内容：
-- V1.3.0:优化随机tag，修复选择分类与库内分类不同的bug，新增重复分类提示（子分类与父分类重复），卡片管理新增生图功能，优化medialoader与mediaoutput端口类型与操作逻辑，优化previewany预览与保存逻辑，新增循环节点：合并列表（`EzFlex-MergeList`）、拆分列表（`EzFlex-SplitList`）、开启循环（`EzFlex-LoopStart`）、结束循环（`EzFlex-LoopEnd`）、时间轴规划（`EzFlex-TimeLine`）、转接节点（`EzFlex-Reroute`），素材加载器 medialoader、提示词助手 prompthelper 新增循环系统；标签/卡片预览图改为独立图片文件存储（`tag_preview` / `card_preview`），提示词助手新增快捷权重/预览图显示模式/卸载显存等功能，整体优化插件运行性能。
+- V1.3.0Beta3:优化提示词助手查找/替换显示，优化previewany保存逻辑（避免覆盖）
+- V1.3.0Beta2:优化提示词助手操作逻辑，新增右键快捷工具功能
+- V1.3.0Beta:优化随机tag，修复选择分类与库内分类不同的bug，新增重复分类提示（子分类与父分类重复），卡片管理新增生图功能，优化medialoader与mediaoutput端口类型与操作逻辑，优化previewany预览与保存逻辑，新增循环节点：合并列表（`EzFlex-MergeList`）、拆分列表（`EzFlex-SplitList`）、开启循环（`EzFlex-LoopStart`）、结束循环（`EzFlex-LoopEnd`）、时间轴规划（`EzFlex-TimeLine`）、转接节点（`EzFlex-Reroute`），素材加载器 medialoader、提示词助手 prompthelper 新增循环系统；标签/卡片预览图改为独立图片文件存储（`tag_preview` / `card_preview`），提示词助手新增快捷权重/预览图显示模式/卸载显存等功能，整体优化插件运行性能。
 - V1.2.12:标签系统性能优化、修复卡片内容无法填充的bug，优化标签提示与引用媒体冲突的显示问题、修复previewany无法保存某些类型媒体的bug,优化保存逻辑。
 - V1.2.11:修复prompthelper若干前端bug，修复api调用bug，新增api调用错误提示，全面优化标签系统：新增随机匹配/排除字段功能、相关标签功能、筛选增加隐藏nsfw、细化库内标签分类，新增anima2.9B标签库。
 - V1.2.10:修复模型组合加载器modelscombo第一个端口切换窗口/刷新/重启会断连的问题；修复预设选项切换窗口/刷新会丢失的bug。
