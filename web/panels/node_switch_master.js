@@ -1,17 +1,17 @@
+// 面板：NodeSwitchMaster 面板：各 Group 实例 → 分组预设的映射
 // EzFlex-NodeSwitchMaster 节点控制总预设节点。
 // 总预设 = { NodeSwitchGroup 节点 id -> 该分组预设名 } 的映射；行 = 画布上的 NodeSwitchGroup 实例。
 // 切换/应用总预设时，把映射写进各分组节点的 config.current 并触发其应用开关（级联）。
 // 当前总预设名存 config；命名总预设存服务器 user_data 预设库（按节点名共享）。
-import { app } from "../../scripts/app.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
-import {
-  NODE_TYPES, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
+import { app } from "../../../scripts/app.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
+import {ezBindHooks, NODE_TYPES, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
   configWidget, writeConfig, readConfig,
-  loadPresets, savePreset, deletePreset, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
+  loadPresets, savePreset, deletePreset, uiToast, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
   EZ_PERF, scheduleOnRedraw,
-} from "./ezflex_service.js";
+  ezDropInput } from "../core/ezflex_service.js";
 
 const NODE = NODE_TYPES.MASTER;
 const API = "/nodeswitch_master/presets";
@@ -97,13 +97,23 @@ async function savePresetToLib(node) {
   nodesOfType(NODE_TYPES.GROUP).forEach((g) => {
     groups[String(g.id)] = (g._ezGroupAPI && basePresetName(g._ezGroupAPI.current())) || BASE_PRESETS[0];
   });
-  await savePreset(API, { name: name.trim(), label: name.trim(), groups });
+  try {
+    await savePreset(API, { name: name.trim(), label: name.trim(), groups });
+  } catch (_) {
+    try { uiToast(ezT('Save failed') + ': ' + name.trim()); } catch (_) {}
+    return;
+  }
   stateFor(node).current = name.trim(); syncToConfig(node); refreshUI(node);
 }
 async function deletePresetFromLib(node) {
   const st = stateFor(node);
   if (isBasePreset(st.current)) return;
-  await deletePreset(API, st.current);
+  try {
+    await deletePreset(API, st.current);
+  } catch (_) {
+    try { uiToast(ezT('Delete failed') + ': ' + st.current); } catch (_) {}
+    return;
+  }
   st.current = BASE_PRESETS[0]; syncToConfig(node); refreshUI(node);
 }
 
@@ -151,7 +161,8 @@ function buildRoot(node) {
     const lib = await loadPresets(API);
     masterSel.innerHTML = '';
     const opts = BASE_PRESETS.concat(lib.map((p) => p.name));
-    if (opts.indexOf(st.current) < 0) { st.current = BASE_PRESETS[0]; syncToConfig(node); }
+    // 列表拉不到/为空时不要把已保存的 current 冲成 default；把当前值补进下拉先保住状态（同 main_control）。
+    if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
     opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
 
     const groups = nodesOfType(NODE_TYPES.GROUP);
@@ -173,7 +184,7 @@ async function refreshPresetOptions(node, sel) {
   const st = stateFor(node);
   const lib = await loadPresets(API, true);
   const opts = BASE_PRESETS.concat(lib.map((p) => p.name));
-  if (opts.indexOf(st.current) < 0) st.current = BASE_PRESETS[0];
+  if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
   sel.innerHTML = '';
   opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; sel.appendChild(o); });
 }
@@ -215,7 +226,7 @@ function refreshUI(node) {
       const st = stateFor(node);
       if (masterSel) {
         const opts = BASE_PRESETS.concat(lib.map((p) => p.name));
-        if (opts.indexOf(st.current) < 0) st.current = BASE_PRESETS[0];
+        if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
         masterSel.innerHTML = '';
         opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = isBasePreset(k) ? ezT(k) : k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
       }
@@ -237,11 +248,14 @@ function startTitleWatch(node) {
   node._ezTitleBound = true;
   const check = () => {
     node._ezTitlePend = false;
-    const targets = nodesOfType(NODE_TYPES.GROUP);
-    const sig = targets.map((g) => {
-      const api = g._ezGroupAPI;
-      return ((g.title || '') + ':' + g.id + ':' + (api ? api.presetNames().join('|') : '') + ':' + (api ? api.current() : ''));
-    }).join('|');
+    let sig = '';
+    try {
+      const targets = nodesOfType(NODE_TYPES.GROUP);
+      sig = targets.map((g) => {
+        const api = g._ezGroupAPI;
+        return ((g.title || '') + ':' + g.id + ':' + (api ? api.presetNames().join('|') : '') + ':' + (api ? api.current() : ''));
+      }).join('|');
+    } catch (_) { return; }
     if (sig !== node._ezTitleSig) { node._ezTitleSig = sig; refreshUI(node); }
   };
   const schedule = () => {
@@ -253,7 +267,7 @@ function startTitleWatch(node) {
     const prevDraw = node.onDrawForeground;
     node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); schedule(); };
     scheduleOnRedraw(schedule);
-    onLocaleChange(() => { node._ezTitleSig = ''; try { refreshUI(node); } catch (_) {} });   // 语言切换即时重画
+    ezBindHooks(node, onLocaleChange(() => { node._ezTitleSig = ''; try { refreshUI(node); } catch (_) {} }));
     if (EZ_PERF.mainPollMs > 0) node._ezTitleIv = setInterval(schedule, EZ_PERF.mainPollMs);
     schedule();
   }
@@ -261,7 +275,7 @@ function startTitleWatch(node) {
 
 // ===== 挂载 =====
 function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
   const w = configWidget(node); if (!w || node._ezMstCfgHid) return; node._ezMstCfgHid = true;
   try {
@@ -293,7 +307,7 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__ezMasterHooked) return; nt.__ezMasterHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { this.__ezSizeRestored = true; const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezTitleIv); try { if (this._ezTitleRaf) cancelAnimationFrame(this._ezTitleRaf); this._ezTitleRaf = 0; } catch (_) {} unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezMasterSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }

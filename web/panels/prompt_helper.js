@@ -1,3 +1,4 @@
+// 面板：PromptHelper 面板：提示词卡片编辑器、合并/循环取卡、运行时优化、标签库
 // EzFlex-PromptHelper 提示词卡片合并节点。
 // 前端面板：完整富文本编辑器（卡片列表 + 格式工具条 + 颜色/字号/缩进 + 查找替换 + 取色器 + 媒体引用芯片）
 // + 「设置」弹窗（调用 / 引用规则 / 引用识别 / API / TextGenerate / llama / 路径 / 其他）+ 「卡片管理」弹窗（user/EzFlex/prompts 存取卡片）。
@@ -6,20 +7,23 @@
 // 输出固定「合并提示词」+ 动态卡片输出 = 卡片数 1:1。
 // 复用 ModelsCombo/ParamPreset/PreviewAny 动态端口经验：卡片增删/排序后复用 socket、回写 slot、
 // 类 RETURN_TYPES/RETURN_NAMES 固定成「最大卡片数 + 1」（全 STRING），不按实例收缩 —— 见 __init__.py 的说明。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import {
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import {ezBindHooks, ezApplyDefaultSize,
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, hideNativeSlotText, uiConfirm, uiPrompt, TYPE_ICONS, model3dIcon, makeAudioPlayer,
   scheduleOnRedraw, pumpFrames, ezSanitizeHtml, pageRange, ezPruneDanglingLinks,
-} from "./ezflex_service.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
+  ezLocalOnlyNotice, ezfxGraphToScreen, ezfxLabelOffX, ezCaptureSocketLinks, ezApplySocketLinks, ezSafeUrl,
+  ezDropInput , ezScheduleNodeRedraw } from "../core/ezflex_service.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezPickLoopIndices } from "../core/ezflex_loop_picker.js";
+import { tlPlan } from "../core/loop_nodes.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
 import {
   mediaKeyOf, mediaIndex, indexTargets, indexTargetById, activeIndexTarget,
-  mediaSizeText, mediaFormatOf, startIndexWatcher, onIndexChange, nodeInputMedia,
+  mediaFormatOf, startIndexWatcher, onIndexChange, nodeInputMedia,
   refreshIndexNow, refreshIndexSoon, mediaTargetDefaults, mediaTargetCfg, mediaWord, setMediaTargetCfg,
-} from "./ezflex_media_index.js";
+} from "../core/ezflex_media_index.js";
 
 const NODE = NODE_TYPES.PROMPT_HELPER;
 const MAX_CARDS = 32;
@@ -37,7 +41,7 @@ function phTip(msg, ms) {
   } catch (_) {}
 }
 
-const PH_BUILD = '2026-10-06-v176';
+const PH_BUILD = '2026-10-13-v187';
 console.log('[PromptHelper] module loaded · build ' + PH_BUILD);
 
 // ===== 分层弹出的关闭协调：点击外层只关最上面一层；拖动·松开不关 =====
@@ -50,10 +54,12 @@ function phLayerIsOpen(el) { return !!(el && el.classList && (el.classList.conta
 // 有了它们，点「图片查看器 / 取色器 / 查找替换」的背景时只关自己那一层，不会连带关掉下面的卡片弹窗或总体编辑弹窗。
 const _PH_POPUP = ['eph-dd-menu', 'eph-tools-dropdown', 'eph-font-list', 'eph-color-dropdown', 'eph-mv', 'eph-picker', 'eph-fr', 'eph-rb', 'eph-ctx', 'eph-tpw'];
 let _phDown = { x: 0, y: 0 }, _phDownTarget = null;
-// ★ 「指针还按着」标志 + 卡片列表的延后重画：
-//   平铺模式下点卡片列表里**另一张卡**时，mousedown 会先让卡片弹窗的编辑器 blur → editModalCommit →
-//   renderCards 把整条列表重建 → 紧接着的 click 落不到原来那一行上（症状「第一下不生效，第二下才行」）。
-//   所以指针按着的时候先不重建列表，等 pointerup（这一轮交互结束）再刷。
+// ★★ 「指针还按着」标志 + 卡片列表的延后重画（仅作兜底）：
+//   平铺模式下点卡片列表里**另一张卡**时，mousedown 会先让卡片弹窗的编辑器 blur → focusout 落盘。
+//   落盘后若重建整条 `.eph-list`，**正被点的那一行会被换掉** → 浏览器随后派发的 click 落不到它上面
+//   （症状「第一下不生效，第二下才行」）。真正的修法是**不重建**（focusout 走 patchCardRow 就地改行）；
+//   这里的延后只是 patchCardRow 找不到行时的兜底：指针按着就先不刷，等 pointerup 这一轮交互结束再刷。
+//   ⚠️ 别把它当成主修法：pointerup 早于 click，pointerup 里同步重建**照样**会抢在 click 前换掉那一行。
 let _phPointerDown = false, _phCardsPending = null;
 function phFlushCardsSoon() {
   if (!_phCardsPending) return;
@@ -78,6 +84,9 @@ document.addEventListener('pointerup', (e) => {
     if (!el || !el.isConnected) { _phLayers.splice(i, 1); continue; }
     if (!open) { _phLayers.splice(i, 1); continue; }
     if (el.classList.contains('ph-dock')) continue;   // 平铺面板：点外侧不关，只能 ✕/取消 关
+    // ★ 该层自认「这次点击不算点外面」→ 保留它及以下。权重面板用它把「点自己所属编辑器里的文字」排除掉：
+    //   那次点击由 mousedown 处理器负责开/挪面板，若在这里被当成点外面收掉，就表现为「点另一个标签 → 面板直接消失」。
+    if (typeof el._phKeepOnUp === 'function' && el._phKeepOnUp(t)) break;
     if (el.contains(t) && t !== el) break;               // 点在层内内容 → 保留这一层及以下
     el.classList.remove('active'); el.classList.remove('open'); _phLayers.splice(i, 1); _phClosedEl = el;
     // 该层自己的收尾（如引用媒体窗口要停掉里面正在播的视频/音频并关掉放大预览）
@@ -652,8 +661,10 @@ const CSS = `
 .eph-weight-btn{height:30px;min-width:48px;padding:0 11px;border-radius:9px;border:1px solid var(--ez-border);background:var(--ez-surface-2);color:var(--ez-fg);font-size:11px;font-weight:480;cursor:pointer;font-family:inherit;flex:0 0 auto;line-height:1;display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;transition:all .12s;}
 .eph-weight-btn:hover{background:var(--ez-surface-3);color:var(--ez-fg);}
 .eph-weight-btn:active{transform:translateY(1px);}
-.eph-weight-btn.on{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);font-weight:600;}
-.eph-weight-btn.on:hover{background:var(--ez-ok-bg);color:var(--ez-ok-fg);}
+/* ★ 权重模式的绿态是**全局单值**：由 body.ez-ph-wmode 驱动（CSS 决定），不再靠每个按钮自己 toggle('on')。
+   以前用「每个按钮一个 on 类 + 一个 _phWBtn 引用」，两个工具条同时开着 / 按钮被重建时绿态就会和 _phWMode 对不上。 */
+body.ez-ph-wmode .eph-weight-btn{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);font-weight:600;}
+body.ez-ph-wmode .eph-weight-btn:hover{background:var(--ez-ok-bg);color:var(--ez-ok-fg);}
 .eph-indent-group{display:flex;align-items:center;gap:4px;}
 .eph-indent-group label{font-size:11px;color:var(--ez-fg-3);}
 .eph-indent-input{width:38px;text-align:center;border:1px solid var(--ez-border);border-radius:6px;padding:2px 4px;font-size:11px;font-family:inherit;outline:none;height:23px;}
@@ -664,9 +675,13 @@ const CSS = `
 .eph-tab.active{color:var(--ez-fg);font-weight:600;}
 /* ★ 文本框（正文方框）跟随面板高度：flex 撑满 .eph-modal-body 的剩余空间（同 .eph-all-editor），
    底边永远贴在下面那行（规范/编译模式 + 保存）的上方；去掉 46vh 上限，否则面板拉高后底下会留一大块空白。 */
-.eph-editor{flex:1 1 auto;min-height:200px;max-height:none;border:1px solid var(--ez-border);border-radius:10px;padding:12px;outline:none;line-height:1.6;color:var(--ez-fg);background:var(--ez-bg);overflow:auto;font-size:14px;}
+.eph-editor{flex:1 1 auto;min-width:0;width:100%;max-width:100%;box-sizing:border-box;min-height:200px;max-height:none;border:1px solid var(--ez-border);border-radius:10px;padding:12px;outline:none;line-height:1;color:var(--ez-fg);user-select:text;-webkit-user-select:text;background:var(--ez-bg);overflow-x:hidden;overflow-y:auto;overflow-wrap:anywhere;word-break:break-word;white-space:pre-wrap;font-size:14px;}
+.eph-editor,.eph-all-editor,.eph-all-block-body{white-space:pre-wrap!important;overflow-wrap:anywhere!important;word-break:break-word!important;}
+.eph-editor div,.eph-editor p,.eph-editor pre,.eph-editor span:not(.eph-mref),.eph-all-editor div,.eph-all-editor p,.eph-all-editor pre,.eph-all-editor span:not(.eph-mref),.eph-all-block-body div,.eph-all-block-body p,.eph-all-block-body pre,.eph-all-block-body span:not(.eph-mref){white-space:pre-wrap!important;overflow-wrap:anywhere!important;word-break:break-word!important;max-width:100%;}
+.eph-mref,.eph-mref *{white-space:nowrap!important;}
+.eph-editor,.eph-editor *,.eph-all-editor,.eph-all-editor *,.eph-all-block-body,.eph-all-block-body *{line-height:1!important;}
 /* 粘贴/浏览器默认的 <p> 自带上下 margin，会让换行看起来多一行；编辑器内统一清零 */
-.eph-editor p,.eph-editor div,.eph-editor h1,.eph-editor h2,.eph-editor h3,.eph-all-editor p,.eph-all-editor div,.eph-all-block-body p,.eph-all-block-body div{margin:0;padding:0;}
+.eph-editor p,.eph-editor div,.eph-editor h1,.eph-editor h2,.eph-editor h3,.eph-editor h4,.eph-editor h5,.eph-editor h6,.eph-editor ul,.eph-editor ol,.eph-editor li,.eph-editor blockquote,.eph-editor pre,.eph-all-editor p,.eph-all-editor div,.eph-all-editor h1,.eph-all-editor h2,.eph-all-editor h3,.eph-all-editor h4,.eph-all-editor h5,.eph-all-editor h6,.eph-all-editor ul,.eph-all-editor ol,.eph-all-editor li,.eph-all-editor blockquote,.eph-all-editor pre,.eph-all-block-body p,.eph-all-block-body div,.eph-all-block-body h1,.eph-all-block-body h2,.eph-all-block-body h3,.eph-all-block-body h4,.eph-all-block-body h5,.eph-all-block-body h6,.eph-all-block-body ul,.eph-all-block-body ol,.eph-all-block-body li,.eph-all-block-body blockquote,.eph-all-block-body pre{margin:0!important;margin-block:0!important;padding:0!important;}
 .eph-editor:focus{border-color:var(--ez-border-strong);}
 .eph-timeline{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ez-fg-3);}
 .eph-timeline input{width:48px;text-align:center;border:1px solid var(--ez-border);border-radius:7px;padding:3px 6px;font-size:12px;font-family:inherit;outline:none;height:26px;}
@@ -778,7 +793,7 @@ const CSS = `
 .eph-all-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:6px 12px;border-bottom:1px solid var(--ez-border-2);background:var(--ez-surface);}
 .eph-all-toolbar label{display:flex;align-items:center;gap:4px;font-size:11px;color:var(--ez-fg-3);}
 .eph-all-toolbar input[type=color]{width:26px;height:26px;border:1px solid var(--ez-border);border-radius:7px;padding:2px;background:var(--ez-bg);cursor:pointer;}
-.eph-all-editor{flex:1 1 auto;min-height:0;overflow:auto;padding:6px 16px;outline:none;line-height:1.6;color:var(--ez-fg);font-size:14px;}
+.eph-all-editor{flex:1 1 auto;min-width:0;max-width:100%;min-height:0;overflow-x:hidden;overflow-y:auto;overflow-wrap:anywhere;word-break:break-word;white-space:pre-wrap;padding:6px 16px;outline:none;line-height:1;color:var(--ez-fg);font-size:14px;}
 .eph-all-block{padding:4px 0 10px;}
 .eph-all-block-hd{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--ez-fg-muted);padding:6px 18px;border-radius:0;margin:0 -8px 6px;background:var(--ez-surface-2);}
 .eph-all-block-hd .eph-merge-btn{margin-left:auto;}
@@ -852,11 +867,11 @@ const CSS = `
 .eph-rb-pv .eph-rb-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--ez-strong);color:var(--ez-on-strong);border:none;border-radius:50%;width:38px;height:38px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:6;font-size:14px;padding:0;opacity:0;pointer-events:none;transition:.15s;font-family:inherit;}
 .eph-rb-tile:hover .eph-rb-play{opacity:1;pointer-events:auto;}
 .eph-rb-tile.playing .eph-rb-play{opacity:0;pointer-events:none;}
-.eph-rb-add{position:absolute;top:8px;right:8px;z-index:7;width:28px;height:28px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:var(--ez-surface);color:var(--ez-fg);font-size:17px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;font-family:inherit;padding:0;}
+.eph-rb-add{position:absolute;top:8px;right:8px;z-index:7;width:28px;height:28px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:var(--ez-surface);color:var(--ez-fg);font-size:17px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;font-family:inherit;padding:0;}
 .eph-rb-add:hover{background:var(--ez-surface-3);transform:scale(1.05);}
 .eph-rb-add.added{background:var(--ez-ok);border-color:rgba(74,106,90,.9);color:var(--ez-on-strong);}
 .eph-rb-add.added:hover{background:rgba(61,90,77,.95);}
-.eph-rb-info{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:1px;padding:3px 6px 4px;background:var(--ez-surface);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,.5);opacity:0;transform:translateY(4px);transition:.15s;pointer-events:none;z-index:5;}
+.eph-rb-info{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:1px;padding:3px 6px 4px;background:var(--ez-surface);border-top:1px solid rgba(255,255,255,.5);opacity:0;transform:translateY(4px);transition:.15s;pointer-events:none;z-index:5;}
 .eph-rb-tile:hover .eph-rb-info{opacity:1;transform:none;}
 .eph-rb-tile.playing .eph-rb-info{opacity:0;}
 .eph-rb-fname{font-size:11px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ez-fg);}
@@ -886,6 +901,10 @@ const CSS = `
 .eph-prog-count{font-size:11px;color:var(--ez-fg-3);}
 .eph-prog-close{border:none;background:transparent;color:var(--ez-fg-muted);font-size:14px;line-height:1;cursor:pointer;padding:0 2px;}
 .eph-prog-close:hover{color:var(--ez-bad-fg);}
+/* 「停止」：中断正在跑的优化请求；只在运行中显示，停下后进度条**不自动关**（用户自己点 ✕ 关） */
+.eph-prog-stop{border:1px solid var(--ez-surface-3);background:transparent;color:var(--ez-fg-3);font-size:11px;line-height:1;font-family:inherit;border-radius:7px;padding:3px 9px;cursor:pointer;white-space:nowrap;}
+.eph-prog-stop:hover{background:var(--ez-surface-3);color:var(--ez-bad-fg);}
+.eph-prog-stop[hidden]{display:none;}
 .eph-prog-bar{height:8px;border-radius:100px;background:var(--ez-surface-3);overflow:hidden;}
 .eph-prog-fill{height:100%;width:0;border-radius:100px;background:linear-gradient(90deg,#34a853,#5ec98b);transition:width .25s ease;}
 .eph-prog-fill.indeterminate{width:40%!important;animation:eph-prog-slide 1.1s ease-in-out infinite;}
@@ -897,8 +916,10 @@ const CSS = `
 .eph-prog-line.err{color:var(--ez-bad-fg);}
 
 /* 媒体引用：插入的 @ 芯片 + 悬停预览 + 点击查看器 */
-.eph-mref{color:var(--ez-info-fg);cursor:pointer;font-weight:500;white-space:nowrap;user-select:none;background:transparent;border:none;padding:0;border-radius:0;}
+.eph-mref{color:var(--ez-info-fg);cursor:text;font-weight:500;white-space:nowrap;user-select:text;-webkit-user-select:text;background:transparent;border:none;padding:0;border-radius:0;}
 .eph-mref:hover{color:var(--ez-info-fg);}
+.eph-editor *,.eph-all-block-body *{user-select:text;-webkit-user-select:text;}
+.eph-mref,.eph-mref *{user-select:text!important;-webkit-user-select:text!important;}
 .eph-mref .eph-mref-ico{width:13px;height:13px;vertical-align:-2.5px;margin-left:3px;}
 .eph-mref .eph-mref-ico svg{width:13px;height:13px;}
 .eph-tools-sep{font-size:10px;color:var(--ez-fg-muted);padding:8px 10px 2px;letter-spacing:.5px;font-weight:500;}
@@ -1342,6 +1363,24 @@ function plainTextOf(html) {
 }
 const fetchApi = (p, o) => (api && typeof api.fetchApi === 'function') ? api.fetchApi(p, o) : fetch(p, o);
 
+// H-1：节点执行时读不到 localStorage 里的 key → 保存时同步一份到服务端
+// （本机路由 /prompt_helper/api_key，明文只落 user/EzFlex/config/ezflex_api_keys.json）。
+const _phKeyPushed = new Map();   // slot -> 已上报的 key
+function phPushApiKey(opt) {
+  if (!opt) return;
+  const k = String(opt.apiKey || '');
+  if (!k || /^\*{4}/.test(k)) return;
+  const slot = String(opt.provider || '') + '|' + String(opt.apiUrl || '');
+  if (_phKeyPushed.get(slot) === k) return;
+  _phKeyPushed.set(slot, k);
+  try {
+    fetchApi('/prompt_helper/api_key', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: opt.provider || '', apiUrl: opt.apiUrl || '', apiKey: k }),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
 // ===== 预览图 URL（2026-10-04：预览图改为独立文件，JSON 只存哈希短名）=====
 // 存值形态三选一：
 //   - 'data:image/...' → 编辑中的本地图（还没保存），直接当 src 用；
@@ -1414,7 +1453,13 @@ document.addEventListener('mouseover', (e) => {
   _tipTimer = setTimeout(async () => {
     _tipTimer = null;
     if (_tipFor !== t) return;
-    if (t.hasAttribute('data-tip-lazy')) { try { await tpLoadDesc(); await tpLoadRelated(); } catch (_) {} if (_tipFor !== t) return; }
+    // ★ 不再 await 词库：以前这里等 4.2MB+1.5MB 解析完才出提示，等于把 ~800ms 长任务挂到悬停/切图上。
+    //   词库改成后台分块加载，本次先用已加载的部分；没加载完就不弹（下一次悬停就有了）。
+    if (t.hasAttribute('data-tip-lazy')) {
+      if (!_tpDesc) { try { tpLoadDesc(); } catch (_) {} }
+      if (!_tpRelated) { try { tpLoadRelated(); } catch (_) {} }
+      if (!_tpDesc && !_tpRelated) return;
+    }
     placeTip(t);
   }, _tipD);
 });
@@ -1452,6 +1497,24 @@ function loadFromConfig(node) {
   const cfg = readConfig(node, {});
   st.cards = Array.isArray(cfg.cards) ? deepClone(cfg.cards) : [];
   st.optimize = (cfg.optimize && typeof cfg.optimize === 'object') ? deepClone(cfg.optimize) : {};
+  // API Key 不进工作流：从本机 localStorage 取回上次填的 key（换机器/分享工作流不会带出去）。
+  try {
+    if (!st.optimize.apiKey) {
+      const k = localStorage.getItem('ezflex.apiKey.' + (st.optimize.provider || '') + '|' + (st.optimize.apiUrl || ''));
+      if (k) st.optimize.apiKey = k;
+    }
+    phPushApiKey(st.optimize);
+  } catch (_) {}
+  // 旧工作流把 key 存进了 config：加载时迁移到 localStorage，并立刻把 config 里的明文删掉。
+  try {
+    if (cfg.optimize && cfg.optimize.apiKey && !/^\*{4}/.test(String(cfg.optimize.apiKey))) {   // 脱敏值（S-2 B）不写回 localStorage
+      try { localStorage.setItem('ezflex.apiKey.' + (cfg.optimize.provider || '') + '|' + (cfg.optimize.apiUrl || ''), cfg.optimize.apiKey); } catch (_) {}
+      const clean = Object.assign({}, cfg);
+      clean.optimize = Object.assign({}, cfg.optimize);
+      delete clean.optimize.apiKey;
+      writeConfig(node, clean);
+    }
+  } catch (_) {}
   st.rules = (cfg.rules && typeof cfg.rules === 'object') ? deepClone(cfg.rules) : {};
   st.ui = (cfg.ui && typeof cfg.ui === 'object') ? deepClone(cfg.ui) : { dock: phDockPref() };
   st.overallOptimized = String(cfg.overallOptimized || '');
@@ -1479,8 +1542,15 @@ function syncToConfig(node) {
   const labels = {};
   onKinds.forEach((k) => { labels[k.id] = mediaWord(k.id); });   // 自定义类型没有中文词，用类型名当 @ 词
   st.cards.forEach((c) => { c.rule = { ref: ref, ts: rule.ts || {}, labels: labels }; });
+  // API Key 只留本机 localStorage，不写进工作流 config。
+  const persistOpt = Object.assign({}, st.optimize || {});
+  try {
+    if (persistOpt.apiKey && !/^\*{4}/.test(String(persistOpt.apiKey))) localStorage.setItem('ezflex.apiKey.' + (persistOpt.provider || '') + '|' + (persistOpt.apiUrl || ''), persistOpt.apiKey);
+  phPushApiKey(persistOpt);
+  } catch (_) {}
+  delete persistOpt.apiKey;
   writeConfig(node, {
-    optimize: st.optimize || {}, cards: st.cards, rules: st.rules || {},
+    optimize: persistOpt, cards: st.cards, rules: st.rules || {},
     overallOptimized: st.overallOptimized || '', overallOptimizedHTML: st.overallOptimizedHTML || '',
     overallUseOptimized: !!st.overallUseOptimized,
     loopMode: !!st.loopMode,
@@ -1508,6 +1578,8 @@ function markDirtyFalse(node) { /* kept for clarity; no untracked dirty on confi
 // ===== 卡片操作 =====
 function addCard(node) {
   const st = stateFor(node);
+  // 后端口只有 32 个 card_in_*：以前加第 33 张卡不报错但静默失效（不进 prompt、不出输出）。
+  if (st.cards.length >= MAX_CARDS) { phTip(ezT('Card limit reached: ') + MAX_CARDS, 3000); return; }
   st.cards.push({
     id: genId(), title: ezT('Act {n}').replace('{n}', String(st.cards.length + 1)),
     content: '', contentHTML: '', contentOptimized: '', contentOptimizedHTML: '',
@@ -1532,7 +1604,7 @@ function reorderCard(node, from, to) {
 
 // ===== 动态端口（输入 card_in_1..N / 输出 合并提示词 + card_out_1..N）====
 function removeConfigInput(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && _in.name === 'config') { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && _in.name === 'config') { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 }
 function deferSync(node) {
   if (node._ezPhSyncTimer) clearTimeout(node._ezPhSyncTimer);
@@ -1554,6 +1626,8 @@ function updatePorts(node, noRedraw) {
   const pending = (node.inputs || []).some((i) => i.link != null && !(node.graph && node.graph.links && node.graph.links[i.link]))
     || (node.outputs || []).some((o) => linksOf(o).some((lid) => lid != null && !(node.graph && node.graph.links && node.graph.links[lid])));
   if (pending) { deferSync(node); return false; }
+  // 重排前按 socket 拍连线快照（新版前端 socket.links/link 是按当前下标现拼的视图，搬完再读会指错口）。
+  const cap = ezCaptureSocketLinks(node);
 
   // ---- 输入：综合媒体动态（红色 ANY，连接后自动补一个空槽）+ 卡片输入按序（clip 输入口已移除，TextGenerate 走设置）----
 
@@ -1624,12 +1698,17 @@ function updatePorts(node, noRedraw) {
   }
 
   const wantIn = [...mediaSeq, ...cardSeq].concat(idxSock ? [idxSock] : []);
+  // 不在 wantIn 里的旧口先 removeInput：它会按 socket 对象重写剩余输入的 target_slot；
+  // 直接 splice 会把这些口丢掉、线却留在链接存储里 ⇒ 后面的输入整体错一格。
+  (node.inputs || []).slice().forEach((s) => {
+    if (wantIn.indexOf(s) >= 0) return;
+    const k = node.inputs.indexOf(s);
+    if (k >= 0) { try { node.removeInput(k); } catch (_) { try { node.inputs.splice(k, 1); } catch (_2) {} } }
+  });
   if (node.inputs.length !== wantIn.length || node.inputs.some((i, x) => i !== wantIn[x])) {
     node.inputs.splice(0, node.inputs.length, ...wantIn);
   }
-  node.inputs.forEach((i, idx) => {
-    linksOf(i).forEach((lid) => { if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) { try { node.graph.links[lid].target_slot = idx; } catch (_) {} } });
-  });
+  ezApplySocketLinks(node, cap);   // 输入侧：按快照回写 target_slot
 
   // ---- 输出：固定「合并提示词」红色圆点在首位 + 卡片输出按序 ----
   let mergedSock = (node.outputs || []).find((o) => o && o._ezMerged);
@@ -1666,9 +1745,7 @@ function updatePorts(node, noRedraw) {
   if (node.outputs.length !== wantOut.length || node.outputs.some((o, x) => o !== wantOut[x])) {
     node.outputs.splice(0, node.outputs.length, ...wantOut);
   }
-  node.outputs.forEach((o, idx) => {
-    linksOf(o).forEach((lid) => { if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) { try { node.graph.links[lid].origin_slot = idx; } catch (_) {} } });
-  });
+  ezApplySocketLinks(node, cap);   // 输出侧：按快照回写 origin_slot
 
   if (node.graph) node.graph.setDirtyCanvas(true, true);
   return true;
@@ -1752,14 +1829,25 @@ function buildCardRow(node, card, index) {
   const title = el('span', 'eph-ctitle-input'); title.contentEditable = 'true'; title.setAttribute('data-ph', ezT('Title')); title.title = ezT('Card title');
   title.textContent = card.title || '';
   // 输入即更新（实时刷新黑框标签文字，类似 ModelsCombo）；失焦再重排/刷新列表。
-  title.addEventListener('input', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updateSocketLabels(node, card.id, card.title || ezT('Prompt')); syncEditModalTitle(node, card); });
-  title.addEventListener('blur', () => { card.title = title.textContent.replace(/\u200b/g, ''); syncToConfig(node); updatePorts(node); refreshUI(node); });
+  // ★ 写盘防抖 150ms：以前每个字符都 syncToConfig() = 整份 config（含所有卡片 HTML）JSON.stringify
+  //   + localStorage 写 + setDirtyCanvas，长标题打字会明显卡。标签/弹窗标题仍即时更新。
+  let _ctTimer = 0;
+  const commitTitle = () => { if (_ctTimer) { clearTimeout(_ctTimer); _ctTimer = 0; } syncToConfig(node); };
+  title.addEventListener('input', () => {
+    card.title = title.textContent.replace(/\u200b/g, '');
+    updateSocketLabels(node, card.id, card.title || ezT('Prompt'));
+    syncEditModalTitle(node, card);
+    if (_ctTimer) clearTimeout(_ctTimer);
+    _ctTimer = setTimeout(() => { _ctTimer = 0; syncToConfig(node); }, 150);
+  });
+  title.addEventListener('blur', () => { card.title = title.textContent.replace(/\u200b/g, ''); commitTitle(); updatePorts(node); refreshUI(node); });
   ctitle.appendChild(title);
   let badge = null;
   const prov = (card.provider || card.apiUrl) ? (card.provider || 'API') : '';
   if (prov) { badge = el('span', 'eph-badge'); badge.textContent = prov; badge.title = [card.provider, card.model, card.apiUrl].filter(Boolean).join(' · '); }
   if (badge) ctitle.appendChild(badge);
   if (live) { const lb = el('span', 'eph-badge eph-badge-live'); lb.textContent = ezT('Live'); lb.title = ezT('Live-editable input card'); ctitle.appendChild(lb); }
+  if (card.loop) { const lb = el('span', 'eph-badge'); lb.textContent = ezT('Loop'); lb.title = ezT('Loop card: click to choose participating rounds'); lb.style.cursor = 'pointer'; lb.addEventListener('click', (e) => { e.stopPropagation(); editLoopIndicesPH(node, card); }); ctitle.appendChild(lb); }
   // 「优 / 默」跟随该卡滑块：在「优化提示词」页签显示优，在「默认」页签显示默
   const ob = el('span', 'eph-badge' + (card.useOptimized ? ' eph-badge-opt' : ''));
   ob.textContent = card.useOptimized ? ezT('Opt') : ezT('Def');
@@ -1793,11 +1881,41 @@ function buildCardRow(node, card, index) {
       [ezT('Save this card'), () => saveSingleCard(node, card)],
       [ezT('Edit card'), () => openEditModal(node, card.id)],
       [(card.liveIn ? '✓ ' : '') + ezT('Live-editable input card'), () => { card.liveIn = !card.liveIn; syncToConfig(node); refreshUI(node); }],
+      [(card.loop ? '✓ ' : '') + ezT('Loop card (every round)'), () => { card.loop = !card.loop; syncToConfig(node); refreshUI(node); }],
+      ...(card.loop ? [[ezT('Choose loop rounds…'), () => editLoopIndicesPH(node, card)]] : []),
     ]);
   });
   if (node._ezBatch && batchSelIds(node).has(card.id)) row.classList.add('on');
   row.appendChild(handle); row.appendChild(idx); row.appendChild(ctitle); row.appendChild(preview); row.appendChild(time); row.appendChild(mg); row.appendChild(del);
   return row;
+}
+function maxLoopRoundsPH(node) {
+  let max = 0;
+  const nodes = ((app && app.graph && app.graph._nodes) || []);
+  nodes.forEach((n) => {
+    try {
+      const t = String((n && n.type) || '');
+      if (t === 'EzFlex-TimePlan') {
+        const p = tlPlan(n);
+        if (p && Array.isArray(p.segs)) max = Math.max(max, p.segs.length);
+      } else if (t === 'EzFlex-LoopEnd') {
+        const w = (n.widgets || []).find((x) => x && x.name === 'rounds');
+        const v = parseInt(w && w.value, 10);
+        if (v > 0) max = Math.max(max, v);
+      }
+    } catch (_) {}
+  });
+  return Math.max(1, max || 20);
+}
+async function editLoopIndicesPH(node, card) {
+  const picked = await ezPickLoopIndices({
+    max: maxLoopRoundsPH(node),
+    selected: Array.isArray(card.loopIndices) ? card.loopIndices : null,
+    title: ezT('Loop rounds for this card group'),
+  });
+  if (picked === null) return;
+  card.loopIndices = picked;
+  syncToConfig(node); refreshUI(node);
 }
 function updateSocketLabels(node, cardId, label) {
   try {
@@ -1816,7 +1934,45 @@ function renderCards(node) {
   if (!st.cards.length) { const e = el('div', 'eph-empty'); e.textContent = ezT('No prompt cards yet. Click "+ Add prompt card" to add.'); list.appendChild(e); return; }
   st.cards.forEach((c, i) => list.appendChild(buildCardRow(node, c, i)));
   attachDnD(list, '.eph-card', '.eph-handle', (from, to) => reorderCard(node, from, to));
-  fitNode(node);
+}
+
+// ★★ 就地刷新某一张卡的列表行 —— **绝不重建整条列表**。
+//   为什么必须有它：平铺模式下点「另一张卡」时，mousedown 会让当前编辑器 blur → focusout 落盘。
+//   若那一刻跑 renderCards，整条 `.eph-list` 被 innerHTML 清掉重造，**正被点的那一行从 DOM 里消失了**；
+//   浏览器随后派发 click 时，mousedown 目标已脱离文档 → click 要么丢失、要么落在 detached 节点上
+//   （症状就是「切卡第一下不生效，得再点一次」）。
+//   根治办法不是「延后重建」（pointerup 里同步重建同样会在 click 之前换掉那一行），
+//   而是**根本别换行**：只把「因内容编辑而变」的几处就地改掉。
+//   返回 false 表示没找到该行（调用方可退回整表刷新）。
+function patchCardRow(node, cardId) {
+  const root = node && node._ezRoot;
+  if (!root || cardId == null) return false;
+  let row = null;
+  try {
+    const rows = root.querySelectorAll('.eph-card');
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].dataset && String(rows[i].dataset.id) === String(cardId)) { row = rows[i]; break; }
+    }
+  } catch (_) { return false; }
+  if (!row) return false;
+  const card = stateFor(node).cards.find((c) => String(c.id) === String(cardId));
+  if (!card) return false;
+  const pv = row.querySelector('.eph-preview');
+  if (pv) pv.textContent = (card.useOptimized ? card.contentOptimized : card.content) || '';
+  const ob = row.querySelector('.eph-badge-opt');
+  if (ob) {
+    ob.textContent = card.useOptimized ? ezT('Opt') : ezT('Def');
+    ob.title = card.useOptimized
+      ? ezT('Output uses the "Optimized prompt" tab: ') + (card.contentOptimized ? String(card.contentOptimized).slice(0, 200) : ezT(' (still empty)'))
+      : ezT('Output uses the "Default" tab');
+  }
+  const ti = row.querySelector('.eph-ctitle-input');
+  if (ti && document.activeElement !== ti) ti.textContent = card.title || '';
+  const tm = row.querySelector('.eph-time');
+  if (tm) tm.textContent = (card.timelineStart && card.timelineEnd) ? `${card.timelineStart}-${card.timelineEnd}s` : '';
+  const mg = row.querySelector('.eph-merge-btn');
+  if (mg) mg.classList.toggle('on', !card.mergeOff);
+  return true;
 }
 
 // ===== 编辑器弹窗 =====
@@ -2163,6 +2319,7 @@ function editModalEl() {
   initColorDropdown(fcDD, 'font');
   const toolsItems = [[ezT('Optimize prompt (API)'), 'optimize'], [ezT('Optimize prompt (TextGenerate)'), 'textgen'], [ezT('Optimize prompt (llama)'), 'llama'],
     [ezT('Find / Replace'), 'find'],
+    [ezT('Clear styles'), 'clearStyle'],
     [ezT('Hyphens to underscores'), 'dashToUnderscore'], [ezT('Underscores to hyphens'), 'underscoreToDash'],
     [ezT('Hyphens to spaces'), 'dashToSpace'], [ezT('Underscores to spaces'), 'underscoreToSpace'],
     [ezT('Full-width to half-width'), 'fullToHalf'], [ezT('Half-width to full-width'), 'halfToFull']];
@@ -2193,11 +2350,14 @@ function editModalEl() {
   // 自动保存只在平铺模式：焦点离开编辑器就落盘（弹窗模式不自动存，点「取消」仍能丢弃）
   editor.addEventListener('focusout', () => {
     if (!_editModal.classList.contains('ph-dock')) return;
-    // ★ 平铺模式：这一下 blur 常常就是「点卡片列表里另一张卡」引起的。这里立刻 renderCards 会把整条列表
-    //   重建掉 → 紧接着的 click 落不到原来那一行 → 用户看到「第一下不生效、第二下才行」。
-    //   所以先只把内容落盘（skipUI），列表等 pointerup 之后再刷。
+    // ★★ 平铺模式：这一下 blur 常常就是「点卡片列表里另一张卡」引起的。
+    //   旧的「延后到 pointerup 再 renderCards」不够 —— pointerup 里同步重建同样会在浏览器派发
+    //   click **之前**把「正被点的那一行」换掉 → 第一下点了没反应。所以这里**只落盘 + 就地改那一行**，
+    //   绝不重建列表（见 patchCardRow 注释）。找不到该行才退回延后整表刷新。
+    const nd = _editModal && _editModal._node;
+    const cid = nd ? stateFor(nd).editingId : null;
     try { editModalCommit(null, { skipUI: true }); } catch (_) {}
-    refreshCardsSoon(_editModal && _editModal._node);
+    if (!nd || cid == null || !patchCardRow(nd, cid)) refreshCardsSoon(nd);
   });
   // 点击弹窗外（backdrop）→ 关闭并保存；卡片内部拖动到外面松开不关闭（避免误关）。
   // _phDownTarget 守卫：全屏浮层（图片查看器/取色器）在 mousedown 时就把自己藏起来了，鼠标松开时命中的会变成下层弹窗，
@@ -2213,7 +2373,9 @@ function openEditModal(node, cardId) {
   const st = stateFor(node);
   const card = st.cards.find((c) => c.id === cardId);
   if (!card) return;
-  if (_editModal && _editModal.classList.contains('active') && _editModal._node === node && st.editingId && st.editingId !== cardId) editModalCommit(node);   // 换卡前先把上一张存了
+  // 换卡前先把上一张存了。★ 用 skipUI：平铺模式下 focusout 已经落过盘了，这里再整表重建纯属多余，
+  //   而且会把「当前这一下 click 所在的行」换掉（虽然 click 已经派发，但白重建还容易踩时序）。
+  if (_editModal && _editModal.classList.contains('active') && _editModal._node === node && st.editingId && st.editingId !== cardId) editModalCommit(node, { skipUI: true });
   st.editingId = cardId;
   const tab = card.editTab || 'default';   // 记住上次所选页签
     st.currentTab = tab;
@@ -2222,11 +2384,11 @@ function openEditModal(node, cardId) {
   if (m._titleEl) m._titleEl.textContent = card.title || ezT('Edit prompt');
   if (tab === 'optimized') {
     m._tabOptimized.classList.add('active'); m._tabDefault.classList.remove('active');
-    m._editor.innerHTML = ezSanitizeHtml(card.contentOptimizedHTML || card.contentOptimized || '');
+    m._editor.innerHTML = cardHtmlOf(card.contentOptimizedHTML, card.contentOptimized);
     unwrapTagChips(m._editor);
   } else {
     m._tabDefault.classList.add('active'); m._tabOptimized.classList.remove('active');
-    m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || '');
+    m._editor.innerHTML = cardHtmlOf(card.contentHTML, card.content);
     unwrapTagChips(m._editor);
   }
   if (m._ruleDD) { m._ruleDD.setItems(ruleDropdownItems(node, false)); m._ruleDD.value = _normRuleId(phRulesModel(node).ruleId) || 'none'; }
@@ -2242,8 +2404,15 @@ function openEditModal(node, cardId) {
   // 引用媒体窗口开着时跟着切到这张卡（编号/可插项按新卡片的引用目标重算）；总体编辑不联动（它一次看所有卡）
   try { if (_refBrowser && _refBrowser.classList.contains('active')) renderRefBrowser(node, m._editor, card); } catch (_) {}
   requestAnimationFrame(moveTabThumb);
-  // applyIndent 会重建编辑器 DOM（光标丢失），所以重建完再把光标放到末尾：接着写 / 插引用都在末尾
-  setTimeout(() => { try { applyIndent(m._indentInput.value); m._editor.focus(); caretToEditorEnd(m._editor); } catch (_) {} }, 100);
+  // applyIndent 会重建编辑器 DOM（光标丢失），所以重建完再把光标放到末尾：接着写 / 插引用都在末尾。
+  // ★ 句柄要留住：100 ms 内用户可能已经点进正文中间开始打字，或已经关掉/换了卡片。
+  try { clearTimeout(m._indentTimer); } catch (_) {}
+  m._indentTimer = setTimeout(() => {
+    m._indentTimer = 0;
+    if (!m._editor || !m._editor.isConnected) return;
+    if (m._editor.contains(document.activeElement)) return;   // 已经在打字：别重建、别抢光标
+    try { applyIndent(m._indentInput.value); m._editor.focus(); caretToEditorEnd(m._editor); } catch (_) {}
+  }, 100);
 }
 function switchTab(tab) {
   const nd = _editModal && _editModal._node;
@@ -2264,11 +2433,11 @@ function switchTab(tab) {
   refreshUI(nd);   // 卡片列表的预览文字 / 优默标记跟着滑块走
   if (tab === 'default') {
     _editModal._tabDefault.classList.add('active'); _editModal._tabOptimized.classList.remove('active');
-    _editModal._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || '');
+    _editModal._editor.innerHTML = cardHtmlOf(card.contentHTML, card.content);
     unwrapTagChips(_editModal._editor);
   } else {
     _editModal._tabOptimized.classList.add('active'); _editModal._tabDefault.classList.remove('active');
-    _editModal._editor.innerHTML = ezSanitizeHtml(card.contentOptimizedHTML || card.contentOptimized || '');
+    _editModal._editor.innerHTML = cardHtmlOf(card.contentOptimizedHTML, card.contentOptimized);
     unwrapTagChips(_editModal._editor);
   }
   requestAnimationFrame(moveTabThumb);
@@ -2295,11 +2464,12 @@ function editModalCommit(nd, opts) {
   card.indent = ezReadIndentFromScope(m._editor, parseFloat(m._indentInput.value) || 0);
   if (m._indentInput && String(card.indent) !== m._indentInput.value) m._indentInput.value = String(card.indent);
   syncToConfig(n);
-  if (!(opts && opts.skipUI)) refreshUI(n);   // skipUI：调用方自己安排刷新时机（平铺模式点另一张卡时不能在这一刻重建列表）
+  if (!(opts && opts.skipUI)) refreshUI(n);   // skipUI：调用方自己安排刷新时机（平铺模式点另一张卡时改用 patchCardRow 就地改行，绝不重建列表）
   return true;
 }
 function closeEditModal(save) {
   const nd = _editModal && _editModal._node;
+  try { if (_editModal && _editModal._indentTimer) { clearTimeout(_editModal._indentTimer); _editModal._indentTimer = 0; } } catch (_) {}
   if (save && nd) {
     editModalCommit(nd);
     updatePorts(nd);
@@ -2624,45 +2794,128 @@ function insertText(text) {
   document.execCommand('insertText', false, text);
   saveSelection();
 }
+// ===== 清除全文样式（工具栏「工具」/ 右键「工具」）=====
+// 粗/斜/下划线/删除线、颜色/高亮、字号、对齐、首行缩进，以及只为样式而存在的 <font>/<span>/<b>… 壳。
+// 只拆样式，不动文字、段落块（div/p/br）与引用媒体芯片（.eph-mref 里是内容，不是样式）。
+const _PH_STYLE_TAGS = /^(B|I|U|S|STRIKE|EM|STRONG|FONT|SPAN|SMALL|BIG|MARK|SUB|SUP|DEL|INS|CENTER)$/;
+function _phStripFormat(root) {
+  if (!root || !root.querySelectorAll) return;
+  Array.from(root.querySelectorAll('*')).forEach((el) => {
+    if (!el || !el.tagName) return;
+    if (el.closest && el.closest('.eph-mref,[contenteditable="false"]')) return;   // 引用媒体芯片整块跳过
+    if (el.tagName === 'BR') return;                                              // 软换行是结构，不是样式
+    if (_PH_STYLE_TAGS.test(el.tagName)) { try { el.replaceWith(...el.childNodes); } catch (_) {} return; }   // 拆掉纯样式壳
+    try { el.removeAttribute('style'); el.removeAttribute('align'); } catch (_) {}                           // 块：只清内联样式
+  });
+}
+function phCurrentFontSize(ed) {
+  try {
+    const host = ed && ed.closest && ed.closest('.eph-modal,.eph-all');
+    const inp = host && host.querySelector('.eph-font-combo input');
+    let v = inp ? String(inp.value || '').trim() : '';
+    if (!v) return '';
+    if (/^\d+(?:\.\d+)?$/.test(v)) return v + 'px';
+    if (/^\d+(?:\.\d+)?(?:px|pt|em|rem|%)$/i.test(v)) return v;
+    const li = host.querySelectorAll('.eph-font-list li');
+    for (let i = 0; i < li.length; i++) {
+      if (String(li[i].textContent || '').trim() === v) return li[i].dataset.value || '';
+    }
+  } catch (_) {}
+  return '';
+}
+function phClearAllStyles(ed) {
+  if (!ed) return;
+  // 有选区 → 只清选区；没选区 → 清全部（恢复默认字号/无格式）
+  let sel = null, range = null;
+  try { sel = window.getSelection ? window.getSelection() : null; } catch (_) { sel = null; }
+  try {
+    if (sel && sel.rangeCount) {
+      range = sel.getRangeAt(0);
+      if (range.collapsed || !ed.contains(range.commonAncestorContainer)) range = null;
+    }
+  } catch (_) { range = null; }
+  if (range) {
+    try {
+      const frag = range.cloneContents();
+      _phStripFormat(frag);
+      range.deleteContents();
+      range.insertNode(frag);
+      const r2 = document.createRange(); r2.selectNodeContents(frag); r2.collapse(false);
+      sel.removeAllRanges(); sel.addRange(r2);
+    } catch (_) {}
+  } else {
+    const bodies = ed.querySelectorAll ? Array.from(ed.querySelectorAll('.eph-all-block-body')) : [];
+    (bodies.length ? bodies : [ed]).forEach(_phStripFormat);   // 总体编辑 = 每张卡片正文；卡片弹窗 = 整段
+  }
+  // 清除格式后按当前工具栏字号重新铺底（否则会掉回编辑器的 14px 默认值）。
+  try { const fs = phCurrentFontSize(ed); if (fs) ed.style.fontSize = fs; } catch (_) {}
+  try { ed.focus(); } catch (_) {}
+  try { saveSelection(); } catch (_) {}
+}
+// 字符级替换：只改文本节点，芯片（.eph-mref，contenteditable=false）与行内格式、光标都保留。
+// ⚠️ 别用 ed.textContent = …（会销毁所有子元素：@芯片、<b>、<font> 全没，光标也丢）。
+function phMapText(ed, fn) {
+  if (!ed) return;
+  const doc = ed.ownerDocument || document;
+  const walker = doc.createTreeWalker(ed, NodeFilter.SHOW_TEXT, {
+    acceptNode(n) {
+      const p = n.parentElement;
+      if (p && p.closest && p.closest('.eph-mref, .eph-tag-x')) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach((n) => { const v = fn(n.nodeValue); if (v !== n.nodeValue) n.nodeValue = v; });
+}
 function runTool(id) {
   const ed = _editModal && _editModal._editor;
   if (!ed) return;
-  const text = ed.textContent;
+  if (id === 'clearStyle') { phClearAllStyles(ed); return; }
   if (id === 'fullToHalf') {
     // 只把全角标点 + 全角空格 转半角，不碰字母/数字/文字。
     const map = { '，': ',', '。': '.', '！': '!', '？': '?', '：': ':', '；': ';', '“': '"', '”': '"', '‘': "'", '’': "'", '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>', '、': ',', '—': '-', '～': '~' };
-    ed.textContent = text.replace(/[，。！？：；“”‘’（）【】《》、—～]/g, (ch) => map[ch] || ch).replace(/\u3000/g, ' ');
+    phMapText(ed, (s) => s.replace(/[，。！？：；“”‘’（）【】《》、—～]/g, (ch) => map[ch] || ch).replace(/\u3000/g, ' '));
     saveSelection(); return;
   }
   if (id === 'halfToFull') {
     // 把半角标点转全角，不碰字母/数字/文字/空格。
     const map = { ',': '，', '.': '。', '!': '！', '?': '？', ':': '：', ';': '；', '"': '“', "'": '‘', '(': '（', ')': '）', '[': '【', ']': '】', '<': '《', '>': '》', '~': '～', '-': '—' };
-    ed.textContent = text.replace(/[,\.!\?:;"'\(\)\[\]<>~-]/g, (ch) => map[ch] || ch);
+    phMapText(ed, (s) => s.replace(/[,\.!\?:;"'\(\)\[\]<>~-]/g, (ch) => map[ch] || ch));
     saveSelection(); return;
   }
   // 只换这一个符号
-  if (id === 'dashToUnderscore') { ed.textContent = text.replace(/-/g, '_'); saveSelection(); return; }
-  if (id === 'underscoreToDash') { ed.textContent = text.replace(/_/g, '-'); saveSelection(); return; }
-  if (id === 'dashToSpace') { ed.textContent = text.replace(/-/g, ' '); saveSelection(); return; }
-  if (id === 'underscoreToSpace') { ed.textContent = text.replace(/_/g, ' '); saveSelection(); return; }
+  if (id === 'dashToUnderscore') { phMapText(ed, (s) => s.replace(/-/g, '_')); saveSelection(); return; }
+  if (id === 'underscoreToDash') { phMapText(ed, (s) => s.replace(/_/g, '-')); saveSelection(); return; }
+  if (id === 'dashToSpace') { phMapText(ed, (s) => s.replace(/-/g, ' ')); saveSelection(); return; }
+  if (id === 'underscoreToSpace') { phMapText(ed, (s) => s.replace(/_/g, ' ')); saveSelection(); return; }
   if (id === 'optimize' || id === 'textgen' || id === 'llama') { runOptimize(id, ed); }
 }
 // ===== 优化调用进度弹窗 =====
 let _phProg = null;
+// 优化请求的「停止」：abort 掉在飞的 fetch + 标记本轮作废（结果不回写）。
+// ⚠️ 与生图预览的 genProg 不同：这里停下后**不自动关**进度条（用户要求），只能手动 ✕。
+let _phOptAbort = null;
+let _phOptStopped = false;
 function phProgEl(node) {
   if (_phProg && _phProg.parentNode) return _phProg;
   _phProg = el('div', 'eph-prog');
   const hd = el('div', 'eph-prog-hd');
   const title = el('span', 'eph-prog-title'); title.textContent = ezT('Settings');
   const count = el('span', 'eph-prog-count'); count.textContent = '';
+  const stop = el('button', 'eph-prog-stop'); stop.type = 'button'; stop.textContent = ezT('Stop');
+  stop.title = ezT('Stop optimizing and cancel the current request');
+  stop.hidden = true;
   const close = el('button', 'eph-prog-close'); close.textContent = '✕'; close.title = ezT('Close progress');
-  hd.appendChild(title); hd.appendChild(count); hd.appendChild(close);
+  hd.appendChild(title); hd.appendChild(count); hd.appendChild(stop); hd.appendChild(close);
   const bar = el('div', 'eph-prog-bar'); const fill = el('div', 'eph-prog-fill'); bar.appendChild(fill);
   const detail = el('div', 'eph-prog-detail');
   _phProg.appendChild(hd); _phProg.appendChild(bar); _phProg.appendChild(detail);
   _phProg._title = title; _phProg._count = count; _phProg._fill = fill; _phProg._detail = detail;
+  _phProg._stop = stop;
   _phProg.addEventListener('click', (e) => { if (e.target === close) { phProgHide(); return; } _phProg.classList.toggle('open'); });
   close.addEventListener('click', (e) => { e.stopPropagation(); phProgHide(); });
+  stop.addEventListener('click', (e) => { e.stopPropagation(); phProgStop(); });
   document.body.appendChild(_phProg);
   return _phProg;
 }
@@ -2674,9 +2927,12 @@ function phProgShow(node, total, method) {
   const m = phProgEl(node);
   m._total = Math.max(1, total | 0);
   m._done = 0;
+  _phOptStopped = false;                                   // 新一轮：清掉上一轮的「已停止」
+  if (m._stop) m._stop.hidden = false;                     // 运行中才显示「停止」
   m._title.textContent = (method ? method + ' · ' : '') + ezT('Optimizing');
   m._count.textContent = m._total > 1 ? ('0/' + m._total) : '';
   m._fill.style.width = '0%';
+  m._fill.style.background = '';
   m._fill.className = 'eph-prog-fill' + (m._total > 1 ? '' : ' indeterminate');
   m._detail.innerHTML = '';
   if (m._hideTimer) { clearTimeout(m._hideTimer); m._hideTimer = null; }   // 上一轮的自动收起作废
@@ -2685,28 +2941,45 @@ function phProgShow(node, total, method) {
 }
 function phProgTick(node, done, label) {
   const m = phProgEl(node);
+  if (_phOptStopped) return;                               // 已停止：后续 tick 不再刷新界面
   m._done = done;
   const pct = Math.round(done / m._total * 100);
   m._fill.style.width = pct + '%';
   if (m._total > 1) { m._count.textContent = done + '/' + m._total; m._fill.className = 'eph-prog-fill'; }
   if (label) { const line = el('div', 'eph-prog-line'); line.textContent = '✓ ' + label; m._detail.appendChild(line); }
 }
+// 点「停止」：abort 掉在飞的请求 + 把本轮标记作废；进度条**保留**（不自动关），只换成「已停止」样式
+function phProgStop() {
+  const m = _phProg; if (!m) return;
+  _phOptStopped = true;
+  try { if (_phOptAbort) _phOptAbort.abort(); } catch (_) {}
+  _phOptAbort = null;
+  if (m._stop) m._stop.hidden = true;                      // 已停：藏掉停止按钮
+  m._title.textContent = ezT('Stopped');
+  m._count.textContent = '';
+  m._fill.className = 'eph-prog-fill';                     // 去掉 indeterminate 动画，停在当前宽度
+  m._fill.style.background = 'var(--ez-fg-3)';             // 灰掉：明确「不是正常完成」
+  const line = el('div', 'eph-prog-line'); line.textContent = '■ ' + ezT('Stopped');
+  m._detail.appendChild(line);
+  if (m._hideTimer) { clearTimeout(m._hideTimer); m._hideTimer = null; }
+}
 function phProgErr(node, msg) {
   const m = phProgEl(node);
+  if (m._stop) m._stop.hidden = true;
   m._title.textContent = ezT('Call failed');
   m._fill.style.width = '100%'; m._fill.className = 'eph-prog-fill'; m._fill.style.background = 'var(--ez-bad)';
   const line = el('div', 'eph-prog-line err'); line.textContent = '✕ ' + msg; m._detail.appendChild(line);
-  // 失败信息留 6 秒后自动收起：否则它一直浮在卡片弹窗上层，挡住编辑器点不进去
-  if (m._hideTimer) clearTimeout(m._hideTimer);
-  m._hideTimer = setTimeout(() => { m._hideTimer = null; phProgHide(); }, 6000);
+  // ★ 进度条不自动关（用户要求）：失败信息留在原地，用户自己点 ✕ 关
+  if (m._hideTimer) { clearTimeout(m._hideTimer); m._hideTimer = null; }
 }
 function phProgDone(node) {
   const m = phProgEl(node);
-  m._fill.className = 'eph-prog-fill'; m._fill.style.width = '100%';
+  if (m._stop) m._stop.hidden = true;
+  m._fill.className = 'eph-prog-fill'; m._fill.style.width = '100%'; m._fill.style.background = '';
   if (m._total > 1) { m._count.textContent = m._total + '/' + m._total; }
   m._title.textContent = ezT('Done');
-  if (m._hideTimer) clearTimeout(m._hideTimer);
-  m._hideTimer = setTimeout(() => { m._hideTimer = null; phProgHide(); }, 1200);
+  // ★ 进度条不自动关（用户要求）：留在原地直到手动 ✕
+  if (m._hideTimer) { clearTimeout(m._hideTimer); m._hideTimer = null; }
 }
 function phProgHide() { if (_phProg) { _phProg.classList.remove('active'); _phProg.classList.remove('open'); } }
 // 浮动层跟随：下拉/颜色/工具面板都是 fixed 定位，弹窗拖动/缩放时不会自己跟；登记各自的重新定位函数，
@@ -2714,6 +2987,16 @@ function phProgHide() { if (_phProg) { _phProg.classList.remove('active'); _phPr
 const _phFloats = new Map();   // el -> { place, always }；always=true 的层没有 .active（规则气泡），只要还挂在 DOM 上就算开着
 function phFloatRegister(el, place, always) { if (el && typeof place === 'function') _phFloats.set(el, { place: place, always: !!always }); }
 function phFloatUnregister(el) { _phFloats.delete(el); }
+// 窗口尺寸变化时收起所有浮动下拉：监听只装一次。
+// （以前每个 makeDropdown 各装一个 window resize 闭包且从不解绑，重建筛选行时每次泄漏一个，闭包还带着旧菜单）
+let _phDDRsWired = false;
+function phDDWireResize() {
+  if (_phDDRsWired) return;
+  _phDDRsWired = true;
+  window.addEventListener('resize', () => {
+    document.querySelectorAll('.eph-dd-menu.active').forEach((m) => { try { m.classList.remove('active'); } catch (_) {} });
+  });
+}
 function phFloatReposition() {
   _phFloats.forEach((rec, el) => {
     if (!el || !el.isConnected || (!rec.always && !el.classList.contains('active'))) { _phFloats.delete(el); return; }
@@ -2814,14 +3097,20 @@ function mediaChipsOf(ed, m) {
   return out;
 }
 // 插入一份引用芯片（每次调用都插入一份：同一媒体可多次引用）。返回是否插入成功。
-function insertMediaRefOnce(ed, m, targetId) {
+function insertMediaRefOnce(ed, m, targetId, typeHint) {
   if (!ed) return false;
   const hit = mediaIndex(mediaKeyOf(m), targetId);
   const label = (hit && hit.label) || mediaRefLabel(m, targetId);
   if (!label) return false;   // 没接入生成节点的素材没有编号，不插入
   const t = indexTargetById(targetId);
   const sp = el('span', 'eph-mref'); sp.contentEditable = 'false';
-  sp.dataset.url = m.url || ''; sp.dataset.type = m.type || 'image'; sp.dataset.name = m.name || ''; sp.dataset.path = m.path || '';
+  // ★ 芯片上存的类型决定「点击芯片时用什么播放器」：优先用「素材所在端口/命中端口的类型」，
+  //   因为媒体的 m.type 是靠文件名后缀猜的 —— ComfyUI 的音频有时名字没有后缀（audio_1），
+  //   会被猜成 other/'' ⇒ 点芯片只当图片展示，没有任何播放控件。端口类型最可靠。
+  const hint = String(typeHint || '').toLowerCase();
+  const hitType = hit && hit.type ? String(hit.type).toLowerCase() : '';
+  const kind = hint || hitType || String(m.type || '').toLowerCase() || 'image';
+  sp.dataset.url = m.url || ''; sp.dataset.type = kind; sp.dataset.name = m.name || ''; sp.dataset.path = m.path || '';
   sp.dataset.key = mediaKeyOf(m); sp.dataset.n = String(label.replace(/[^\d]/g, ''));
   if (hit) { sp.dataset.target = hit.targetId; sp.dataset.tag = hit.tag || ''; sp.title = hit.targetKey + ' · ' + hit.port + (hit.tag ? ' → ' + hit.tag : ''); }
   else if (t) sp.title = t.title;
@@ -2962,7 +3251,7 @@ function rbTile(ed, node, card, target, port, m) {
     // 而这张卡片的提示词只会喂给它自己的目标节点，用素材所在节点的号会串号。
     // 卡片没设引用目标时，才退回用素材所在节点。
     const want = cardRefId(card) || target.id;
-    if (!insertMediaRefOnce(ed, m, want)) {
+    if (!insertMediaRefOnce(ed, m, want, port && port.type)) {
       const tn = indexTargetById(want);
       rbHint(ezT('Media "') + (m.name || m.path || '') + ezT('" is not on an input port of the reference target "') + ((tn && tn.title) || want) + ezT('" of this card, so the inserted @number will not match: connect the media to that generator node, or right-click "')
         + (target.title || target.type) + ezT('" to set it as the reference target of this card.'));
@@ -2988,7 +3277,7 @@ function rbTile(ed, node, card, target, port, m) {
     if (e.target.closest('button') || e.target.closest('audio') || e.target.closest('.ez-ap')) return;
     const vid = tile.querySelector('video'); if (vid && !vid.paused) return;
     if (type === 'audio') return;
-    if (type === 'model') { window.open(m.url, '_blank'); return; }
+    if (type === 'model') { const u = ezSafeUrl(m.url); if (u) window.open(u, '_blank'); return; }
     phMediaViewer(m.url, type, m.name);
   });
   refresh();
@@ -3163,7 +3452,14 @@ function phMediaViewer(url, type, name) {
   const box = m._box;
   stopMediaIn(box);   // 换素材前先停掉上一个
   box.querySelectorAll('.eph-mv-media, .ez-ap').forEach((x) => x.remove());
-  const isVid = /\.(mp4|webm|mov|mkv|avi)([?#]|$)/i.test(url), isAud = /\.(mp3|wav|flac|ogg|m4a|opus)([?#]|$)/i.test(url);
+  // ★ 类型优先信「调用方给的 type」（芯片 dataset.type 来自端口类型，最准）；
+  //   只有 type 不明确时才退回按 URL 扩展名嗅探。以前只看扩展名 ⇒ 没有标准后缀的
+  //   音频 URL（ComfyUI /view?filename=… 、含 &preview= 的、.aac/.wma 等）会被当成图片 ⇒ 「点了没控件」。
+  const tnorm = String(type || '').toLowerCase();
+  const extVid = /\.(mp4|webm|mov|mkv|avi|m4v|gifv)([?#]|$)/i.test(url);
+  const extAud = /\.(mp3|wav|flac|ogg|oga|m4a|opus|aac|wma|aiff|aif)([?#]|$)/i.test(url);
+  const isAud = tnorm === 'audio' || (!tnorm && extAud) || (tnorm !== 'video' && tnorm !== 'image' && extAud);
+  const isVid = !isAud && (tnorm === 'video' || (!tnorm && extVid));
   const tag = isVid ? 'video' : isAud ? 'audio' : 'img';
   const media = isAud ? makeAudioPlayer(url) : document.createElement(tag);
   if (media.className !== 'ez-ap') { media.className = 'eph-mv-media'; media.controls = true; media.src = url; if (tag === 'video') media.autoplay = true; }
@@ -3172,14 +3468,22 @@ function phMediaViewer(url, type, name) {
   m.classList.add('active');
 }
 let _rpEl = null;
+let _rpHideTimer = 0;   // ★ 预览从「按钮」挪到「预览框」之间有一段空隙（含 8px 间隙），指针横穿时按钮的 mouseleave 会立刻把框收掉，
+                        //   控件就点不到了。改成延迟收起：离开按钮后等一小会儿，只要期间进了预览框就取消收起。
 function refPreviewEl() {
   if (_rpEl && _rpEl.parentNode) return _rpEl;
   _rpEl = el('div', 'eph-rp'); _rpEl.style.display = 'none'; document.body.appendChild(_rpEl);
+  // 指针进到预览框 = 取消收起；离开预览框 = 正常收起（含延迟，方便手指/鼠标来回移动）
+  _rpEl.addEventListener('mouseenter', () => { if (_rpHideTimer) { clearTimeout(_rpHideTimer); _rpHideTimer = 0; } });
+  _rpEl.addEventListener('mouseleave', () => refPreviewHide());
   return _rpEl;
 }
-function refPreviewShow(btn, m) {
+function _rpCancelHide() { if (_rpHideTimer) { clearTimeout(_rpHideTimer); _rpHideTimer = 0; } }
+function refPreviewShow(btn, m, typeHint) {
+  _rpCancelHide();
   const elm = refPreviewEl(); elm.innerHTML = '';
-  const tag = m.type === 'video' ? 'video' : m.type === 'audio' ? 'audio' : 'img';
+  const kind = String(typeHint || m.type || '').toLowerCase();
+  const tag = kind === 'video' ? 'video' : kind === 'audio' ? 'audio' : 'img';
   const media = tag === 'audio' ? makeAudioPlayer(m.url) : document.createElement(tag);
   if (media.className !== 'ez-ap') { media.className = 'eph-rp-media'; media.src = m.url; if (tag === 'video' || tag === 'audio') { media.controls = true; media.muted = true; media.autoplay = true; } }
   const cap = el('div', 'eph-rp-cap'); cap.textContent = m.name || '';
@@ -3189,12 +3493,29 @@ function refPreviewShow(btn, m) {
   elm.style.display = 'block';
   const r = btn.getBoundingClientRect();
   const w = elm.offsetWidth || 240, h = elm.offsetHeight || 0;
-  let left = r.right + 8;
-  if (left + w > window.innerWidth - 8) left = Math.max(8, r.left - w - 8);
+  // ★ 贴着「菜单」右沿放（0 间隙）——以前贴按钮右沿还留 8px，指针横穿那段空白时按钮/菜单的
+  //   mouseleave 会立刻收框，控件就点不到。现在预览框左沿与菜单右沿严丝合缝，并配合
+  //   「延迟收起 + 进预览框取消」，鼠标往右挪进预览区不会丢。
+  //   右边放不下就往左翻（贴菜单左沿），再按上下边界收，保证整块可见。
+  const menuEl = document.querySelector('.eph-dd-menu.active');
+  const menu = menuEl ? menuEl.getBoundingClientRect() : null;
+  const anchor = menu || r;
+  let left = anchor.right;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, anchor.left - w);
   elm.style.left = left + 'px';
+  // 竖直方向对齐到「悬停项」的顶部，并整体收进视口
   elm.style.top = Math.max(8, Math.min(r.top, window.innerHeight - h - 8)) + 'px';
 }
-function refPreviewHide() {
+function refPreviewHide(immediate) {
+  _rpCancelHide();
+  if (!immediate) {
+    // 延迟收起：给指针 260ms 从按钮挪进预览框（这两块之间必然有缝）
+    _rpHideTimer = setTimeout(() => { _rpHideTimer = 0; _rpDoHide(); }, 260);
+    return;
+  }
+  _rpDoHide();
+}
+function _rpDoHide() {
   const elm = refPreviewEl(); elm.style.display = 'none';
   const v = elm.querySelector('video,audio'); if (v) { try { v.pause(); } catch (_) {} }
   try { refPreviewEl().innerHTML = ''; } catch (_) {}
@@ -3289,8 +3610,8 @@ async function mentionShow(ctx, q, startNode, startOff, rng, ed) {
       b.title = ezT('Not on an input port of the reference target of this card "') + ((tn && tn.title) || want) + ezT('": cannot be referenced; connect the media to that generator node, or change the reference target in "Reference media" to "') +
         (x.from.title || x.from.type) + ezT('".');
     }
-    b.addEventListener('mouseenter', () => refPreviewShow(b, m));
-    b.addEventListener('mouseleave', refPreviewHide);
+    b.addEventListener('mouseenter', () => { _rpCancelHide(); refPreviewShow(b, m, x.port && x.port.type); });
+    b.addEventListener('mouseleave', () => refPreviewHide());
     b.addEventListener('mousedown', (ev) => ev.preventDefault());
     b.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -3306,7 +3627,7 @@ async function mentionShow(ctx, q, startNode, startOff, rng, ed) {
         saveSelection();
       }
       // 每次都插入一份新引用（同一媒体可以多次引用），已存在也照插
-      insertMediaRefOnce(ed, m, want);
+      insertMediaRefOnce(ed, m, want, x.port && x.port.type);
       hideMention();
     });
     menu.appendChild(b);
@@ -3357,11 +3678,13 @@ async function cardImageDataUrls(node, card) {
   const out = [];
   for (const m of picked) {
     try {
-      const r = await fetch(m.url);
+      const u = ezSafeUrl(m.url);
+      if (!u) continue;
+      const r = await fetchApi(u);
       if (!r.ok) continue;
       const blob = await r.blob();
       const d = await new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(String(fr.result || '')); fr.onerror = () => res(''); fr.readAsDataURL(blob); });
-      if (d) out.push(fixDataUrlMime(d, m.url));
+      if (d) out.push(fixDataUrlMime(d, u));
     } catch (_) {}
   }
   return out;
@@ -3414,8 +3737,10 @@ async function runOptimize(id, ed) {
   if (medias.length) payload.media = medias;
   if (imgs.length || medias.length) phProgTick(nd, 0, where + ' ' + ezT('attached ') + (imgs.length ? imgs.length + ' ' + ezT('images') : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' ' + ezT('video/audio') : '') + ezT(', calling…'));
   try {
-    const res = await (async () => { const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); return r; })();
+    _phOptAbort = (typeof AbortController === 'function') ? new AbortController() : null;
+    const res = await (async () => { const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: _phOptAbort ? _phOptAbort.signal : undefined }); return r; })();
     const data = await res.json().catch(() => ({ error: ezT('Failed to parse response') }));
+    if (_phOptStopped) return;                              // 用户已点「停止」：结果直接丢弃
     if (!res.ok || data.error) {
       const why = data.error || ('HTTP ' + res.status);
       phProgErr(nd, why);
@@ -3433,22 +3758,34 @@ async function runOptimize(id, ed) {
       const tabDef = _editModal && _editModal._tabDefault;
       if (tabOpt) { tabOpt.classList.add('active'); tabDef && tabDef.classList.remove('active'); }
       st.currentTab = 'optimized';
-      if (_editModal) { _editModal._editor.innerHTML = ezSanitizeHtml(card.contentOptimizedHTML); unwrapTagChips(_editModal._editor); }
+      if (_editModal) { _editModal._editor.innerHTML = cardHtmlOf(card.contentOptimizedHTML, card.contentOptimized); unwrapTagChips(_editModal._editor); }
       requestAnimationFrame(moveTabThumb);
       syncToConfig(nd);
       refreshUI(nd);   // 列表里的预览文字 / 优默标记立刻切到优化版
     }
     phProgDone(nd);
   } catch (e) {
+    if (_phOptStopped) return;                              // abort 触发的异常：不算失败
     const why = (e && e.message ? e.message : e);
     phProgErr(nd, why);
     phTip(ezT('Optimization request failed: ') + why + '  [' + where + ']', 6000);
+  } finally {
+    _phOptAbort = null;
   }
 }
 function plainTextToHtml(text) {
   const d = document.createElement('div');
   text.split(/\r?\n/).forEach((line) => { const p = document.createElement('div'); p.textContent = line; d.appendChild(p); });
   return d.innerHTML;
+}
+// 卡片正文 → 能放进 innerHTML 的 HTML：有 HTML 字段就用它，只有纯文本时必须过 plainTextToHtml。
+// ★ 直接把纯文本塞进 innerHTML，会把 `<lora:…>`、`<Picture 1>` 这类写法当成标签解析掉，
+//   保存后不可恢复（2026-11 复检 H-2；文件里 6757 行早就是正确写法，其它落点漏了）。
+function cardHtmlOf(html, text) {
+  const h = ezSanitizeHtml(String(html || ''));
+  if (h) return h;
+  const t = String(text || '');
+  return t ? plainTextToHtml(t) : '';   // 两边都空时保持空串（别塞一个空 <div>，编辑器占位/换行判断会受影响）
 }
 function optimizeFor(node) {
   const cfg = readConfig(node, {});
@@ -3457,7 +3794,10 @@ function optimizeFor(node) {
     provider: o.provider || 'OpenAI',
     model: o.model || '',
     apiUrl: o.apiUrl || '',
-    apiKey: o.apiKey || '',
+    apiKey: (() => {
+      if (o.apiKey) return o.apiKey;
+      try { return localStorage.getItem('ezflex.apiKey.' + (o.provider || 'OpenAI') + '|' + (o.apiUrl || '')) || ''; } catch (_) { return ''; }
+    })(),
     proxy: o.proxy || '',
     autoTextgen: !!o.autoTextgen,
     autoApi: !!o.autoApi,
@@ -3551,8 +3891,6 @@ function phCaretPiece(ed, range) {
   const fwd = p2 < full.length ? pick(p2, p2, true) : null;
   return fwd || pick(pos, pos, true);
 }
-// 取光标前/后第一个标签的文本（供测试与提示用）
-function phTagAtCaret(ed) { const p = phCaretPiece(ed); return p ? p.txt : ''; }
 // 取光标处那个标签的「解析结果」（层 + 权重）——权重面板打开时用来回填当前状态
 function phCaretPieceParsed(ed, range) {
   const p = phCaretPiece(ed, range);
@@ -3607,9 +3945,16 @@ function phWeightApply(ed, cfg, range) {
     _phWRange.setStart(p.node, caretOff);
     _phWRange.collapse(true);
   } catch (_) { _phWRange = null; }
-  // 还原真实光标（不还原就会跳到篇首）
+  // 还原真实光标（不还原就会跳到篇首）；★ 但焦点在权重面板里时别抢回来：
+  //   抢回来之后用户接着敲的数字会落进正文（与"数字进了提示词"是同一个病根）。
   try {
-    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(_phWRange.cloneRange()); saveSelection();
+    const _ae = document.activeElement;
+    const _inPanel = !!(_phWPanel && _phWPanel.contains(_ae));
+    if (!_inPanel) {
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(_phWRange.cloneRange()); saveSelection();
+    } else {
+      try { saveSelection(); } catch (_) {}
+    }
   } catch (_) {}
   try { ed.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
   _phActiveEditor = ed;
@@ -3666,7 +4011,7 @@ function phQuickWeight(ed, dir) {
 }
 // ===== 权重小面板（工具栏「权重」= 「权重模式」开关；开了模式后点正文里的标签才出面板）=====
 // 复用标签系统 .eph-tpw 的样式与交互。
-let _phWPanel = null, _phWBtn = null, _phWEd = null, _phWHideTimer = null;
+let _phWPanel = null, _phWEd = null, _phWHideTimer = null;
 let _phWRange = null;   // 打开面板时存下的光标 Range（点面板按钮后 live 选区已丢，必须靠它定位标签）
 let _phWMode = false;   // ★ 权重模式：true=可点标签出面板。只由工具栏「权重」按钮切换，按钮自己绝不出面板。
 // 取某个 Range 的光标矩形（面板要贴着光标出现，而不是贴着工具栏按钮）
@@ -3681,7 +4026,7 @@ function phRangeRect(range) {
   } catch (_) {}
   return null;
 }
-// 面板是否正开在「同一个编辑器的同一个标签」上（用于再次点击 = 收起）
+// 面板是否正开在「同一个编辑器的同一个标签」上（保留：以后若想恢复「再点一次 = 收起」直接接这里）
 function phWeightOpenOn(ed, range) {
   if (!_phWPanel || !_phWPanel.classList.contains('active')) return false;
   if (_phWEd !== ed) return false;
@@ -3730,10 +4075,15 @@ function phWeightPanelEl() {
   const inp = el('input', 'eph-tpw-in');
   inp.addEventListener('input', () => {
     const cfg = p._cfg();
-    cfg.w = Number(inp.value) || 1;
+    const _w = parseFloat(inp.value);
+    cfg.w = isFinite(_w) ? _w : 1;      // 0 是合法权重（等于关掉），别被 `|| 1` 改成 1（2026-11 复检 B-6）
     if (cfg.layers.indexOf('(') < 0) cfg.layers.push('(');
-    p._apply(cfg);
+    // 打字期间不回写输入框（同标签面板 tpwFill 的 _busy）：否则 "2." 会被立刻重写成 "2"，小数输不进去。
+    p._busy = true;
+    clearTimeout(p._wTimer);
+    p._wTimer = setTimeout(() => { try { p._apply(cfg); } finally { p._busy = false; } }, 120);
   });
+  inp.addEventListener('change', () => { try { phWeightPanelFill(); } catch (_) {} });   // 失焦时按实际权重回显（"0" 不是合法权重，会回到 1）
   const clr = el('button', 'eph-btn'); clr.textContent = ezT('Clear');
   clr.addEventListener('click', () => { p._apply({ layers: [], w: 1 }); if (p._in) p._in.value = '1'; });
   r1.appendChild(inp); r1.appendChild(clr);
@@ -3767,6 +4117,9 @@ function phWeightPanelEl() {
   p.addEventListener('mousedown', (e) => { if (!e.target.closest || !e.target.closest('.eph-tpw-in')) e.preventDefault(); });
   // 点面板外 / 层协调器关掉它时：只清面板相关状态（保留权重模式与按钮绿色态，模式仍开着方便继续点别的标签）
   p._phOnClose = () => { _phWEd = null; _phWRange = null; };
+  // ★ 点「本面板所属编辑器」里的文字不算「点外面」（层协调器 pointerup 会问它）：
+  //   面板是挂在编辑器上的，点正文里另一个标签要能改作用到它，而不是被收掉。
+  p._phKeepOnUp = (t) => { const ed = phWeightCurEd(); return !!(ed && t && ed.contains(t)); };
   document.body.appendChild(p);
   _phWPanel = p;
   return p;
@@ -3778,7 +4131,7 @@ function phWeightPanelFill() {
   const hit = phWeightCurEd() ? phCaretPieceParsed(phWeightCurEd(), _phWRange) : null;
   const layers = hit ? hit.layers.slice() : [];
   const w = hit ? (hit.w || 1) : 1;
-  if (p._in) p._in.value = String(w);
+  if (p._in && !p._busy) p._in.value = String(w);   // _busy = 正在输入：别把用户刚敲的小数点冲掉
   p._btns.forEach((b) => { const has = layers.indexOf(b._br) >= 0; b._minus.disabled = !has; b._grp.classList.toggle('on', has); });
   p._cfg = () => { const h = phWeightCurEd() ? phCaretPieceParsed(phWeightCurEd(), _phWRange) : null; return { layers: h ? h.layers.slice() : [], w: h ? (h.w || 1) : 1 }; };
   p._apply = (cfg) => { const ed = phWeightCurEd(); if (ed) phWeightApply(ed, cfg); phWeightPanelFill(); };   // ★ 不重贴：加权后面板留在原地不动
@@ -3804,38 +4157,47 @@ function phWeightPanelShow(ed, range) {
   phWeightPanelFill();
   p.classList.add('active');
   phWeightPanelPlace();
+  // ★ 焦点必须给数值框：面板开着但焦点还在正文时，用户敲的数字会直接进提示词（用户报过）。
+  try { if (p._in) { p._in.focus(); p._in.select(); } } catch (_) {}
 }
 function phWeightPanelHide() {
   if (_phWHideTimer) { clearTimeout(_phWHideTimer); _phWHideTimer = null; }
+  // ★ 收起面板前把「防抖里待定的那次权重写入」跑掉：否则输完数字马上点别处，这次输入会被丢掉
+  //   （_phWRange 马上要被清空，之后再跑就找不到标签了）。
+  try {
+    const _p = _phWPanel;
+    if (_p && _p._wTimer) { clearTimeout(_p._wTimer); _p._wTimer = 0; try { _p._apply(_p._cfg()); } catch (_) {} }
+  } catch (_) {}
   if (_phWPanel) _phWPanel.classList.remove('active');
-  // ⚠️ 只清「面板相关」状态，不动 _phWBtn / _phWMode：面板收起后面板按钮仍在，模式可能仍开着
+  // ⚠️ 只清「面板相关」状态，不动 _phWMode：面板收起后模式仍开着（按钮绿态由 body 类维持），方便接着点别的标签
   _phWEd = null; _phWRange = null;
+}
+// ★ 权重模式的绿态 = body 上的 ez-ph-wmode 类（CSS 决定），**单一真值来源**。
+//   以前是「每个按钮自己 classList.toggle('on')」+ 一个 _phWBtn 引用：多个工具条同时存在、
+//   或按钮被重建之后，绿态就会和 _phWMode 对不上（用户报的「状态保持不住 / 和实际状态有区别」）。
+//   改由 body 类驱动后，所有工具条上的权重按钮天然同步。
+function phWeightModePaint() {
+  try { document.body.classList.toggle('ez-ph-wmode', !!_phWMode); } catch (_) {}
 }
 // 退出权重模式：按钮变灰 + 收面板（工具栏「权重」按钮再次点击时调）
 function phWeightModeOff() {
   _phWMode = false;
-  try { if (_phWBtn) _phWBtn.classList.remove('on'); } catch (_) {}
+  phWeightModePaint();
   phWeightPanelHide();
 }
-function phWeightPanelVisible() { return !!(_phWPanel && _phWPanel.classList.contains('active')); }
 // 工具栏「权重」按钮 = 权重模式开关：开→变绿（不出面板）；关→变灰并收面板。
 function weightButton(ed) {
   const group = el('div', 'eph-tb-group');
   const b = el('button', 'eph-weight-btn'); b.type = 'button';
   b.textContent = ezT('Weight');
   b.title = ezT('Click to set the weight of the tag at the caret (brackets / value); click again to close. Tip: Ctrl+↑ / Ctrl+↓ adjust the weight at the caret (follows the caret) by the "weight step" (Settings · Other settings); it drops the brackets when the weight returns to 1.');
-  const sync = () => { b.classList.toggle('on', _phWMode); };
   b.addEventListener('mousedown', (e) => e.preventDefault());   // 保住编辑区光标
   b.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (_phWMode) { phWeightModeOff(); sync(); return; }          // 再点一次 = 退出权重模式并收面板
+    if (_phWMode) { phWeightModeOff(); return; }                 // 再点一次 = 退出权重模式并收面板
     _phWMode = true;                                             // ★ 只切模式，绝不出面板（面板靠点正文标签出）
-    _phWBtn = b;
-    sync();
+    phWeightModePaint();                                         // 绿态由 body 类统一驱动（所有工具条一起变）
   });
-  b._syncWeight = sync;
-  if (_phWMode) _phWBtn = b;
-  sync();
   group.appendChild(b);
   return group;
 }
@@ -3882,7 +4244,7 @@ function skillButton(ed) {
   };
   input.addEventListener('focus', openMenu);
   input.addEventListener('click', (e) => { e.stopPropagation(); openMenu(); });
-  window.addEventListener('resize', () => menu.classList.remove('active'));
+  phDDWireResize();   // 与其它 .eph-dd-menu 共用同一个 resize 监听（原来是每挂一个输入框加一个、从不解绑）
   return wrap;
 }
 
@@ -4036,7 +4398,12 @@ function _frCollect(ed, query) {
   });
   return ranges;
 }
-function _frRemoveOverlays() { (_frOverlays || []).forEach((d) => { try { if (d && d.parentNode) d.parentNode.removeChild(d); } catch (_) {} }); _frOverlays = []; }
+function _frRemoveOverlays() {
+  (_frOverlays || []).forEach((d) => { try { if (d && d.parentNode) d.parentNode.removeChild(d); } catch (_) {} });
+  _frOverlays = [];
+  // 兜底：协调器/重绘/关闭路径没走 _frClear 时，页面上可能还挂着旧的覆盖层
+  try { document.querySelectorAll('.eph-ph-overlay').forEach((d) => d.remove()); } catch (_) {}
+}
 function _frRebuildOverlays() {
   _frRemoveOverlays();
   if (!_frMatches.length) return;
@@ -4120,6 +4487,17 @@ function frEl() {
   findTab.addEventListener('click', () => { findTab.classList.add('active'); replaceTab.classList.remove('active'); findSec.style.display = 'block'; replaceSec.style.display = 'none'; });
   replaceTab.addEventListener('click', () => { replaceTab.classList.add('active'); findTab.classList.remove('active'); findSec.style.display = 'none'; replaceSec.style.display = 'block'; });
   close.addEventListener('click', () => { _frClear(); _frModal.classList.remove('active'); });
+  // 任何路径把它藏起来（协调器 / Esc / 点背景）都清覆盖层
+  try {
+    new MutationObserver(() => { if (!_frModal.classList.contains('active')) _frClear(); })
+      .observe(_frModal, { attributes: true, attributeFilter: ['class'] });
+  } catch (_) {}
+  document.addEventListener('scroll', () => {
+    if (_frModal && _frModal.classList.contains('active') && _frMatches.length) _frRebuildOverlays();
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && _frModal && _frModal.classList.contains('active')) { _frClear(); _frModal.classList.remove('active'); }
+  }, true);
   fbtn.addEventListener('click', () => { _frFindIn(_frEditor || (_editModal && _editModal._editor), fi.value); });
   fi.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); _frFindIn(_frEditor || (_editModal && _editModal._editor), fi.value); } });
   fb2.addEventListener('click', () => { _frFindIn(_frEditor || (_editModal && _editModal._editor), fi2.value); });
@@ -4137,6 +4515,7 @@ function frEl() {
   return _frModal;
 }
 function openFindModal(tab, editorEl) {
+  _frClear();   // 先清掉上一次的匹配/覆盖层（否则重开时旧高亮还在）
   _frEditor = editorEl || _phActiveEditor || (_allModal && _allModal.classList.contains('active') && _allModal._ed) || (_editModal && _editModal._editor) || null;
   const m = frEl(); m.classList.add('active');
   m.querySelectorAll('.eph-fr-tab').forEach((b) => b.classList.remove('active'));
@@ -4528,7 +4907,7 @@ function makeDropdown(items) {
     e.preventDefault(); e.stopPropagation();
     menu.classList.contains('active') ? close() : open();
   });
-  window.addEventListener('resize', close);
+  phDDWireResize();
   render();
   const api = {
     el: root,
@@ -5056,7 +5435,7 @@ function settingsEl() {
   const applyCustomFields = (p) => { cNameIn.value = p.name || ''; cNameIn.readOnly = false; cProviderIn.value = p.provider || p.name || ''; cModelIn.value = p.model || ''; cUrlIn.value = p.apiUrl || ''; cKeyIn.value = p.apiKey || ''; cProxyIn.value = p.proxy || ''; };
   const clearCustomFields = () => { cNameIn.value = ''; cNameIn.readOnly = false; cProviderIn.value = ''; cModelIn.value = ''; cUrlIn.value = ''; cKeyIn.value = ''; cProxyIn.value = ''; };
   const loadCustom = async () => {
-    try { const r = await fetchApi('/prompt_helper/custom_providers'); const d = await r.json().catch(() => ({})); const arr = Array.isArray(d.providers)  ?  d.providers : []; _customProviders.length = 0; arr.forEach((x) => { _customProviders.push({ name: x.name || '', provider: x.provider || x.name || '自定义', model: x.model || '', apiUrl: x.apiUrl || '', apiKey: x.apiKey || '', proxy: x.proxy || '', custom: x.custom !== false }); }); } catch (_) { _customProviders.length = 0; }
+    try { const r = await fetchApi('/prompt_helper/custom_providers'); const d = await r.json().catch(() => ({})); if (d && d.local_only) ezLocalOnlyNotice('ph.providers'); const arr = Array.isArray(d.providers)  ?  d.providers : []; _customProviders.length = 0; arr.forEach((x) => { _customProviders.push({ name: x.name || '', provider: x.provider || x.name || '自定义', model: x.model || '', apiUrl: x.apiUrl || '', apiKey: x.apiKey || '', proxy: x.proxy || '', custom: x.custom !== false }); }); } catch (_) { _customProviders.length = 0; }
     renderCustomDD();
   };
   const deleteCustom = async (name) => {
@@ -5220,7 +5599,7 @@ function settingsEl() {
   const wStepIn = el('input'); wStepIn.type = 'number'; wStepIn.min = '0.01'; wStepIn.step = '0.01'; wStepIn.value = '0.05'; grid5._wstep = wStepIn;
   fld2(grid5, ezT('Weight step'), wStepIn,
     ezT('The amount added/subtracted each time you press Ctrl+↑ / Ctrl+↓ on a tag (quick weighting).\nDefault 0.05; e.g. set 0.1 to go from 1.0 to 1.1 in one press.'));
-  // 标签提示自动符号跟随：候选框里用键盘确认（Enter / Tab）选中标签后自动补一个符号（默认 ,）
+  // 标签提示自动符号跟随：候选框里确认标签（键盘 Enter / Tab 或鼠标点选）后自动补一个符号（默认 ,）
   // ★ 符号输入框与「开/关」开关放**同一行**（开关不写文字，说明放 title，免得把这一行撑长）
   const tagSymIn = el('input'); tagSymIn.type = 'text'; tagSymIn.value = ','; grid5._tagsym = tagSymIn;
   const tagSymL = segSwitch('');
@@ -5230,7 +5609,7 @@ function settingsEl() {
   const tagSymRow = el('span', 'eph-sym-row');
   tagSymRow.appendChild(tagSymIn); tagSymRow.appendChild(tagSymL);
   fld2(grid5, ezT('Tag hint auto symbol'), tagSymRow,
-    ezT('Only when the tag hint is on: after confirming a candidate with the keyboard (Enter / Tab), this symbol is appended automatically (default ","). Picking a candidate with the mouse does not append it; blank = nothing.'));
+    ezT('Only when the tag hint is on: after confirming a candidate (keyboard Enter / Tab, or clicking it with the mouse), this symbol is appended automatically (default ","). Blank = nothing.'));
   const loopL = segSwitch(ezT('Loop mode'));
   grid5._loop = loopL._cb;
   grid5.appendChild(loopL);
@@ -5906,18 +6285,23 @@ async function cmSplitRun() {
 // ===== 通用小菜单（分类 / 已保存条目的右键）=====
 let _cmMenu = null;
 function cmMenu(x, y, items) {
+  try { phCtxCloseSub(); } catch (_) {}          // 菜单元素被复用：重开前先把上一次展开的子菜单收掉
   if (!_cmMenu || !_cmMenu.parentNode) {
     _cmMenu = el('div', 'eph-tools-dropdown eph-ctx');
     document.body.appendChild(_cmMenu);
     phLayerPush(_cmMenu);
   }
   _cmMenu.innerHTML = '';
-  items.forEach(([label, fn]) => {
+  items.forEach(([label, fn, sub]) => {
     if (label === '-') { _cmMenu.appendChild(el('div', 'eph-tools-sep')); return; }
     if (!fn) { const h = el('div', 'eph-tools-head'); h.textContent = label; _cmMenu.appendChild(h); return; }   // 分组标题：不可点
     const on = label.indexOf('\u2713 ') === 0;   // 选中项：去掉「✓ 」文字，用 .on 样式表示
-    const b = el('button', 'eph-tool-item' + (on ? ' on' : '')); b.type = 'button'; b.textContent = on ? label.slice(2) : label;
-    b.addEventListener('click', () => { _cmMenu.classList.remove('active'); fn(); });
+    const b = el('button', 'eph-tool-item' + (on ? ' on' : '')); b.type = 'button';
+    b.textContent = (on ? label.slice(2) : label) + (sub ? ' \u25B8' : '');   // 带子菜单的项：右侧加 ▸
+    b.addEventListener('click', () => {
+      if (sub) { try { phCtxOpenSub(b, sub, fn); } catch (_) {} return; }      // 展开子菜单，父菜单留着（再点同一项 = 收起）
+      _cmMenu.classList.remove('active'); fn();
+    });
     _cmMenu.appendChild(b);
   });
   _cmMenu.classList.add('active');
@@ -6016,6 +6400,66 @@ function phCtxToggleAutoRand(node, card) {
   try { refreshUI(node); } catch (_) {}
 }
 // 给一个正文框装上右键菜单（每个元素只装一次）。getNode() 取当前节点（弹窗可能是后建的）。
+// ===== 右键菜单的「工具」子菜单（点一下向右展开；与标签级联同款：再点同一项 = 收起）=====
+// 内容与工具栏「工具」下拉完全一致（同一批 id、同一批实现），只是多一个快捷入口。
+let _phCtxSub = null, _phCtxSubRow = null;
+function phCtxCloseSub() {
+  if (_phCtxSub) {
+    const i = _phLayers.indexOf(_phCtxSub); if (i >= 0) _phLayers.splice(i, 1);
+    try { _phCtxSub.remove(); } catch (_) {}
+  }
+  _phCtxSub = null; _phCtxSubRow = null;
+}
+function phCtxOpenSub(rowEl, sub, run) {
+  if (_phCtxSub && _phCtxSubRow === rowEl) { phCtxCloseSub(); return; }   // 再点同一项 = 收起
+  phCtxCloseSub();
+  const p = el('div', 'eph-tools-dropdown eph-ctx active');
+  sub.forEach(([label, id]) => {
+    const b = el('button', 'eph-tool-item'); b.type = 'button'; b.textContent = label;
+    b.addEventListener('click', () => { phCtxCloseSub(); try { _cmMenu.classList.remove('active'); } catch (_) {} run(id); });
+    p.appendChild(b);
+  });
+  // 被层协调器关掉时（点外侧）连带收起父菜单 —— 两者是一个整体菜单
+  p._phOnClose = () => { _phCtxSub = null; _phCtxSubRow = null; try { p.remove(); } catch (_) {} try { _cmMenu.classList.remove('active'); } catch (_) {} };
+  document.body.appendChild(p);
+  const r = rowEl.getBoundingClientRect();
+  const w = p.offsetWidth || 210, h = p.offsetHeight;
+  let left = r.right + 2;
+  if (left + w > window.innerWidth - 6) left = Math.max(6, r.left - w - 2);   // 右边放不下 → 翻到左边
+  let top = r.top;
+  if (top + h > window.innerHeight - 6) top = Math.max(6, window.innerHeight - h - 6);
+  p.style.left = left + 'px'; p.style.top = top + 'px';
+  phLayerPush(p);
+  _phCtxSub = p; _phCtxSubRow = rowEl;
+}
+// 与工具栏「工具」下拉同一批项（同一批 id / 同一批实现）
+function phCtxToolItems() {
+  return [
+    [ezT('Optimize prompt (API)'), 'optimize'],
+    [ezT('Optimize prompt (TextGenerate)'), 'textgen'],
+    [ezT('Optimize prompt (llama)'), 'llama'],
+    [ezT('Find / Replace'), 'find'],
+    [ezT('Clear styles'), 'clearStyle'],
+    [ezT('Hyphens to underscores'), 'dashToUnderscore'],
+    [ezT('Underscores to hyphens'), 'underscoreToDash'],
+    [ezT('Hyphens to spaces'), 'dashToSpace'],
+    [ezT('Underscores to spaces'), 'underscoreToSpace'],
+    [ezT('Full-width to half-width'), 'fullToHalf'],
+    [ezT('Half-width to full-width'), 'halfToFull'],
+  ];
+}
+// 右键「工具」的执行：与两处工具栏下拉同款分流
+// （卡片弹窗走 runTool；总体编辑走 runToolOn / runBatchOptimize）
+function phCtxRunTool(ed, node, id) {
+  try {
+    if (id === 'find') { openFindModal('find', ed); return; }
+    if (id === 'optimize' || id === 'textgen' || id === 'llama') {
+      if (phCtxIsAllEditor(ed)) runBatchOptimize(node, id); else runTool(id);
+      return;
+    }
+    if (phCtxIsAllEditor(ed)) runToolOn(ed, id); else runTool(id);
+  } catch (_) {}
+}
 function phEditorContextMenu(ed, getNode) {
   if (!ed || ed._phCtxBound) return;
   ed._phCtxBound = true;
@@ -6038,6 +6482,8 @@ function phEditorContextMenu(ed, getNode) {
       [ezT('Paste'), () => { phCtxPaste(ed, body); }],
       [ezT('Select all'), () => phCtxSelectAll(ed, body)],
       ['-'],
+      // 工具快捷入口（放在「打开标签页」上面）：点一下在右边展开，内容 = 工具栏「工具」下拉
+      [ezT('Tools'), (id) => phCtxRunTool(ed, node, id), phCtxToolItems()],
       [tpOn ? ezT('Close tag page') : ezT('Open tag page'), () => phCtxToggleTagPanel(ed)],
       [hintOn ? ezT('Disable tag hint') : ezT('Enable tag hint'), phCtxToggleHint],
       [rbOn ? ezT('Close reference media') : ezT('Open reference media'), () => {
@@ -6371,7 +6817,13 @@ async function cmInsertSaved(ed, name) {
   try { phStripPlaceholderBrAt(range); } catch (_) {}   // 落点在空块的占位 <br> 前 → 先顶掉，否则后面多一个换行
   const wrap = document.createElement('span');
   wrap.innerHTML = parts.join(join);
-  while (wrap.firstChild) range.insertNode(wrap.firstChild);   // 插进光标处（insertNode 会顺序往后推，顺序不变）
+  // ★ 每插一个就把光标挪到它后面：Range.insertNode 是否自动前进依赖实现，
+  //   「一直取 firstChild 插同一位置」在不会前进的实现上会把多段卡片插成倒序（2026-11 复检 H-3）。
+  while (wrap.firstChild) {
+    const n = wrap.firstChild;
+    range.insertNode(n);
+    try { range.setStartAfter(n); range.collapse(true); } catch (_) {}
+  }
   const sel = window.getSelection();
   if (sel) { sel.removeAllRanges(); sel.addRange(range); }
   saveSelection();
@@ -6529,11 +6981,6 @@ function cmRenderEntries() {
   cmPageBar(m._page, _cmPage, totalPages, all.length);
 }
 
-// 分类下拉项（缩进表示层级）：标签编辑弹窗的分类下拉用。
-function flatCatItems(list, depth, out) {
-  (list || []).forEach((c) => { out.push({ value: c.id, label: '\u3000'.repeat(depth) + c.name }); flatCatItems(c.children, depth + 1, out); });
-  return out;
-}
 // ===== 标签：全局标签库（分类 + 标签）；「标签管理」弹窗 + 编辑器「插入标签」=====
 const TAGS_API = '/prompt_helper/prompt_tags';
 let _tagDoc = { categories: [], tags: [] };
@@ -6616,6 +7063,8 @@ function savePromptTags() {
         _tpEmptyByUser = false;
         return;
       }
+      // 服务端保存有上限（标签 10000 / 库内 hidden 5000 / place·fav·meta 20000）：以前静默丢，现在明确提示一次。
+      if (d && d.truncated) { try { phTip(ezT('Saved, but some entries exceeded the storage limit and were dropped'), 4000); } catch (_) {} }
       // 回填时把「本地有、服务端回包没有」的预览图补回来：clean 有长度上限，
       // 超限会被服务端静默丢掉；若不补，本地这份也会跟着没了（用户视角 = 预览图丢了）。
       if (r.ok && Array.isArray(d.tags)) {
@@ -7590,34 +8039,38 @@ async function tpLoadNsfw() {
   _tpCountsCache.clear();   // 词表到位后计数缓存作废
 }
 function tpNsfwHas(name) { return !!(_tpNsfw && _tpNsfw.has(name)); }
+// 大词库分块解析：4.2 MB/10 万行一次性解析会顶出一条 ~800 ms 长任务。
+// 切工作流时鼠标扫过标签卡就会触发 mouseover → 以前直接把这个长任务塞进切换过程里。
+// 每 4000 行让出一次主线程，调用方**不要再 await**（悬停立刻出提示，词库后台补齐）。
+async function tpLoadCsvInto(map, url, build) {
+  try {
+    const r = await fetchApi(url);
+    if (!r.ok) return;
+    const lines = (await r.text()).replace(/﻿/g, '').split('\n');
+    for (let i = 0; i < lines.length; i += 4000) {
+      for (let j = i, n = Math.min(i + 4000, lines.length); j < n; j++) {
+        const line = lines[j];
+        if (!line || line.charAt(0) === '#') continue;
+        build(tpFields(line), map);
+      }
+      await new Promise((res) => setTimeout(res, 0));
+    }
+  } catch (_) {}
+}
 async function tpLoadDesc() {
   if (_tpDesc) return;
   _tpDesc = new Map();
-  try {
-    const r = await fetchApi(LIB_DESC_API);
-    if (!r.ok) return;
-    (await r.text()).replace(/﻿/g, '').split('\n').forEach((line) => {
-      if (!line || line.charAt(0) === '#') return;
-      const f = tpFields(line);
-      if (f[0] && f[1]) _tpDesc.set(f[0].trim(), f[1].trim());
-    });
-  } catch (_) {}
+  await tpLoadCsvInto(_tpDesc, LIB_DESC_API, (f, m) => { if (f[0] && f[1]) m.set(f[0].trim(), f[1].trim()); });
 }
 function tpDescOf(name) { return (_tpDesc && _tpDesc.get(name)) || ''; }
 async function tpLoadRelated() {
   if (_tpRelated) return;
   _tpRelated = new Map();
-  try {
-    const r = await fetchApi(LIB_RELATED_API);
-    if (!r.ok) return;
-    (await r.text()).replace(/﻿/g, '').split('\n').forEach((line) => {
-      if (!line || line.charAt(0) === '#') return;
-      const f = tpFields(line);
-      const nm = (f[0] || '').trim();
-      const rel = f.slice(1).map((x) => (x || '').trim()).filter(Boolean);
-      if (nm && rel.length) _tpRelated.set(nm, rel);
-    });
-  } catch (_) {}
+  await tpLoadCsvInto(_tpRelated, LIB_RELATED_API, (f, m) => {
+    const nm = (f[0] || '').trim();
+    const rel = f.slice(1).map((x) => (x || '').trim()).filter(Boolean);
+    if (nm && rel.length) m.set(nm, rel);
+  });
 }
 function tpRelatedOf(name) { return (_tpRelated && _tpRelated.get(name)) || []; }
 // 库内标签的默认落点（没设过 place 时它在库树里的位置）：细分大类优先，否则 CSV 分类桶
@@ -8019,17 +8472,15 @@ function libCats(libId, hideFurry) {
 // 「我的标签」是按名字覆盖库的：同名字条目的中文/颜色/权重算覆盖；记录里 mine=true 才代表存在副本
 // ★ 缓存：这个 Map 会被 tpChip() 每个 chip 调一次（renderTpIns / 悬停权重面板），大库时每次都重建
 //   _tagDoc.tags 会把「改一次权重」放大成 O(chips × tags)。所以按键版本号缓存，数据一变就失效。
-let _tagMineGen = 0;   // 手动失效计数（缓存键用；结构改了但 _tpDocV 没变的场合）
 let _tagMineCache = null, _tagMineKey = '', _tagMineArr = null;
-function tagMineInvalidate() { _tagMineGen++; _tagMineCache = null; _tagMineKey = ''; _tagMineArr = null; }
 function tagMineOf() {
   const arr = _tagDoc.tags || [];
   // ★ 键必须含「数组引用」：_tagDoc 整体被换成新对象时（loadPromptTags / 测试 __setDoc），
   //   新旧 tags 长度可能相同、_tpDocV 也可能没变 → 只靠长度+版本号会命中过期缓存。
-  if (_tagMineCache && _tagMineArr === arr && _tagMineKey === (arr.length + '|' + _tpDocV + '|' + _tagMineGen)) return _tagMineCache;
+  if (_tagMineCache && _tagMineArr === arr && _tagMineKey === (arr.length + '|' + _tpDocV)) return _tagMineCache;
   const m = new Map();
   arr.forEach((t) => { if (t && t.name) m.set(String(t.name), t); });
-  _tagMineCache = m; _tagMineArr = arr; _tagMineKey = arr.length + '|' + _tpDocV + '|' + _tagMineGen;
+  _tagMineCache = m; _tagMineArr = arr; _tagMineKey = arr.length + '|' + _tpDocV;
   return m;
 }
 // ===== 两套空间：库侧一份、我的标签副本一份，归类/收藏各自独立 =====
@@ -8301,9 +8752,12 @@ function tpwEl() {
   const inp = el('input', 'eph-tpw-in');
   inp.addEventListener('input', () => {
     const cfg = tpwCfg(_tpwEn);
-    cfg.w = Number(inp.value) || 1;
+    const _w = parseFloat(inp.value);
+    cfg.w = isFinite(_w) ? _w : 1;      // 0 是合法权重（等于关掉），别被 `|| 1` 改成 1（2026-11 复检 B-6）
     if (cfg.layers.indexOf('(') < 0) cfg.layers.push('(');
-    p._busy = true; tpwApply(_tpwEn, cfg); p._busy = false;
+    p._busy = true;
+    clearTimeout(p._wTimer);
+    p._wTimer = setTimeout(() => { try { tpwApply(_tpwEn, cfg); } finally { p._busy = false; } }, 120);
   });
   const clr = el('button', 'eph-btn'); clr.textContent = ezT('Clear');
   clr.addEventListener('click', () => { tpwApply(_tpwEn, { layers: [], w: 1 }); if (p._in) p._in.value = '1'; });
@@ -8392,6 +8846,36 @@ function tpChip(en) {
   sp.appendChild(b); sp.appendChild(a); sp.appendChild(x);   // 英文在上、中文在下
   return sp;
 }
+// 把「旧的标签串」就地换成新的：只动包含第一个标签的那个文本节点。
+// ★ 不能对整段编辑器赋 textContent —— 那会把多段落 / 颜色 span / 媒体芯片一起拍平成一行
+//   （2026-11 审计 P1-5：改完自动保存，正文静默丢失）。跨文本节点、或标签中间夹着别的正文时
+//   直接放弃（宁可不改，也不猜）。
+function replaceTagRun(ed, olds, joined) {
+  if (!ed || !olds.length) return false;
+  const nodes = [];
+  (function walk(n) {
+    for (let c = n.firstChild; c; c = c.nextSibling) {
+      if (c.nodeType === 3) nodes.push(c);
+      else if (c.nodeType === 1) walk(c);
+    }
+  })(ed);
+  // 按「文本里的位置」定位，与传入顺序无关：重排场景传进来的是新顺序，正文里还是旧顺序。
+  for (const t of nodes) {
+    const v = t.nodeValue || '';
+    const hits = olds.map((f) => ({ k: v.indexOf(f), len: f.length }));
+    if (hits.some((h) => h.k < 0)) continue;        // 这段里凑不齐，换下一个文本节点
+    hits.sort((a, b) => a.k - b.k);
+    let ok = true;
+    for (let i = 1; i < hits.length; i++) {
+      if (hits[i].k < hits[i - 1].k + hits[i - 1].len) { ok = false; break; }   // 重叠/同名重复：不猜
+      if (!/^\s*[,，、]?\s*$/.test(v.slice(hits[i - 1].k + hits[i - 1].len, hits[i].k))) { ok = false; break; }
+    }
+    if (!ok) continue;
+    t.nodeValue = v.slice(0, hits[0].k) + joined + v.slice(hits[hits.length - 1].k + hits[hits.length - 1].len);
+    return true;
+  }
+  return false;
+}
 // 手动编辑：整个已插入框变成纯文本（默认提示词那种形式），改完再变回芯片
 function tpInsEdit() {
   const p = _tpEl; if (!p || p._editing) return;
@@ -8415,20 +8899,8 @@ function tpInsEdit() {
     const ed = _tagPickTarget || _phActiveEditor;
     if (ed) {
       const olds = _tpIns.map((en) => tpFmt(en, _tpW.get(en)));
-      const txt = ed.textContent || '';
-      const spots = [];
-      olds.forEach((f) => { const k = txt.indexOf(f); if (k >= 0) spots.push({ s: k, e: k + f.length }); });
-      spots.sort((a, b) => a.s - b.s);
-      if (spots.length) {
-        let rest = txt;
-        for (let k = spots.length - 1; k >= 0; k--) rest = rest.slice(0, spots[k].s) + rest.slice(spots[k].e);
-        const at = Math.min(spots[0].s, rest.length);
-        const head = rest.slice(0, at).replace(/[ ,]+$/, '');
-        const tail = rest.slice(at).replace(/^[ ,]+/, '');
-        const joined = names.map((nm, k) => tpFmt(nm, { layers: cfgs[k].layers, w: cfgs[k].w })).join(', ');
-        ed.textContent = (head ? head + ', ' : '') + joined + (tail ? ', ' + tail : '');
-        ed.dispatchEvent(new Event('input', { bubbles: true }));
-      }
+      const joined = names.map((nm, k) => tpFmt(nm, { layers: cfgs[k].layers, w: cfgs[k].w })).join(', ');
+      if (replaceTagRun(ed, olds, joined)) ed.dispatchEvent(new Event('input', { bubbles: true }));
     }
     _tpW.clear();
     _tpIns = names.slice();
@@ -8524,16 +8996,9 @@ function tpReorder(order) {
   const ed = _tagPickTarget || _phActiveEditor;
   const frags = order.map((en) => tpFmt(en, _tpW.get(en)));
   if (ed && frags.every((f) => (ed.textContent || '').indexOf(f) >= 0)) {
-    const hasRefChip = ed.querySelectorAll && ed.querySelectorAll('.eph-mref').length > 0;
-    if (!hasRefChip) {
-      const orig = ed.textContent;
-      const segs = frags.map((f) => ({ s: orig.indexOf(f), e: orig.indexOf(f) + f.length })).sort((a, b) => a.s - b.s);
-      let rest = orig;
-      for (let i = segs.length - 1; i >= 0; i--) rest = rest.slice(0, segs[i].s) + rest.slice(segs[i].e);
-      const ins = Math.min(segs[0].s, rest.length);
-      const head = rest.slice(0, ins).replace(/[\s,]+$/, '');
-      const tail = rest.slice(ins).replace(/^[\s,]+/, '');
-      ed.textContent = (head ? head + ', ' : '') + frags.join(', ') + (tail ? ', ' + tail : '');
+    // 就地重排（复用 replaceTagRun）：保住段落 / 颜色 / 缩进 / 媒体芯片。
+    // 以前这里对整段正文赋 textContent，拖动一下芯片就把提示词拍平了（2026-11 复检 H-4）。
+    if (replaceTagRun(ed, frags, frags.join(', '))) {
       saveSelection();
       ed.dispatchEvent(new Event('input', { bubbles: true }));
     }
@@ -9420,7 +9885,7 @@ function tgMore() {
     const en = el('span', 'eph-tgh-en'); en.textContent = r.en;
     row.appendChild(en);
     if (r.zh) { const zh = el('span', 'eph-tgh-zh'); zh.textContent = r.zh; row.appendChild(zh); }
-    row.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); tgPick(i); });
+    row.addEventListener('mousedown', (e) => { e.preventDefault(); e.stopPropagation(); tgPick(i, true); });   // true = 点选也按设置补符号（与键盘一致）
     row.addEventListener('mouseenter', () => tgSelect(i, false));   // 鼠标停在哪就高亮哪（和键盘同一个高亮）
     box.appendChild(row);
   }
@@ -9528,8 +9993,8 @@ async function tpGotoTag(en) {
   }
 }
 // 「标签提示自动符号跟随」：设置·其他设置里可改，全局存 rules.tagSymOn / rules.tagSym（默认 开 + ","）。
-// 只在「标签提示」开着（tgState()）时生效：在候选框里用**键盘**确认（Enter / Tab）选中标签后自动补一个符号。
-// 鼠标点选不加（那是「点选」，用户要的是「输入标签」这条路径）。
+// 只在「标签提示」开着（tgState()）时生效：在候选框里确认标签（**键盘 Enter / Tab** 或 **鼠标点选**）后自动补一个符号。
+// 
 function tagSymCfg() {
   let on = true, sym = ',';
   try {
@@ -9553,7 +10018,20 @@ function phInsertSymbol(ed, sym) {
         sel.removeAllRanges(); sel.addRange(r);
         saveSelection();
       } else {
-        document.execCommand('insertText', false, sym);
+        // ★ 不用 execCommand('insertText')：我们上面是**手动改 DOM**（删查询 + 插文本节点），
+        //   再调 execCommand 时浏览器会拿它自己的编辑状态兜底，中文输入法/Edge 下会把刚输入的
+        //   那截再插一遍（用户报「选完标签后面多出一段像输入的内容」）。
+        const sel = window.getSelection();
+        if (!sel || !sel.rangeCount) return;
+        const r = sel.getRangeAt(0);
+        r.deleteContents();
+        const tn = document.createTextNode(sym);
+        r.insertNode(tn);
+        let after = tn.nextSibling;
+        if (!after || after.nodeType !== 3) { after = document.createTextNode(''); tn.parentNode.insertBefore(after, tn.nextSibling); }
+        const rr = document.createRange(); rr.setStart(after, 0); rr.collapse(true);
+        sel.removeAllRanges(); sel.addRange(rr);
+        saveSelection();
       }
       ed.dispatchEvent(new Event('input', { bubbles: true }));
     } else {
@@ -9564,28 +10042,132 @@ function phInsertSymbol(ed, sym) {
     }
   } catch (_) {}
 }
-function tgPick(i, withSym) {
-  const row = _tgRows[i];
+// ★ 「光标前 N 个字符」的跨文本节点回退删除：
+//   contentEditable 的内容常被拆成多个文本节点（有的还是空节点），只在 startContainer 里
+//   算长度会得到 0 → 查询没删掉、标签直接接在后面（用户报的「两个逗号之间重复了输入」）。
+function _tgTextMap(ed) {
+  const spans = [];
+  let pos = 0;
+  try {
+    const w = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT, null);
+    let t = null;
+    while ((t = w.nextNode())) {
+      const len = String(t.nodeValue || '').length;
+      spans.push({ n: t, s: pos, e: pos + len });
+      pos += len;
+    }
+  } catch (_) {}
+  return { spans, total: pos };
+}
+function _tgDelBack(ed, rg, n) {
+  n = Math.max(0, parseInt(n, 10) || 0);
+  if (!n || !rg) return '';
+  try {
+    const m = _tgTextMap(ed);
+    const hit = m.spans.find((sp) => sp.n === rg.startContainer);
+    if (!hit) return '';
+    const g = hit.s + rg.startOffset;
+    const from = Math.max(0, g - n);
+    if (from >= g) return '';
+    const a = m.spans.find((sp) => from >= sp.s && from < sp.e) || m.spans[0];
+    const b = m.spans.find((sp) => g > sp.s && g <= sp.e) || hit;
+    rg.setStart(a.n, Math.max(0, from - a.s));
+    rg.setEnd(b.n, Math.max(0, Math.min(g - b.s, String(b.n.nodeValue || '').length)));
+    const removed = String(rg.toString() || '');
+    rg.deleteContents();
+    return removed;
+  } catch (_) { return ''; }
+}
+function tgPick(i, withSym, enOverride) {
+  const row = enOverride ? { en: String(enOverride) } : _tgRows[i];
   const ed = _tgEd;
   if (!row || !ed) { tgHide(); return; }
+  // ★ 输入法组字期间**绝不能改 DOM**：组字提交时浏览器会把正在组的那串原文插到光标处，
+  //   于是"选中的标签 + 你刚敲的字"一起出现（用户报的「多的就是我键盘输入的」）。
+  //   这里先记下来，等 compositionend 之后再真正执行。
+  if (ed._phComposing) { ed._tgPendingPick = { en: row.en, withSym: !!withSym }; return; }
+  // ★ 先把 60ms 防抖里待定的那次 tgCheck 跑掉：否则 _tgQ/_tgLen 还是旧值，
+  //   「光标前是否还是那段查询」判据会对不上 → 只插入不回退 → 正文里残留输入的一半（用户报的重复）。
+  try { if (ed._tgFlush) ed._tgFlush(); } catch (_) {}
   if (ed._tpSearch) setTimeout(() => tpGotoTag(row.en), 0);   // 搜索框里选标签：插完字再跳分组
+  // ★ 回退长度以**当前光标前的真实文本**为准（tgProbe 现读，不再用弹窗打开时记的 _tgLen）：
+  //   防抖/输入法/连续输入都可能让 _tgQ/_tgLen 落后一拍，落后就会「只插入不回退」→ 正文残留输入。
+  //   只有当前片段为空（光标前是逗号/句首）时才不回退。
+  const _live = tgProbe(ed);
+  const _q = _live ? String(_live.frag || '') : String(_tgQ || '');
+  const _len = _live ? Math.max(0, parseInt(_live.len, 10) || 0) : _tgLen;
+  // ★ 候选表必须对得上**当前**光标前的查询：对不上说明弹窗里是上一轮的行（防抖/输入法都可能造成），
+  //   这时点/回车选的是"别的查询的候选"，会插进不相干的标签。宁可先收起，等下一次扫描重出。
+  if (_q && _tgQ && _q !== _tgQ) { tgHide(); return; }
+  // ★ 选区可能落在**元素级**（在行尾空白处点一下就是这种）：这时 startContainer 不是文本节点，
+  //   原来整段插入被跳过 → 选完候选正文一点没变（日志 after 与输入完全相同）。
+  //   这里先把选区解到「编辑器里的一个文本节点」再动手。
+  const _resolveRange = () => {
+    let sel = window.getSelection();
+    let rg = (sel && sel.rangeCount) ? sel.getRangeAt(0).cloneRange() : null;
+    const ok = (r) => !!(r && r.startContainer && r.startContainer.nodeType === 3 && ed.contains(r.startContainer));
+    if (!ok(rg) && _editorRange && _editorRange.startContainer && _editorRange.startContainer.nodeType === 3 && ed.contains(_editorRange.startContainer)) {
+      try { rg = _editorRange.cloneRange(); rg.collapse(false); } catch (_) { rg = null; }
+    }
+    if (!ok(rg) && rg && rg.startContainer && rg.startContainer.nodeType === 1 && ed.contains(rg.startContainer)) {
+      // 元素级落点：往前找最近一个文本节点，落在它的末尾
+      const cont = rg.startContainer, off = rg.startOffset;
+      let node = null;
+      for (let i = Math.min(off, cont.childNodes.length) - 1; i >= 0; i--) {
+        const walker = document.createTreeWalker(cont.childNodes[i], NodeFilter.SHOW_TEXT, null);
+        let last = null, t = null;
+        while ((t = walker.nextNode())) last = t;
+        if (last) { node = last; break; }
+      }
+      if (node) { rg = document.createRange(); rg.setStart(node, String(node.nodeValue || '').length); rg.collapse(true); }
+      else { rg = null; }
+    }
+    if (!ok(rg)) { try { rg = phEndRange(ed); } catch (_) { rg = null; } }
+    return rg;
+  };
+  let _delUsed = 0;
   if (ed.isContentEditable) {
     const sel = window.getSelection();
-    if (sel && sel.rangeCount) {
-      const rg = sel.getRangeAt(0);
-      if (rg.startContainer.nodeType === 3 && rg.startOffset >= _tgLen) {
-        const rr = document.createRange();
-        rr.setStart(rg.startContainer, rg.startOffset - _tgLen);
-        rr.setEnd(rg.startContainer, rg.startOffset);
-        rr.deleteContents();
+    const rg = _resolveRange();
+    if (rg) {
+      const _want = Math.max(0, parseInt(_len, 10) || 0);
+      let _replaced = false;
+      // ① 首选：选中「查询」那段，交给浏览器自己替换（execCommand）。
+      //    手动 deleteContents/insertNode 会让浏览器内部编辑状态和 DOM 不同步，
+      //    之后组字提交或插符号时会把内容再插一遍。
+      try {
+        const m = _tgTextMap(ed);
+        const hit = m.spans.find((sp) => sp.n === rg.startContainer);
+        if (hit) {
+          const g = hit.s + rg.startOffset;
+          const from = Math.max(0, g - _want);
+          const a = m.spans.find((sp) => from >= sp.s && from < sp.e) || m.spans[0];
+          const b = m.spans.find((sp) => g > sp.s && g <= sp.e) || hit;
+          const r2 = document.createRange();
+          r2.setStart(a.n, Math.max(0, from - a.s));
+          r2.setEnd(b.n, Math.max(0, Math.min(g - b.s, String(b.n.nodeValue || '').length)));
+          sel.removeAllRanges(); sel.addRange(r2);
+          if (typeof document.execCommand === 'function') {
+            _replaced = !!document.execCommand('insertText', false, row.en);
+          }
+        }
+      } catch (_) { _replaced = false; }
+      if (_replaced) {
+        _delUsed = _want;
+        saveSelection();       // 浏览器已把光标放在新标签之后（文本节点内）
+      } else {
+        // ② 回退：手动跨节点删除 + 插入（落点收进文本节点，避免元素级落点被输入法再插一遍）
+        const _removed = _want > 0 ? _tgDelBack(ed, rg, _want) : '';
+        _delUsed = _removed ? _removed.length : 0;
+        if (_removed && _q && !String(_removed).endsWith(String(_q))) {
+          try { rg.insertNode(document.createTextNode(_removed)); rg.collapse(false); } catch (_) {}
+          _delUsed = 0;
+        }
         const tn = document.createTextNode(row.en);
-        rr.insertNode(tn);
-        // ★★ 落点必须收进「文本节点」里，绝不能用 setStartAfter(tn) 落成**元素级偏移**：
-        //    中文输入法的组字区跟不住元素级落点，提交时会把组字文本**再插一遍** →
-        //    表现「选完候选再打逗号 = 两个逗号」（Edge + CDP imeSetComposition 实测复现）。
-        //    deleteContents 已把原文本节点切成两半，所以后面通常就有一个文本节点可直接复用。
+        rg.insertNode(tn);
         let after = tn.nextSibling;
         if (!after || after.nodeType !== 3) { after = document.createTextNode(''); tn.parentNode.insertBefore(after, tn.nextSibling); }
+        const rr = document.createRange();
         rr.setStart(after, 0); rr.collapse(true);
         sel.removeAllRanges(); sel.addRange(rr);
         saveSelection();
@@ -9593,16 +10175,34 @@ function tgPick(i, withSym) {
     }
   } else {
     const v = String(ed.value || ''), pos = ed.selectionStart || 0;
-    ed.value = v.slice(0, pos - _tgLen) + row.en + v.slice(pos);
-    try { ed.setSelectionRange(pos - _tgLen + row.en.length, pos - _tgLen + row.en.length); } catch (_) {}
+    const del = (pos >= _len && (!_q || v.slice(0, pos).endsWith(_q))) ? _len : 0;
+    ed.value = v.slice(0, pos - del) + row.en + v.slice(pos);
+    try { ed.setSelectionRange(pos - del + row.en.length, pos - del + row.en.length); } catch (_) {}
   }
   ed.dispatchEvent(new Event('input', { bubbles: true }));
-  // ★「标签提示自动符号跟随」：键盘确认（Enter / Tab）选中标签后自动补一个符号（默认 ,）。
-  //   鼠标点选不加（用户要的是「输入标签」这条路径）；搜索框里也不加（那是搜索词不是提示词）。
+  // ★「标签提示自动符号跟随」：确认标签（键盘 Enter / Tab 或鼠标点选）后自动补一个符号（默认 ,）。
+  //   搜索框里不加（那是搜索词不是提示词）。⚠️ 点选原先不补，2026-10-13 用户要求改成与键盘一致。
   if (withSym && !ed._tpSearch) {
     const cfg = tagSymCfg();
     if (cfg.on && cfg.sym) phInsertSymbol(ed, cfg.sym);
   }
+  try { if (ed._tgCancel) ed._tgCancel(); } catch (_) {}   // 选完就停一次：别让刚插入的标签立刻触发下一轮候选
+  // 诊断：`__ezTgDump()` 可导出最近 20 次选词的前后文（定位"多出输入原文"用；不影响功能）
+  try {
+    const _txt = () => {
+      try {
+        if (ed.isContentEditable) {
+          const r = document.createRange(); r.selectNodeContents(ed); return String(r.toString()).slice(-200);
+        }
+        return String(ed.value || '').slice(-200);
+      } catch (_) { return '?'; }
+    };
+    const _ent = { t: Date.now(), q: _q, len: _len, del: _delUsed, en: row.en, withSym: !!withSym, after: _txt() };
+    (window.__ezTgLog = window.__ezTgLog || []).push(_ent);
+    if (window.__ezTgLog.length > 20) window.__ezTgLog.shift();
+    window.__ezTgDump = () => JSON.stringify(window.__ezTgLog, null, 1);
+    if (window.console && console.info) console.info('[EzFlex][tgPick]', _ent);
+  } catch (_) {}
   tgHide();
 }
 function tgKey(e) {
@@ -9626,12 +10226,32 @@ function tgKey(e) {
 function tgAttach(ed) {
   if (!ed || ed._tgBound) return;
   ed._tgBound = true;
-  ed.addEventListener('input', () => {
+  // 每键同步扫 2 万行太贵（中文输入尤其明显）→ 合并成 60ms 一次；
+  // 但回车/Tab 选词前必须先把待定的那次跑掉，否则会选到上一帧的行。
+  let _tgTimer = 0;
+  const _tgRun = () => {
+    _tgTimer = 0;
     if (!_tgOn) return;
     if (!_tpZh || !_tpLibs || (_tpLibId && !_tpCache.has(_tpLibId))) { tgEnsure().then(() => tgCheck(ed)); return; }
     tgCheck(ed);
+  };
+  ed._tgFlush = () => { if (_tgTimer) { clearTimeout(_tgTimer); _tgTimer = 0; _tgRun(); } };
+  ed._tgCancel = () => { if (_tgTimer) { clearTimeout(_tgTimer); _tgTimer = 0; } };
+  ed.addEventListener('input', () => {
+    if (!_tgOn) return;
+    clearTimeout(_tgTimer);
+    _tgTimer = setTimeout(_tgRun, 60);
   });
-  ed.addEventListener('keydown', (e) => { tgKey(e); });
+  ed.addEventListener('keydown', (e) => { try { ed._tgFlush(); } catch (_) {} tgKey(e); });
+  ed.addEventListener('compositionstart', () => { ed._phComposing = true; });
+  ed.addEventListener('compositionend', () => {
+    ed._phComposing = false;
+    const pend = ed._tgPendingPick;
+    if (!pend) return;
+    ed._tgPendingPick = null;
+    // 组字提交先落地（同一个事件循环里别抢），再用标签名重放，避免索引在重扫后失效。
+    setTimeout(() => { try { tgPick(0, pend.withSym, pend.en); } catch (_) {} }, 0);
+  });
   ed.addEventListener('blur', () => setTimeout(() => { if (_tgEd === ed) tgHide(); }, 150));
   ed.addEventListener('mousedown', () => tgHide());
 }
@@ -9707,7 +10327,7 @@ function isBuiltinApi(s) {
 let _genCfg = null, _genOverlay = null, _genPending = null, _genPendingMode = 'tag';   // 待生成的目标（tag=标签 / card=已保存卡片），右键「生成预览图」进来时带过来
 async function genLoadCfg(force) {
   if (_genCfg && !force) return _genCfg;
-  try { const r = await fetchApi(GEN_SET_API); const d = await r.json(); _genCfg = (d && d.settings) || {}; }
+  try { const r = await fetchApi(GEN_SET_API); if (r.status === 403) ezLocalOnlyNotice('ph.settings'); const d = await r.json(); _genCfg = (d && d.settings) || {}; }
   catch (_) { _genCfg = {}; }
   return _genCfg;
 }
@@ -9921,6 +10541,12 @@ async function openGenSettings() {
   ok.addEventListener('click', async () => { await genSaveCfg(cfg); shut(); phTip(ezT('Generation settings saved')); });
 }
 // 生成进度条（悬在底部）：x/n + 填充（同一个实现，声明只在上面一处）
+// 批量生成时每张都整块重画面板太贵（一次重建=整库重扫+重建列表）；合并成 180ms 一次，进度仍然可见。
+let _tpRenderTimer = 0;
+function _tpRenderSoon() {
+  if (_tpRenderTimer) return;
+  _tpRenderTimer = setTimeout(() => { _tpRenderTimer = 0; try { renderTagPanel(); } catch (_) {} }, 180);
+}
 // 右键「生成预览图」：先弹生成设置让你看一眼，点里面的「生成」才开跑
 function genPreviews(names) {
   _genPending = (names || []).filter(Boolean);
@@ -9966,9 +10592,10 @@ async function genRun(names) {
     done++;
     if (_genStop) break;
     genProg(true, ezT('Generating previews...') + ' ' + done + '/' + total, done / total);
-    renderTagPanel();
+    _tpRenderSoon();
   }
   genProg(false);
+  try { renderTagPanel(); } catch (_) {}
   if (_genStop) { phTip(ezT('Stopped')); return; }
   phTip(ezT('Generated ') + okN + '/' + total);
 }
@@ -10214,7 +10841,7 @@ async function phRandPatchPrompt(output) {
         const m = _editModal;
         if (m && m.classList.contains('active') && m._node === node && m._editor && !m._editor.contains(document.activeElement)) {
           const card = (st.cards || []).find((c) => c && String(c.id) === String(st.editingId));
-          if (card && card.autoRand && st.currentTab !== 'optimized') { m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || ''); unwrapTagChips(m._editor); }
+          if (card && card.autoRand && st.currentTab !== 'optimized') { m._editor.innerHTML = cardHtmlOf(card.contentHTML, card.content); unwrapTagChips(m._editor); }
         }
       } catch (_) {}
       try { console.log('[PromptHelper] runtime random tags: rewrote ' + hit + ' card(s)'); } catch (_) {}
@@ -10907,7 +11534,14 @@ function cmHeadEl(titleText, ph, onSearch, fullTitle) {
   const t = el('b'); t.textContent = titleText;
   const badge = el('span', 'eph-cm-badge'); badge.textContent = 'PromptHelper';
   const search = el('input', 'eph-cm-search'); search.type = 'text'; search.placeholder = ph;
-  search.addEventListener('input', () => onSearch(search.value));
+  // 搜索也防抖：以前每个键都全量重建瓦片网格 + 触发 6 路并发预取（标签面板那边是 130ms，这里漏了）
+  let _cmQT = 0;
+  const fireSearch = () => { if (_cmQT) { clearTimeout(_cmQT); _cmQT = 0; } try { onSearch(search.value); } catch (_) {} };
+  search.addEventListener('input', () => {
+    if (_cmQT) clearTimeout(_cmQT);
+    _cmQT = setTimeout(fireSearch, 150);
+  });
+  search.addEventListener('change', fireSearch);   // 回车/失焦立刻生效，别丢查询
   const full = el('button', 'eph-btn eph-modal-full'); full.textContent = ezT('Fullscreen'); full.title = fullTitle;
   const close = el('button', 'eph-modal-close'); close.textContent = '✕';
   const right = el('div', 'eph-cm-hdright');
@@ -11104,6 +11738,7 @@ async function saveGroupFromPanel(cards) {
 function batchSelIds(node) { return node && node._ezBatchSel ? node._ezBatchSel : new Set(); }
 function batchToggle(node, on) {
   node._ezBatch = !!on;
+
   node._ezBatchAnchor = -1;                                            // Shift 连选的锚点
   node._ezBatchSel = (on && node._ezBatchSel) ? node._ezBatchSel : new Set();
   const root = node && node._ezRoot;
@@ -11151,7 +11786,7 @@ async function batchSaveIndividual(node) {
       await cmPostCard(name, [c], 'card', '');
       ok += 1;
     }
-    phTip(ezT('Saved ') + ok + ezT(' cards)'), 2400);
+    phTip(ezT('Saved cards: ') + ok, 2400);
   } catch (e) { phTip(ezT('Save failed: ') + (e && e.message ? e.message : e)); }
 }
 async function batchSaveGroup(node) {
@@ -11159,12 +11794,24 @@ async function batchSaveGroup(node) {
   if (!sel.length) { phTip(ezT('Select the prompt cards to save first.')); return; }
   await saveGroupFromPanel(sel);
 }
+async function batchDelete(node) {
+  const st = stateFor(node);
+  const ids = new Set(batchSelIds(node));
+  const sel = st.cards.filter((c) => ids.has(c.id));
+  if (!sel.length) { phTip(ezT('Select the prompt cards to clean first.')); return; }
+  if (!(await uiConfirm(ezT('Delete selected prompt cards?') + ' (' + sel.length + ')'))) return;
+  st.cards = st.cards.filter((c) => !ids.has(c.id));
+  node._ezBatchSel = new Set();
+  syncToConfig(node); updatePorts(node);
+  batchToggle(node, false);
+}
 
 // ===== 总体编辑（Word 大纲：每条卡片=  左侧小标题行[序号/标题/时间轴/删除] + 下方内容；默认/优化滑块 + 工具栏（含 skill 插入）；点外面自动保存关闭）=====
 let _allModal = null, _allTab = 'default';
 const _allClosed = new Set();   // 总体编辑里单独折叠的卡片 id（摘要行留着、只收正文；重建块时按 id 还原）
 function runToolOn(ed, id) {
   if (!ed) return;
+  if (id === 'clearStyle') { phClearAllStyles(ed); return; }
   const mapFH = { '，': ',', '。': '.', '！': '!', '？': '?', '：': ':', '；': ';', '“': '"', '”': '"', '‘': "'", '’': "'", '（': '(', '）': ')', '【': '[', '】': ']', '《': '<', '》': '>', '、': ',', '—': '-', '～': '~' };
   const mapHF = { ',': '，', '.': '。', '!': '！', '?': '？', ':': '：', ';': '；', '"': '“', "'": '‘', '(': '（', ')': '）', '[': '【', ']': '】', '<': '《', '>': '》', '~': '～', '-': '—' };
   const convert = (s) => {
@@ -11177,7 +11824,7 @@ function runToolOn(ed, id) {
     return s;
   };
   const bodies = ed.querySelectorAll('.eph-all-block-body');
-  (bodies.length ? Array.from(bodies) : [ed]).forEach((b) => { b.textContent = convert(b.textContent); });
+  (bodies.length ? Array.from(bodies) : [ed]).forEach((b) => phMapText(b, convert));
 }
 function execCommandOn(ed, cmd) {
   if (!ed) return;
@@ -11421,7 +12068,7 @@ function allEl() {
   indentIn.addEventListener('change', () => { const nd = _allModal && _allModal._node; if (nd) allSetIndent(nd, indentIn.value); });
   addCardBtn.addEventListener('click', () => { const nd = _allModal._node; if (nd) { addCard(nd); openAllEditor(nd); } });
   // 工具 / 插入引用下拉
-  [[ezT('Optimize prompt (API)'), 'api'], [ezT('Optimize prompt (TextGenerate)'), 'textgen'], [ezT('Optimize prompt (llama)'), 'llama'], [ezT('Find & replace'), 'find'], [ezT('Hyphens to underscores'), 'dashToUnderscore'], [ezT('Underscores to hyphens'), 'underscoreToDash'], [ezT('Hyphens to spaces'), 'dashToSpace'], [ezT('Underscores to spaces'), 'underscoreToSpace'], [ezT('Full-width to half-width'), 'fullToHalf'], [ezT('Half-width to full-width'), 'halfToFull']].forEach(([t, id]) => { const b = el('button', 'eph-tool-item'); b.textContent = t; b.addEventListener('click', () => { if (id === 'api' || id === 'textgen' || id === 'llama') { runBatchOptimize(_allModal && _allModal._node, id); } else if (id === 'find') { openFindModal('find', _allModal && _allModal._ed); } else { runToolOn(editor, id); } toolsDD.classList.remove('active'); }); toolsDD.appendChild(b); });
+  [[ezT('Optimize prompt (API)'), 'api'], [ezT('Optimize prompt (TextGenerate)'), 'textgen'], [ezT('Optimize prompt (llama)'), 'llama'], [ezT('Find & replace'), 'find'], [ezT('Clear styles'), 'clearStyle'], [ezT('Hyphens to underscores'), 'dashToUnderscore'], [ezT('Underscores to hyphens'), 'underscoreToDash'], [ezT('Hyphens to spaces'), 'dashToSpace'], [ezT('Underscores to spaces'), 'underscoreToSpace'], [ezT('Full-width to half-width'), 'fullToHalf'], [ezT('Half-width to full-width'), 'halfToFull']].forEach(([t, id]) => { const b = el('button', 'eph-tool-item'); b.textContent = t; b.addEventListener('click', () => { if (id === 'api' || id === 'textgen' || id === 'llama') { runBatchOptimize(_allModal && _allModal._node, id); } else if (id === 'find') { openFindModal('find', _allModal && _allModal._ed); } else { runToolOn(editor, id); } toolsDD.classList.remove('active'); }); toolsDD.appendChild(b); });
   toolsBtn.addEventListener('mousedown', (e) => { e.stopPropagation(); e.preventDefault(); toolsDD.classList.toggle('active'); if (toolsDD.classList.contains('active')) phFixedDD(toolsBtn, toolsDD); });
   // 点弹窗外空白自动保存关闭；卡片内部拖动到外面松开不关（只在外面点击才关）
   let _allStartInBox = false;
@@ -11538,7 +12185,11 @@ function syncAllContent(nd) {
   const blocks = _allModal._ed.querySelectorAll('.eph-all-block');
   Array.from(blocks).forEach((b, i) => {
     // 按块上的 cardId 认卡片（块被浏览器删过也不会错位），老 DOM 没有 cardId 时退回按顺序。
-    const card = st.cards.find((c) => String(c.id) === String(b.dataset.cardId || '')) || st.cards[i];
+    // ★ 有 cardId 但对不上（卡已被删 / 平铺模式保存后临时卡片已换回原 cards）时**不能**按位置兜底：
+    //   那会把临时卡的内容写进节点第 i 张真卡（2026-11 复检 H-5，静默数据丢失）。
+    const bid = String(b.dataset.cardId || '');
+    const byId = bid ? st.cards.find((c) => String(c.id) === bid) : null;
+    const card = byId || (bid ? null : st.cards[i]);
     if (!card) return;
     const html = blockContentHTML(b);
     card.contentHTML = html;
@@ -11600,7 +12251,15 @@ function renderAllEditor(node) {
     const num = el('span', 'eph-all-num'); num.textContent = String(idx + 1);
     const titleEl = el('span', 'eph-all-title'); titleEl.contentEditable = 'true'; titleEl.setAttribute('data-ph', ezT('Title'));
     titleEl.textContent = card.title || '';
-    titleEl.addEventListener('input', () => { card.title = titleEl.textContent.replace(/\u200b/g, ''); syncToConfig(node); syncEditModalTitle(node, card); });
+    let _atTimer = 0;
+    const commitAllTitle = () => { if (_atTimer) { clearTimeout(_atTimer); _atTimer = 0; } syncToConfig(node); };
+    titleEl.addEventListener('input', () => {
+      card.title = titleEl.textContent.replace(/\u200b/g, '');
+      syncEditModalTitle(node, card);
+      if (_atTimer) clearTimeout(_atTimer);      // 同卡片标题：每键 stringify 整份 config 太贵，写盘防抖
+      _atTimer = setTimeout(() => { _atTimer = 0; syncToConfig(node); }, 150);
+    });
+    titleEl.addEventListener('blur', commitAllTitle);
     // 单张卡片折叠（放在标题输入框后面）：只收正文，标题行留着可再点开；工具栏那颗是全局收起小标题行
     const foldEl = el('button', 'eph-all-fold'); foldEl.type = 'button'; foldEl.title = ezT('Collapse / expand this card');
     foldEl.innerHTML = '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
@@ -11635,7 +12294,7 @@ function renderAllEditor(node) {
     block.appendChild(rw);
     // 下方内容（按当前页签）
         const body = el('div', 'eph-all-block-body');
-    body.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || '');
+    body.innerHTML = cardHtmlOf(card.contentHTML, card.content);
     unwrapTagChips(body);
     block.appendChild(body);
     ed.appendChild(block);
@@ -11774,8 +12433,10 @@ async function runBatchOptimize(node, method) {
   if (medias.length) payload.media = medias;
   if (imgs.length || medias.length) phProgTick(node, 0, where + ' · ' + ezT('Merging ') + parts.length + ezT(' cards, attached ') + (imgs.length ? imgs.length + ' ' + ezT('images') : '') + (medias.length ? (imgs.length ? ' + ' : '') + medias.length + ' ' + ezT('video/audio') : '') + '…');
   try {
-    const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    _phOptAbort = (typeof AbortController === 'function') ? new AbortController() : null;
+    const r = await fetchApi('/prompt_helper/optimize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: _phOptAbort ? _phOptAbort.signal : undefined });
     const d = await r.json().catch(() => ({}));
+    if (_phOptStopped) return;                              // 用户已点「停止」：结果直接丢弃
     if (!r.ok || d.error) {
       const why = d.error || ('HTTP ' + r.status);
       phProgErr(node, why);
@@ -11792,9 +12453,12 @@ async function runBatchOptimize(node, method) {
     syncToConfig(node); updatePorts(node); refreshUI(node);
     _allTab = 'optimized'; if (_allModal && _allModal.classList.contains('active')) switchAllTab('optimized');
   } catch (e) {
+    if (_phOptStopped) return;                              // abort 触发的异常：不算失败
     const why = (e && e.message ? e.message : e);
     phProgErr(node, why);
     phTip(ezT('Optimization request failed: ') + why + '  [' + where + ']', 6000);
+  } finally {
+    _phOptAbort = null;
   }
 }
 
@@ -11809,9 +12473,17 @@ function phInstallEditorKeys() {
   document.addEventListener('keydown', (e) => {
     const editOpen = _editModal && _editModal.classList.contains('active');
     const allOpen = _allModal && _allModal.classList.contains('active');
+    const key = String(e.key || '').toLowerCase();
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && (key === 'f' || e.code === 'KeyF')) {
+      if (editOpen || allOpen || _phActiveEditor) { e.preventDefault(); e.stopPropagation(); openFindModal('find'); }
+      return;
+    }
+    if (ctrl && (key === 'h' || e.code === 'KeyH')) {
+      if (editOpen || allOpen || _phActiveEditor) { e.preventDefault(); e.stopPropagation(); openFindModal('replace'); }
+      return;
+    }
     if (!(editOpen || allOpen)) return;
-    if ((e.ctrlKey || e.metaKey) && e.key === 'f') { e.preventDefault(); openFindModal('find'); }
-    if ((e.ctrlKey || e.metaKey) && e.key === 'h') { e.preventDefault(); openFindModal('replace'); }
     // Ctrl+↑ / Ctrl+↓：给光标处的标签快捷加权（±「加权步长」，默认 0.05）。
     //   只在焦点位于某个富文本编辑器内才生效，避免抢走其它控件的方向键。
     if ((e.ctrlKey || e.metaKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.altKey && !e.shiftKey && !e.isComposing) {
@@ -11820,7 +12492,7 @@ function phInstallEditorKeys() {
         if (phQuickWeight(ed, e.key === 'ArrowUp' ? 1 : -1)) { e.preventDefault(); }
       }
     }
-  });
+  }, true);   // 捕获阶段：编辑器的 keydown 不能先把 Ctrl+F/H 吞掉
 }
 
 // ===== 面板 =====
@@ -11844,14 +12516,16 @@ function buildRoot(node) {
   const bInv = el('button', 'eph-btn'); bInv.textContent = ezT('Invert selection');
   const bSave = el('button', 'eph-btn'); bSave.textContent = ezT('Save cards');
   const bGroup = el('button', 'eph-btn'); bGroup.textContent = ezT('Save card group');
+  const bDel = el('button', 'eph-btn danger'); bDel.textContent = ezT('Delete selected');
   const bExit = el('button', 'eph-btn danger'); bExit.textContent = ezT('Exit batch');
-  batch.appendChild(bAll); batch.appendChild(bInv); batch.appendChild(bSave); batch.appendChild(bGroup); batch.appendChild(bExit);
+  batch.appendChild(bAll); batch.appendChild(bInv); batch.appendChild(bSave); batch.appendChild(bGroup); batch.appendChild(bDel); batch.appendChild(bExit);
   root.appendChild(hd); root.appendChild(batch); root.appendChild(list);
   root._list = list; root._batch = batch;
   bAll.addEventListener('click', () => batchSelectAll(node, false));
   bInv.addEventListener('click', () => batchSelectAll(node, true));
   bSave.addEventListener('click', () => batchSaveIndividual(node));
   bGroup.addEventListener('click', () => batchSaveGroup(node));
+  bDel.addEventListener('click', () => batchDelete(node));
   bExit.addEventListener('click', () => batchToggle(node, false));
   // 空白处右键：保存为卡片组 / 批量保存 / 打开卡片管理
   list.addEventListener('contextmenu', (e) => {
@@ -11859,7 +12533,7 @@ function buildRoot(node) {
     e.preventDefault(); e.stopPropagation();
     cmMenu(e.clientX, e.clientY, [
       [ezT('Save as card group'), () => saveGroupFromPanel(stateFor(node).cards.slice())],
-      [ezT('Batch save cards'), () => batchToggle(node, true)],
+      [ezT('Batch mode'), () => batchToggle(node, true)],
       [ezT('Card manager'), () => openCardMgr(node)],
     ]);
   });
@@ -11869,21 +12543,12 @@ function buildRoot(node) {
   allBtn.addEventListener('click', () => openAllEditor(node));
   cmBtn.addEventListener('click', () => openCardMgr(node));
   //  键盘  Ctrl+F / Ctrl+H / Ctrl+↑ / Ctrl+↓（卡片或总体编辑打开时都可用）
-  // ★★ 只能装一次（模块级）：这段在 buildRoot() 里，而 buildRoot 每次 refreshUI 都会跑一遍。
-  //    以前直接 document.addEventListener，监听器会越堆越多 ⇒ 按一次 Ctrl+↑ 就把「加权步长」
+  // ★★ 改成模块级只装一次：buildRoot 每个节点构造时跑一次；热重载或重复 setup 时仍可能被再调一次。
+  //    以前每次直接 document.addEventListener，监听器会越堆越多 ⇒ 按一次 Ctrl+↑ 就把「加权步长」
   //    连加好几次（症状：设 0.05 实际跳 0.15~0.25，且随刷新次数变化，看起来"偶尔触发"）。
   phInstallEditorKeys();
   refreshUI(node);
   return shell;
-}
-function fitNode(node) {
-  try {
-    const root = node && node._ezRoot && node._ezRoot.querySelector('.eph-root');
-    if (!root || typeof node.setSize !== 'function') return;
-    const cur = node.size || [0, 96];
-    const contentH = root.scrollHeight + 12;
-    if (contentH > cur[1] + 4) node.setSize([Math.max(380, cur[0]), Math.min(560, contentH)]);
-  } catch (_) {}
 }
 function refreshUI(node) {
   const root = node && node._ezRoot;
@@ -11952,7 +12617,7 @@ function applyExecutedOptimized(node, ui) {
     const m = _editModal;
     if (m && m.classList.contains('active') && m._node === node && m._editor && !m._editor.contains(document.activeElement)) {
       const card = st.cards.find((c) => c && String(c.id) === String(st.editingId));
-      if (card && card.liveIn && st.currentTab !== 'optimized') { m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || ''); unwrapTagChips(m._editor); }
+      if (card && card.liveIn && st.currentTab !== 'optimized') { m._editor.innerHTML = cardHtmlOf(card.contentHTML, card.content); unwrapTagChips(m._editor); }
     }
   } catch (_) {}
 }
@@ -12020,7 +12685,7 @@ async function phPullLiveCards(node) {
     if (m && m.classList.contains('active') && m._node === node && m._editor && !m._editor.contains(document.activeElement)) {
       const st2 = stateFor(node);
       const card = st2.cards.find((c) => c && String(c.id) === String(st2.editingId));
-      if (card && card.liveIn && st2.currentTab !== 'optimized') { m._editor.innerHTML = ezSanitizeHtml(card.contentHTML || card.content || ''); unwrapTagChips(m._editor); }
+      if (card && card.liveIn && st2.currentTab !== 'optimized') { m._editor.innerHTML = cardHtmlOf(card.contentHTML, card.content); unwrapTagChips(m._editor); }
     }
   } catch (_) {}
 }
@@ -12086,19 +12751,18 @@ function installSocketLabels(node) {
       try { pos = node.getConnectionPos(item.in, item.i, [0, 0]); } catch (_) { pos = null; }
       if (!pos || !pos.length) { try { pos = item.in ? node.getInputPos(item.i) : node.getOutputPos(item.i); } catch (_2) { pos = null; } }
       if (!pos || !pos.length) { item.el.style.display = 'none'; return; }
-      const sx = rect.width / nodeW0;
-      const np = node.pos || [0, 0];
-      const cx = rect.left + (pos[0] - (np[0] || 0)) * sx;
-      const cy = rect.top + (pos[1] - (np[1] || 0)) * sy;
+      // ★ 用画布变换换算（跟画布画圆点同一套口径），别再用 rect 当节点左上角近似
+      const pt = ezfxGraphToScreen(node, pos, rect);
+      const cx = pt.x, cy = pt.y;
       item.el.style.display = 'inline-flex';
-      const zoom = Math.max(0.5, sx);
+      const zoom = Math.max(0.5, pt.zoom);
       item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px';
       item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
       item.el.style.borderRadius = (3 * zoom) + 'px';
       item.el.style.boxShadow = '0 1px ' + (3 * zoom) + 'px rgba(0,0,0,.25)';
       const tw = item.el.offsetWidth;
       const th = item.el.offsetHeight || 16;
-      const offX = 11 * zoom;
+      const offX = ezfxLabelOffX(item.in, zoom);
       item.el.style.left = (item.in ? cx - tw - offX : cx + offX) + 'px';
       item.el.style.top = (cy - th / 2) + 'px';
     });
@@ -12112,8 +12776,8 @@ function installSocketLabels(node) {
       update();
       // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍
     };
-    scheduleOnRedraw(update);
-    onLocaleChange(() => { try { refreshUI(node); } catch (_) {} update(); });   // 语言切换即时重画
+    ezScheduleNodeRedraw(node, update);
+    ezBindHooks(node, onLocaleChange(() => { try { refreshUI(node); } catch (_) {} update(); }));   // 语言切换即时重画
     scheduleOnRedraw(phDockTrack);   // 平铺面板跟着画布平移/缩放
     schedule();
   }
@@ -12121,7 +12785,7 @@ function installSocketLabels(node) {
 
 // ===== 挂载 =====
 function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && _in.name === 'config') { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && _in.name === 'config') { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
   const w = configWidget(node); if (!w || node._ezPhCfgHid) return; node._ezPhCfgHid = true;
   try {
     w.origComputeSize = w.computeSize; w.computeSize = () => [0, 0]; w.computedHeight = 0; w.y = 0; w.last_y = 0; w.width = 0;
@@ -12146,7 +12810,7 @@ function setupNode(node) {
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
     installResizeHandles(node, root);
-    try { node.setSize([440, Math.max(120, Math.min(240, node.size ? node.size[1] : 120))]); } catch (_) {} // 初始宽度收窄约一个「卡片管理」按钮
+    try { ezApplyDefaultSize(node, 440, 240); } catch (_) {} // 初始宽度收窄约一个「卡片管理」按钮
     hideConfigWidget(node);
     updatePorts(node, true);
     setTimeout(() => updatePorts(node), 80);
@@ -12187,7 +12851,7 @@ function hookGraphClear() {
 function hookPrototype(nt) {
   if (!nt || nt.__ezPhHooked) return; nt.__ezPhHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); refreshUI(this); try { phPullLiveCards(this); } catch (_) {} return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { this.__ezSizeRestored = true; const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); refreshUI(this); try { phPullLiveCards(this); } catch (_) {} return r; };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;
     try { if (this._ezPhSetup) setTimeout(() => { updatePorts(this); refreshUI(this); try { phPullLiveCards(this); } catch (_) {} }, 0); } catch (_) {}

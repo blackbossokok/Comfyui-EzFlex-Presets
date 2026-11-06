@@ -1,75 +1,97 @@
-"""EzFlex 插件套件：模型/分辨率/控制/参数预设节点
+"""EzFlex 插件套件：23 个节点（模型 / 分辨率 / 控制 / 参数预设 / 预览 / 提示词 / 媒体 / 时间轴 / 循环）。
 
-- EzFlex-ModelsCombo          模型组合加载器（checkpoint/unet/clip/vae + lora 串联）
-- EzFlex-FreeLatent           分辨率/Latent 选择器（拖拽画布 + 预设）
-- EzFlex-NodeSwitchGroup      分组预设：一组开关，按画布分组 颜色/标题正则 匹配并设节点 mode
-- EzFlex-NodeSwitchMaster     节点控制总预设：把每个 NodeSwitchGroup 实例映射到某分组预设
-- EzFlex-MainControl          总控制节点：把 NodeSwitchMaster / ParamPresetControl 实例映射到其预设
-- EzFlex-ParamPresetControl   参数预设控制：分组卡片驱动，动态输出端口 = 分组数 1:1
-- EzFlex-ParamPresetOutput    参数预设输出：连接某分组端口，动态输出端口 = 参数数 1:1（按类型映射）
-- EzFlex-PreviewAny           任意预览：白板放置多个可拖拽排序预览卡片，每卡一个任意输入 + 一个字符串输出
+## 文件结构（2026-10 按功能域拆分）
+- `__init__.py`               核心：常量、路径安全（`_ez_*`）、目录扫描缓存、配置与预设库（`user_data`）、
+                              循环展开、跨节点共用的 helper、`NODE_*_MAPPINGS` 聚合、前端 no-store 路由注册
+- `ezflex/preview_nodes.py`   EzFlex-PreviewAny + 媒体探测/导出（图/视频/音频/3D/模型元数据）
+- `ezflex/segments_nodes.py`  TimeLine / TimePlan / SplitVideo / SegmentPanel / MotionContext
+                              + 时间轴规划 `_tl_*`、切素材 `_ezsv_*`、分段落盘 `_ezsp_*`、钉帧几何 `_ezmc_*`
+- `ezflex/prompt_nodes.py`    EzFlex-PromptHelper + 卡片编译/合并 + 运行时优化 + 标签库
+- `ezflex/routes_nodes.py`    HTTP 路由的**处理函数**（注册块仍留在本文件末尾的 try 块）
 
-控制类节点（NodeSwitchGroup/Master/MainControl）是纯前端生效的配置容器（参考 rgthree
-Fast Groups Muter/Bypasser：node.mode 0/2/4 由浏览器端设置），Python 只承载隐藏 config。
+## 节点清单
+模型组合 ModelsCombo；分辨率 FreeLatent；控制 NodeSwitchGroup / NodeSwitchMaster / MainControl；
+参数预设 ParamPresetControl / ParamPresetOutput；预览 PreviewAny；提示词 PromptHelper；
+媒体 MediaLoader / MediaOut / MergeList / SplitList / Reroute；
+时间轴 TimeLine / TimePlan / SplitVideo / VideoComponents / SegmentPanel / MotionContext；
+循环 LoopStart / LoopEnd；预处理 ControlnetPreprocessor。
+
+## 约定
+- 全部节点用 V1 API（`INPUT_TYPES` + `RETURN_TYPES` + `FUNCTION`），不混用 V3 `io.ComfyNode`。
+- 动态端口：类上声明固定上限，前端按 `config` 建口；类型统一 `*`（ANY），见 `_DynamicOutputTypes`。
+- 控制类三节点是**纯前端容器**（参考 rgthree Fast Groups Muter）：Python 只承载隐藏 config，
+  `node.mode 0/2/4` 由浏览器设置 ⇒ API 提交时不会生效，与 rgthree 同类节点行为一致。
+- 子模块借用本文件的 helper 用 `from .. import (...)`；本文件在**末尾**导入子模块（避免循环导入）。
 """
-
 import base64
 import csv
 import inspect
 import json
 import os
+import shutil
 import random
 import re
 import struct
 import time
-
+from urllib.parse import urlsplit
+import logging
 import numpy as np
 import torch
-
 import folder_paths
-
-
-def _fmt_size(n):
-    try:
-        n = float(n)
-        for u in ("B", "KB", "MB", "GB", "TB"):
-            if n < 1024 or u == "TB":
-                return f"{n:.1f} {u}"
-            n /= 1024
-    except Exception:
-        return str(n)
-    return str(n)
-
-
+# AV latent 落盘是 comfy.nested_tensor.NestedTensor：torch.load(weights_only=True) 默认不认它，
+# 不加白名单「重跑续接」会静默丢掉上一段的 latent（→ MotionContext 不钉帧、接缝跳变、音频不连续）。
+try:
+    import comfy.nested_tensor as _ez_nested_tensor
+    torch.serialization.add_safe_globals([_ez_nested_tensor.NestedTensor])
+except Exception:
+    pass
+# ===== §1 路径安全 / 目录扫描缓存 =====
 def _fmt_mtime(t):
+    """时间戳 → 'YYYY-MM-DD HH:MM'（面板显示用）；失败时原样转字符串。"""
     try:
         from datetime import datetime
         return datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M")
     except Exception:
         return str(t)
-
-
+_SHA_CACHE = {}   # path -> (size, mtime_ns, hexdigest)
 def _sha256(p):
+    """文件内容 sha256（分块读，避免大文件吃内存）；读失败返回空串。按 (size, mtime) 记忆，避免同一模型每次预览都整文件重算。"""
+    try:
+        _st = os.stat(p)
+        _ck = (_st.st_size, _st.st_mtime_ns)
+        _hit = _SHA_CACHE.get(p)
+        if _hit and _hit[0] == _ck[0] and _hit[1] == _ck[1]:
+            return _hit[2]
+    except OSError:
+        return ""
     try:
         import hashlib
         h = hashlib.sha256()
         with open(p, "rb") as f:
             for chunk in iter(lambda: f.read(1024 * 1024), b""):
                 h.update(chunk)
-        return h.hexdigest()
+        d = h.hexdigest()
     except Exception:
         return ""
+    if len(_SHA_CACHE) >= 64:
+        _SHA_CACHE.pop(next(iter(_SHA_CACHE)), None)
+    _SHA_CACHE[p] = (_ck[0], _ck[1], d)
+    return d
 import comfy.sd
 import comfy.model_management
-
-from comfy_api.latest import io, InputImpl, Types
-
-__version__ = "1.3.0"   # 1.3.7: ★ 新增**队列续跑模式** —— LoopEnd 不再只能展开图：配对 LoopStart 的 config 里 `queue: true` 时，它把「本轮各 valueK 收到的值 + 下一轮轮号」写进一份**新 prompt** 塞回队列（等于自己再点一次运行），图不膨胀、每轮之间可停。回喂语义与展开模式一致（写 `_ezfeedK` 字面量）；list 必须包 `{"__value__": [...]}`，而队列的 prompt **不过内核校验** ⇒ LoopStart 自己拆这层包装（`_unwrap_literal`）。LoopEnd 面板加「展开 / 队列」两档开关（模式存配对 Start 的 config —— End 没有 config 口，新声明 widget 会让老工作流的 widgets_values 位置配对错位）。⚠️ 版本号按用户要求停在 1.3.0，这里只记内部变更；1.3.6: MergeList 的拼接顺序改成**画布上从上到下的端口顺序**（= prompt 键顺序），不再按 input_N 的数字排 —— 面板会回收空口 + 补「最小空闲编号」的新口，名字顺序和上下顺序会错位，用户「把线换到上面那一口，结果顺序没变」（2026-10-05）；配套：面板 `renumberMergeInputs` 把已连口按数组顺序重命名成 input_1..n（不动连线），并在面板上写明「按端口顺序拼接 · 最上面那口在最前」；1.3.5: LoopEnd 的 `__ezround` 不再显示 —— 它原来声明成普通 INT，前端会给它建一个数字框挂在节点上（用户反馈「不需要显示」）；改成 `forceInput: True` 后前端不建 widget，前端面板再兜底 `hideOneWidget(node,'__ezround')`（老工作流/已加载的图也立刻不显示）。它不参与序列化：首轮没有这个键时 cur 就是 0（真内核实测 3 轮照常推进并收束）；1.3.4: PreviewAny 的「多图显示 / 保存」现在同时管**显示**（选「图片序列」时，张量列表这类多帧图像按图片序列渲染，不再一律编成视频；auto 保持原样）+ 支持「张量列表」容器（新增 `_image_frames` 摊平逐帧，IMAGE 分支统一按帧列表处理）；LoopStart / LoopEnd 面板改成极简版（只有最上面一个居中的数字框：index / 次数，标题行·徽标·提示文字全部去掉）；文档补「内核原生 AddGuide 的长视频接法 + tolerance 必须为 0」；1.3.3: 循环累积收尾 —— MergeList 把「整份全是 None」的输入当成没接（LoopStart 某个 valueK 第 1 轮没给初值时吐的是 [None]，累积时会把整份列表顶偏一位；只跳「整份全 None」，不逐个丢，SplitList 的 None 占位保留）；更正 LoopEnd「次数」语义与全部文案（是**总轮数**：0/1 = 只跑 1 次、N = 一共 N 次，之前 tooltip / README / 面板提示都写成「1 = 再跑一次（总共 2 次）」，与实现不符）；文档写清 outK 只能喂循环体外的节点、TimeLine.video 必须接 LoopStart.valueK（接 LoopEnd.outK 会在校验期报 Dependency cycle detected，因为 TimeLine 吃 LoopStart.index 属于循环体内）；1.3.2: ★ 循环跨轮累积修好（LoopStart.valueK 列表输出 + LoopEnd 列表输入；之前「列表有几项就多跑几轮」、回喂变标量、out 拿不到完整列表）+ LoopEnd outK 镜像入口媒体项（TimeLine 可分段回看）； 平铺模式拖拽卡顿/切卡第一下失效/引用媒体跟随 + 标签提示回车多一行（并改成大小写不敏感）+ 新增「标签提示自动符号跟随」设置（输入框与开关同一行）；标签筛选增强（排除热度阈值 / 排除分类改用真实分类树 / 三个「…」项统一改成右侧弹面板、再点收起、层级抬到菜单之上；分类层级一律「点击展开」（不再悬停遮挡）；排除关键词框去掉 placeholder、「－」只删自己那一行；修「打开筛选面板后列表变空」的空关键词 bug）；1.3.1: 修「光标在最后一处时回车失效一次 / 保存后换行丢失 / 中间空行被删 / 选完标签提示候选再打逗号变两个逗号」+ 回车自动滚进视野 + 标签面板编辑框贴底去拖拽图标；1.3.0: 循环节点端口重做 + 预览图独立文件存储（tag_preview · card_preview）+ Ctrl+Z/Y 画布守卫
-
+import threading
+import io as _io          # 标准库 io 统一用 _io 引用，避免与 comfy_api 的 io 重名
+from comfy_api.latest import InputImpl, Types   # 只用到 VIDEO/3D 构造（Types.VideoComponents / InputImpl.VideoFromFile）
+_ez_log = logging.getLogger("EzFlex")   # 本插件唯一的 logger：路由注册失败 / 上游预处理失败都走它
+def _ez_route(srv, method, path, handler):
+    """逐条注册路由：一条失败只丢这一条。
+    以前整组共用一个 try，任何一条注册抛错都会让该组**后续所有**路由静默不注册（只有一条组级 warning）。"""
+    try:
+        getattr(srv.instance.routes, method)(path)(handler)
+    except Exception as exc:
+        _ez_log.warning("route %s %s NOT registered: %s", str(method).upper(), path, exc)
+__version__ = "1.3.0"   # 版本号按要求停在 1.3.0；历史变更见 PROJECT_STATE.md，不在代码里堆叠。
 WEB_DIRECTORY = "./web"
-
-# 给 web 目录里的页面/脚本设置 no-store，杜绝 Comfy-Desktop / 浏览器把它们缓存成旧版。
-# 在自定义节点加载阶段注册路由，早于 server.py 添加 /extensions 静态路由，因此优先生效。
 try:
     from server import PromptServer
     from aiohttp import web as _web
@@ -85,30 +107,22 @@ try:
         return _handler
 
     _routes = PromptServer.instance.routes
-    # 必须覆盖 web/ 下**全部** .js：漏掉的会走 ComfyUI 默认静态路由（带缓存），
-    # 改完前端刷新看不到变化、容易被误判成「代码没生效」。
-    for _fname in ("modelscombo_node.js", "freelatent_node.js",
-                   "ezflex_service.js", "ezflex_theme.js", "ezflex_i18n.js",
-                   "ezflex_listview.js", "ezflex_media_index.js",
-                   "node_switch_group.js", "node_switch_master.js",
-                   "main_control.js", "param_preset_control.js", "param_preset_output.js",
-                   "preview_any.js", "prompt_helper.js",
-                   "media_loader.js", "media_out.js", "loop_nodes.js",
-                   "reroute_node.js"):
-        _routes.get("/extensions/Comfyui-EzFlex-Presets/" + _fname)(_serve_no_store(_fname))
+    # 必须覆盖 web/ 下**全部** .js（含 core/ panels/ 这些子目录）：漏掉的会走 ComfyUI 默认静态路由
+    # （带缓存），改完前端刷新看不到变化、容易被误判成「代码没生效」。所以这里递归枚举，不再手抄清单。
+    for _root, _dirs, _files in os.walk(_WEB_DIR):
+        _dirs.sort()
+        for _fname in sorted(_f for _f in _files if _f.endswith(".js")):
+            _rel = os.path.relpath(os.path.join(_root, _fname), _WEB_DIR).replace(os.sep, "/")
+            _routes.get("/extensions/Comfyui-EzFlex-Presets/" + _rel)(_serve_no_store(_rel))
 except Exception as _e_routes:
     # 整块失败会让所有前端 JS 退回「带缓存的默认静态路由」，表现为刷新后仍是旧版：
     # 不静默吞掉，至少让它出现在控制台里。
-    import logging as _logging
-    _logging.getLogger("EzFlex").warning(
+    _ez_log.warning(
         "no-store routes for /extensions/Comfyui-EzFlex-Presets/*.js were NOT registered (%s); "
         "front-end changes may appear stale until the browser cache is cleared.", _e_routes)
-
-MAX_PORTS_PER_TYPE = 32
-# 动态端口同步路由（前端 POST /xxx/outputs）的入参上限：这些路由会改「类级」RETURN_TYPES/NAMES，
-# 远端可打，所以要卡住长度/条数，避免超长名字或超大列表把类属性撑爆。
-_EZ_OUTPUT_CAP = 512
-
+MAX_PORTS_PER_TYPE = 32   # 每类型输出口上限：前端 MAX_PER_TYPE 必须与此一致（见 modelscombo_node.js）
+# ===== §2 加载器选项与实现 =====
+# 加载器类型 → ComfyUI 的模型目录名（folder_paths 的 key）
 LOADER_FOLDERS = {
     "checkpoint": "checkpoints",
     "unet": "diffusion_models",
@@ -116,7 +130,7 @@ LOADER_FOLDERS = {
     "vae": "vae",
     "lora": "loras",
 }
-
+# 面板可选精度 → torch dtype；"default" = 跟随模型自带精度
 WEIGHT_DTYPES = {
     "default": None,
     "fp16": torch.float16,
@@ -126,50 +140,25 @@ WEIGHT_DTYPES = {
     "fp8_e4m3fn_fast": torch.float8_e4m3fn,
     "fp8_e5m2": torch.float8_e5m2,
 }
-
-# 与内置 CLIPLoader 的 type 选项保持一致
+# 面板里的 CLIP 类型；文件末尾会自动并入内核 CLIPType 枚举，内核新增类型无需改这里
 CLIP_TYPES = [
     "stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv",
     "pixart", "cosmos", "lumina2", "wan", "hidream", "chroma", "ace", "omnigen2",
     "qwen_image", "hunyuan_image", "flux2", "ovis", "longcat_image", "cogvideox",
     "lens", "pixeldit", "ideogram4", "boogu", "krea2", "joyimage", "mage", "minimax", "yue2",
 ]
-
-# 页面 device 下拉提供的选项
-DEVICES = ("default", "cpu", "cuda", "cuda:0", "cuda:1")
-
-# VAE 只接受这些 dtype（fp8 不适用）
+try:
+    from comfy.sd import CLIPType as _CLIPType
+    for _ct in _CLIPType:
+        _nm = str(getattr(_ct, "name", "") or "").lower()
+        if _nm and _nm not in CLIP_TYPES:
+            CLIP_TYPES.append(_nm)
+except Exception:
+    pass
+# 设备下拉（VAE 加载用）；内核支持但这里没列出的设备走 "default"
+DEVICES = ("default", "cpu", "cuda", "cuda:0", "cuda:1", "mps", "xpu")
+# VAE 允许的精度（比模型权重少：不支持 fp8）
 VAE_DTYPES = ("default", "fp16", "bf16", "fp32")
-
-# 悬停预览：按「模型文件同名」的图片/视频返回，供前端 hover 展示
-_MEDIA_EXTS = (
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
-    ".mp4", ".webm", ".mov", ".m4v",
-)
-
-
-async def _preview_handler(request):
-    if not _ez_local(request):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    folder = request.query.get("type", "")
-    file = request.query.get("file", "")
-    if folder not in LOADER_FOLDERS or not file:
-        return _web.Response(status=400, text="bad request")
-    try:
-        path = folder_paths.get_full_path_or_raise(LOADER_FOLDERS[folder], file)
-    except Exception:
-        return _web.Response(status=404, text="model not found")
-    base = os.path.splitext(path)[0]
-    for ext in _MEDIA_EXTS:
-        cand = base + ext
-        if os.path.isfile(cand):
-            return _web.FileResponse(cand, headers={"Cache-Control": "no-store"})
-    return _web.Response(status=404, text="no preview")
-
-
-# ===== 安全收口（评审要求）：路径包含性 / 本机限定 / 出站主机允许列表 =====
-# 原则：前端能碰到的路径先落到「服务端自己的根目录」里（realpath + commonpath）；落不进去的
-# 要么转存进临时目录再服务，要么直接拒绝。拉起本机程序 / 弹本机对话框 / 改允许列表：只认本机客户端。
 def _ez_real(p):
     """规范化路径；空串一律返回 ''（注意：os.path.abspath('') 会得到进程 CWD，不能当路径用）。"""
     try:
@@ -177,35 +166,9 @@ def _ez_real(p):
         return os.path.realpath(os.path.abspath(s)) if s else ""
     except Exception:
         return ""
-
-
-def _ez_plugin_scan_dirs():
-    """用户在「设置·路径设置」里登记的扫描目录（服务端自己的状态，不是请求参数）。"""
-    out = []
-    try:
-        fn = _ph_scan_paths_file()
-        if fn and os.path.isfile(fn):
-            with open(fn, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            if isinstance(data, list):
-                out.extend([x for x in data if isinstance(x, str)])
-            elif isinstance(data, dict):
-                for k in ("scan", "models", "dirs", "paths"):
-                    v = data.get(k)
-                    if isinstance(v, list):
-                        out.extend([x for x in v if isinstance(x, str)])
-    except Exception:
-        pass
-    return out
-
-
-# ===== 目录扫描缓存（性能）=====
-# 说明：只缓存"文件名/路径"这类**元数据**，绝不缓存模型对象、图片字节或 tensor —— 不占显存。
-# 失效：参与扫描的任一根目录 mtime 变化即重建；再加一个 TTL 兜住 mtime 精度粗 / 网络盘的情况。
+# 目录扫描索引缓存：key = _scan_sig(根目录)，TTL 5 秒；避免每请求都 os.walk 整个模型目录
 _SCAN_CACHE_TTL_MS = 5000
 _SCAN_CACHE = {}
-
-
 def _scan_sig(roots):
     sig = []
     for r in (roots or []):
@@ -214,8 +177,6 @@ def _scan_sig(roots):
         except OSError:
             sig.append((str(r), -1.0))
     return tuple(sig)
-
-
 def _scan_cached(key, roots, build):
     if _SCAN_CACHE_TTL_MS <= 0:
         return build()
@@ -227,26 +188,56 @@ def _scan_cached(key, roots, build):
     val = build()
     _SCAN_CACHE[key] = (sig, now, val)
     return val
+_EZ_ROOTS_MEMO = {"sig": None, "roots": []}
 
 
-def _ph_root_index(root):
-    """某个模型根目录下「文件名 -> 绝对路径」索引（缓存）；替代每次查询都 os.walk 整个根。"""
-    return _scan_cached(("ph_index", os.path.normpath(root)), [root], lambda: _ph_root_index_build(root))
-
-
-def _ph_root_index_build(root):
-    idx = {}
+def _stat_sig(p):
     try:
-        for dirpath, _dirs, files in os.walk(root):
-            for fn in files:
-                idx.setdefault(fn, os.path.abspath(os.path.join(dirpath, fn)))
-    except Exception:
-        pass
-    return idx
+        st = os.stat(p) if p else None
+    except OSError:
+        st = None
+    return (p, st.st_mtime_ns, st.st_size) if st else (p, 0, 0)
+
+
+def _ez_roots_sig():
+    """根列表的失效签名：根表文件的 (mtime_ns, size) + input/output/temp/models 的当前值。
+
+    只覆盖会影响结果的输入。主根表存在时不再看两个 legacy 文件（_ez_root_rows 也不看），
+    省掉 2 次 stat —— 这是每个路径判断都要付的钱。
+    """
+    parts = []
+    main = _ezflex_user_file("ezflex_roots.json")
+    st = _stat_sig(main)
+    parts.append(st)
+    if not st[1]:   # mtime_ns == 0 ⇒ 主根表不存在，才需要看两个 legacy 文件（与 _ez_root_rows 同条件）
+        for name in ("ezflex_save_roots.json", "ezflex_media_roots.json"):
+            parts.append(_stat_sig(_ezflex_user_file(name)))
+    for fn in ("get_input_directory", "get_output_directory", "get_temp_directory"):
+        try:
+            f = getattr(folder_paths, fn, None)
+            parts.append(f() if callable(f) else "")
+        except Exception:
+            parts.append("")
+    parts.append(str(getattr(folder_paths, "models_dir", "") or ""))
+    return tuple(parts)
+
+
+def _ez_roots_invalidate():
+    """根表被写过后调用：下一回 _ez_roots() 必须重算（不依赖 mtime 分辨率）。"""
+    _EZ_ROOTS_MEMO["sig"] = None
 
 
 def _ez_roots():
-    """允许前端读写的根目录 = ComfyUI 的 input/output/temp/models + 用户登记过的扫描目录。"""
+    """允许前端读写的根目录 = ComfyUI 的 input/output/temp/models + 根表里登记的根。
+
+    根表里的根（MediaLoader 添加 / PreviewAny 保存位置 / PromptHelper 扫描目录）也算可读 ——
+    「在浏览器里登记过」就等于「这张图/这段素材可以被解析到」，否则浏览得到、serve 却 404。
+    ★ 结果按 _ez_roots_sig() 缓存：它同时是安全边界和热路径（每个路径判断都走），
+      不缓存的话 9 个素材就要 ~46 ms 纯系统调用。写根表的函数都会 _ez_roots_invalidate()。
+    """
+    sig = _ez_roots_sig()
+    if _EZ_ROOTS_MEMO["sig"] == sig:
+        return list(_EZ_ROOTS_MEMO["roots"])
     out = []
     for fn in ("get_input_directory", "get_output_directory", "get_temp_directory"):
         try:
@@ -268,7 +259,7 @@ def _ez_roots():
     except Exception:
         pass
     try:
-        out.extend(_ez_plugin_scan_dirs())
+        out.extend(_ez_root_paths("read"))
     except Exception:
         pass
     roots, seen = [], set()
@@ -277,16 +268,18 @@ def _ez_roots():
         if r and r not in seen:
             seen.add(r)
             roots.append(r)
-    return roots
-
-
+    _EZ_ROOTS_MEMO["sig"] = sig
+    _EZ_ROOTS_MEMO["roots"] = roots
+    return list(roots)
 def _ez_inside(path, roots=None):
     """realpath + commonpath：只有落在某个根目录内才返回规范路径，否则返回 ''。"""
     p = _ez_real(path)
     if not p:
         return ""
-    for r in (roots if roots is not None else _ez_roots()):
-        rr = _ez_real(r)
+    # 默认根已经是 realpath 归一过的（见 _ez_roots），别再逐根重复 realpath：
+    # 这里每个路径判断都走，4~6 个根各 0.2~0.3 ms 是纯浪费。
+    cand = _ez_roots() if roots is None else [_ez_real(r) for r in roots]
+    for rr in cand:
         if not rr:
             continue
         try:
@@ -295,37 +288,216 @@ def _ez_inside(path, roots=None):
         except Exception:
             continue
     return ""
+# ===== §1.5 目录根登记表（读 / 写 / 扫描，一份文件）=====
+# 背景：保存类功能原先各存一份列表（ezflex_save_roots.json 给 PreviewAny 存图、ezflex_media_roots.json
+# 给 MediaLoader 浏览），在 MediaLoader 里授权过的目录 SegmentPanel 不认，用户也没有统一的地方查看/撤销。
+# 现在只有这一张表 user_data/ezflex_roots.json，每个根带 read/write/scan 能力位和 src 来源标记；
+# MediaLoader 的「根目录」页就是它的管理界面，节点面板只负责「用哪个根」。
+# 老的两份文件在首次写盘时并入新表，之后不再读取。
+_EZ_ROOTS_CACHE = {"sig": None, "rows": []}
+def _ez_roots_file():
+    return _ezflex_user_file("ezflex_roots.json")
+def _ez_root_norm(p, must_exist=True):
+    """规范化成可登记的根：不是整盘根（C:\\ 这种不当根），默认还要求真实存在且是目录。
 
-
-def _ez_adopt_to_temp(path):
-    """根外文件：复制一份进 ComfyUI 临时目录再服务 —— 保住「任意来源也能预览」，但不放开任意读。"""
-    try:
-        import shutil
-        import hashlib
-        if not path or not os.path.isfile(path):
-            return ""
-        tmp_root = _ez_real(folder_paths.get_temp_directory())
-        if not tmp_root:
-            return ""
-        src = _ez_real(path)
-        ext = os.path.splitext(src)[1].lower()
-        dest = os.path.join(tmp_root, "ezflex_serve_" + hashlib.sha1(src.encode("utf-8", "replace")).hexdigest()[:16] + ext)
-        if not os.path.isfile(dest) or os.path.getsize(dest) != os.path.getsize(src):
-            shutil.copy2(src, dest)
-        return dest
-    except Exception:
+    读表时传 must_exist=False：外接盘拔掉的行必须原样留着，否则下次写盘就把用户的登记删了。
+    """
+    r = _ez_real(p)
+    if not r or os.path.dirname(r) == r:
         return ""
+    if must_exist and not os.path.isdir(r):
+        return ""
+    return r
+def _ez_root_merge(rows, path, read=True, write=False, scan=False, src=""):
+    """把 (路径, 能力位, 来源) 并进 rows（就地改）；同一目录只留一行，能力位取或、来源追加。"""
+    key = os.path.normcase(path)
+    for row in rows:
+        if os.path.normcase(_ez_real(row.get("path")) or "") == key:
+            row["read"] = bool(row.get("read")) or bool(read)
+            row["write"] = bool(row.get("write")) or bool(write)
+            row["scan"] = bool(row.get("scan")) or bool(scan)
+            if src:
+                srcs = row.setdefault("src", [])
+                if src not in srcs:
+                    srcs.append(src)
+            return rows
+    rows.append({"path": path, "read": bool(read), "write": bool(write), "scan": bool(scan),
+                 "src": [src] if src else []})
+    return rows
+def _ez_root_legacy_rows():
+    """老的两份列表 → 新表行（只在 ezflex_roots.json 还不存在时读）。"""
+    rows = []
+    for fname, src, is_write in (("ezflex_save_roots.json", "previewany", True),
+                                 ("ezflex_media_roots.json", "medialoader", False)):
+        try:
+            fn = _ezflex_user_file(fname)
+            if not fn or not os.path.isfile(fn):
+                continue
+            with open(fn, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, list):
+                continue
+            for x in data:
+                p = _ez_root_norm(x)
+                if p:
+                    _ez_root_merge(rows, p, read=True, write=is_write, src=src)
+        except Exception:
+            continue
+    return rows
+def _ez_root_rows():
+    """根登记表（含能力位与来源）。读缓存按三个文件的 mtime 失效。
+
+    ★ 返回**全量**行（含当前不存在的目录）：这是要写回磁盘的那份数据。
+      需要「现在真的能访问」的列表请用 _ez_root_paths()。
+    """
+    fn = _ez_roots_file()
+    sig = []
+    for p in (fn, _ezflex_user_file("ezflex_save_roots.json"), _ezflex_user_file("ezflex_media_roots.json")):
+        try:
+            sig.append(os.path.getmtime(p))
+        except (OSError, TypeError):
+            sig.append(0.0)
+    sig = tuple(sig)
+    if _EZ_ROOTS_CACHE["sig"] == sig:
+        return [dict(r) for r in _EZ_ROOTS_CACHE["rows"]]
+    rows = []
+    if fn and os.path.isfile(fn):
+        try:
+            with open(fn, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            raw = data.get("roots") if isinstance(data, dict) else data
+            for item in (raw if isinstance(raw, list) else []):
+                if not isinstance(item, dict):
+                    continue
+                p = _ez_root_norm(item.get("path"), must_exist=False)
+                if p:
+                    _ez_root_merge(rows, p, bool(item.get("read", True)), bool(item.get("write")),
+                                   bool(item.get("scan")), "")
+                    for row in rows:
+                        if os.path.normcase(_ez_real(row.get("path")) or "") == os.path.normcase(p):
+                            row["src"] = [str(s) for s in (item.get("src") or [])][:8]
+                            break
+        except Exception:
+            rows = []
+    else:
+        rows = _ez_root_legacy_rows()
+    # 不在这里过滤「目录是否存在」：过滤后的结果会被写盘函数当成完整表写回去，
+    # 外接盘离线时增删任何根都会永久删掉那一行（2026-11 审计 P2-4）。存在性只在 _ez_root_paths 里判。
+    _EZ_ROOTS_CACHE["sig"] = sig
+    _EZ_ROOTS_CACHE["rows"] = [dict(r) for r in rows]
+    return rows
 
 
-# PreviewAny 往 temp 写的导出件（图片/音频/视频/遮罩/3D）此前**只增不删**，长期会持续占磁盘。
-# 这里按「文件年龄」回收：只扫 temp 根下、只认这几个前缀、只删超过 TTL 的。
-# 正在播放/刚写完的文件因为年龄不够不会被动到；内容寻址的（ezpv_vid_/ezpv3d_mesh_）删了会自动重算。
-_EZPV_PREFIXES = ("ezpv_img_", "ezpv_audio_", "ezpv_vid_", "ezpv_mask_", "ezpv3d_mesh_", "ezpv3d_", "ezflex_serve_")
+def _ez_write_json(fn, obj):
+    """原子写 JSON：先写 <fn>.tmp 再 os.replace。
+
+    ★ 以前所有配置都是 open(fn, "w") 直接覆盖：写到一半断电/盘满就留下半截文件，
+      而 _read_doc/_ez_root_rows 解析失败会返回空表 ⇒ 下一次保存把整份预设库/根表覆盖成一条。
+    """
+    tmp = fn + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(fn), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(obj, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, fn)
+        return True
+    except Exception:
+        try:
+            if os.path.isfile(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+def _ez_root_save(rows):
+    fn = _ez_roots_file()
+    if not fn:
+        return False
+    if not _ez_write_json(fn, {"version": 2, "roots": rows}):
+        return False
+    _EZ_ROOTS_CACHE["sig"] = None
+    _ez_roots_invalidate()   # 根表变了：_ez_roots() 的 memo 必须立刻失效（新增/删除根要即时生效）
+    return True
+def _ez_root_paths(cap="read"):
+    """登记表里具备某能力、且**当前真实存在**的目录（read / write / scan）—— 安全边界用的就是这份。"""
+    return [r["path"] for r in _ez_root_rows() if r.get(cap) and os.path.isdir(r.get("path") or "")]
+def _ez_root_add(path, read=True, write=False, scan=False, src=""):
+    """登记（或给已有行加能力位）。返回规范路径；不合法（不存在/整盘/不是目录）**或写盘失败**返回 ''。"""
+    p = _ez_root_norm(path)
+    if not p:
+        return ""
+    if not _ez_root_save(_ez_root_merge(_ez_root_rows(), p, read, write, scan, src)):
+        return ""
+    return p
+def _ez_root_remove(path):
+    p = _ez_real(path)
+    if not p:
+        return False
+    key = os.path.normcase(p)
+    rows = [r for r in _ez_root_rows() if os.path.normcase(_ez_real(r.get("path")) or "") != key]
+    return _ez_root_save(rows)
+def _ez_root_drop_cap(cap):
+    """去掉所有行的某个能力位（`/preview_any/save_roots` 的 clear 用）；没有能力位的行一并删掉。"""
+    rows = []
+    for r in _ez_root_rows():
+        r = dict(r)
+        r[cap] = False
+        if r.get("read") or r.get("write") or r.get("scan"):
+            rows.append(r)
+    return _ez_root_save(rows)
+def _ez_root_drop_cap_for(path, cap):
+    """只去掉指定目录的某个能力位；没有能力位了就把这行删掉。"""
+    p = _ez_real(path)
+    if not p:
+        return False
+    key = os.path.normcase(p)
+    rows = []
+    for r in _ez_root_rows():
+        r = dict(r)
+        if os.path.normcase(_ez_real(r.get("path")) or "") == key:
+            r[cap] = False
+            if not (r.get("read") or r.get("write") or r.get("scan")):
+                continue
+        rows.append(r)
+    return _ez_root_save(rows)
+def _ez_save_roots():
+    """可写根（= 原来的 `_pv_save_roots()`）：PreviewAny 存图、SegmentPanel `save_dir`、MediaLoader 另存为共用。"""
+    return _ez_root_paths("write")
+# ===== 上一次选过的目录（原生「选择文件夹」对话框的起始位置）=====
+# 以前每次弹框都从 output/input 起步，选过一次 D:\jietu 下次还得重新翻。这里记最后一次，
+# 所有「选文件夹」对话框共用（纯本机偏好，不参与权限判定）。
+_EZ_LAST_DIR = {"path": None}
+def _ez_last_dir_file():
+    return _ezflex_user_file("ezflex_last_dir.json")
+def _ez_last_dir(default=""):
+    if _EZ_LAST_DIR["path"] is None:
+        p = ""
+        try:
+            fn = _ez_last_dir_file()
+            if fn and os.path.isfile(fn):
+                with open(fn, "r", encoding="utf-8") as fh:
+                    d = json.load(fh)
+                p = str((d or {}).get("dir") or "") if isinstance(d, dict) else ""
+        except Exception:
+            p = ""
+        _EZ_LAST_DIR["path"] = p
+    p = _EZ_LAST_DIR["path"]
+    return p if (p and os.path.isdir(p)) else default
+def _ez_last_dir_set(path):
+    p = _ez_real(path)
+    if not p or not os.path.isdir(p):
+        return
+    _EZ_LAST_DIR["path"] = p
+    fn = _ez_last_dir_file()
+    if fn:
+        _ez_write_json(fn, {"dir": p})
+# 预览导出的临时件：前缀 / TTL / 清扫最小间隔（sweep 自己用）。
+# 以前这三项定义在 ezflex/segments_nodes.py —— 上层常量被下层工具函数引用，靠"末尾才 import"才恰好可用，
+# 单独导入或调整导入顺序就会 NameError。以这里为唯一定义处，segments_nodes 从这里导入。
+_EZPV_PREFIXES = ("ezpv_img_", "ezpv_th_", "ezpv_audio_", "ezpv_vid_", "ezpv_trim_", "ezpv_mask_",
+                  "ezpv3d_mesh_", "ezpv3d_", "ezflex_serve_", "ezflex_tl_")
 _EZPV_TTL_SEC = 6 * 60 * 60        # 6 小时：远大于任何一次预览/播放的生命周期
 _EZPV_SWEEP_MIN_GAP = 300.0        # 两次清扫最小间隔（秒），避免每个预览请求都遍历目录
 _ezpv_sweep_last = [0.0]
-
-
 def _ezpv_sweep(force=False):
     """回收 temp 下过期的 EzFlex 导出件。失败静默（清理是尽力而为，不该影响预览本身）。"""
     try:
@@ -354,128 +526,72 @@ def _ezpv_sweep(force=False):
         return removed
     except Exception:
         return 0
-
-
+def _ez_loopback(host):
+    """回环名归一：去掉方括号 / 端口 / ::ffff: 前缀，只留主机名；裸 IPv6（::1）原样保留。"""
+    h = str(host or "").strip().lower()
+    if h.startswith("["):
+        h = h[1:h.find("]")] if "]" in h else h
+    elif h.count(":") == 1:
+        h = h.split(":", 1)[0]
+    if h.startswith("::ffff:"):
+        h = h[7:]
+    return h
 def _ez_local(req):
     """敏感动作（拉起系统程序 / 弹本机对话框 / 改服务端允许列表）只允许本机客户端。
     另外校验来源头：任意网页也能从浏览器打到 localhost，所以带 Origin/Referer 时必须与 Host 同源。"""
+    if _ez_loopback(getattr(req, "remote", "")) not in ("127.0.0.1", "::1", "localhost"):
+        return False
+    # 反向代理把 Host 改写成 127.0.0.1 时，remote/Host 都会「看起来是本机」——
+    # 再看转发头。★ 只信**最后一跳**（代理追加的那个）：最左一跳是客户端自报的，可以随便写
+    #   （nginx 用 $proxy_add_x_forwarded_for 时，远端自带 "X-Forwarded-For: 127.0.0.1" 就能过闸门）。
     try:
-        host = str(getattr(req, "remote", "") or "").strip()
+        xff = str(req.headers.get("X-Forwarded-For") or "").strip()
+        peer = _ez_loopback(xff.split(",")[-1]) if xff else ""
+        if not peer:
+            peer = _ez_loopback(req.headers.get("X-Real-IP") or req.headers.get("CF-Connecting-IP") or "")
     except Exception:
-        host = ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
+        peer = ""
+    if peer and peer not in ("127.0.0.1", "::1", "localhost"):
         return False
     # Host 也必须是回环名：挡 DNS rebinding（恶意域名解析到 127.0.0.1 时，浏览器给的 Host 是那个域名）
     try:
-        raw_host = str(req.headers.get("Host") or "").strip().lower()
+        req_host = _ez_loopback(req.headers.get("Host"))
     except Exception:
-        raw_host = ""
-    if raw_host.startswith("["):
-        req_host = raw_host[1:raw_host.find("]")] if "]" in raw_host else raw_host
-    else:
-        req_host = raw_host.split(":", 1)[0]
+        req_host = ""
     if req_host and req_host not in ("127.0.0.1", "localhost", "::1"):
         return False
-    # 浏览器跨站请求会带 Sec-Fetch-Site: cross-site —— 直接拒（非浏览器客户端没有这个头，不受影响）
+    # 浏览器跨站 / 同站（另一个 localhost 端口）的请求都带 Sec-Fetch-Site —— 直接拒；
+    # 非浏览器客户端没有这个头，不受影响。
     try:
         sfs = str(req.headers.get("Sec-Fetch-Site") or "").strip().lower()
     except Exception:
         sfs = ""
-    if sfs == "cross-site":
+    if sfs in ("cross-site", "same-site"):
         return False
     try:
         origin = str(req.headers.get("Origin") or req.headers.get("Referer") or "")
     except Exception:
         origin = ""
     if origin:
-        o = origin.strip().lower()
         # Origin: null = 沙箱 iframe / data: / file: 页面 —— 不能当成同源可信，一律拒
-        if o == "null":
+        if origin.strip().lower() == "null":
             return False
-        ref = o.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].strip().lower()
-        req_host = str(req.headers.get("Host") or "").split(":", 1)[0].strip().lower()
-        if ref and req_host and ref != req_host:
+        # 必须比到端口：只比 hostname 的话 http://127.0.0.1:3000 上的任意本地页面都能过闸门。
+        # 不比 scheme（反代常把 TLS 终止在本机，scheme 会被改写成 http）。
+        # ⚠️ aiohttp 的 req.url 是 yarl.URL：只有 `.host`，**没有** `.hostname`（写错会 500）。
+        try:
+            _o = urlsplit(origin.strip())
+            _me = req.url
+            _oh = (_o.hostname or "").lower()
+            _mh = str(getattr(_me, "host", "") or "").lower()
+            _op = _o.port or (443 if _o.scheme == "https" else 80)
+            _mp = _me.port or (443 if _me.scheme == "https" else 80)
+        except Exception:
+            return False
+        if _oh != _mh or _op != _mp:
             return False
     return True
-
-
-try:
-    PromptServer.instance.routes.get("/models_combo/preview")(_preview_handler)
-except Exception:
-    pass
-
-# ===== LoraManager 元数据浏览（ModelsCombo「浏览」弹窗）=====
-# 读取 LoraManager 在模型目录生成的 <模型名>.metadata.json（以及同目录预览图），
-# 返回给前端做「批量添加加载器」的模型浏览器。只列能映射成组合加载器类型的目录。
-_META_LOADER_FOLDERS = {
-    "checkpoint": "checkpoints",
-    "unet": "diffusion_models",
-    "lora": "loras",
-}
-
-
-def _meta_relative_file(folder, meta, meta_path):
-    """把 LoraManager 元数据对应的模型文件，换算成 ComfyUI /models/<folder> 的相对路径。"""
-    fp = (meta.get("file_path") or "").strip()
-    fp_n = os.path.normpath(fp) if fp else None
-    roots = [os.path.normpath(r) for r in folder_paths.get_folder_paths(folder) if r]
-    if fp_n:
-        for root in roots:
-            try:
-                if os.path.commonpath([root, fp_n]) == root:
-                    return os.path.relpath(fp_n, root).replace("\\", "/")
-            except Exception:
-                pass
-    # 兜底：按 metadata 文件位置推算（模型文件与元数据同 basename，只差后缀）
-    base = meta_path[:-len(".metadata.json")] if meta_path.endswith(".metadata.json") else os.path.splitext(meta_path)[0]
-    base_n = os.path.normpath(base)
-    for root in roots:
-        try:
-            if os.path.commonpath([root, base_n]) != root:
-                continue
-            base_rel = os.path.relpath(base_n, root).replace("\\", "/")
-            for ext in (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".sft", ".lora"):
-                if os.path.isfile(os.path.join(root, base_rel + ext)):
-                    return base_rel + ext
-            return base_rel
-        except Exception:
-            pass
-    return ""
-
-
-def _civitai_summary(c):
-    if not isinstance(c, dict):
-        return None
-    imgs = []
-    for img in (c.get("images") or []):
-        if not isinstance(img, dict):
-            continue
-        imgs.append({
-            "url": img.get("url"),
-            "width": img.get("width"),
-            "height": img.get("height"),
-            "nsfwLevel": img.get("nsfwLevel"),
-            "type": img.get("type"),
-        })
-    model = c.get("model") if isinstance(c.get("model"), dict) else {}
-    creator = c.get("creator") if isinstance(c.get("creator"), dict) else {}
-    return {
-        "id": c.get("id"),
-        "modelId": c.get("modelId"),
-        "name": c.get("name"),
-        "nsfwLevel": c.get("nsfwLevel"),
-        "baseModel": c.get("baseModel"),
-        "modelType": c.get("type"),
-        "modelName": model.get("name"),
-        "description": model.get("description"),
-        "tags": model.get("tags") if isinstance(model.get("tags"), list) else [],
-        "creator": creator.get("username"),
-        "stats": c.get("stats") if isinstance(c.get("stats"), dict) else {},
-        "downloadUrl": c.get("downloadUrl"),
-        "images": imgs,
-    }
-
-
+# ===== §3 ModelsCombo：LoRA 元数据 =====
 def _lora_trained_words(meta):
     """触发词：LoraManager 顶层 trainedWords 常为空，退回 civitai.trainedWords（C 站数据在那儿）。"""
     if not isinstance(meta, dict):
@@ -492,171 +608,90 @@ def _lora_trained_words(meta):
         if isinstance(at, str) and at.strip():
             tw = [at]
     return [str(w).strip() for w in tw if str(w or "").strip()]
-
-
-def _lora_meta_summary(type_, rel, meta):
-    tags = meta.get("tags")
-    trained = _lora_trained_words(meta)
-    creator_meta = meta.get("creator")
-    author = meta.get("author")
-    if not author and isinstance(creator_meta, dict):
-        author = creator_meta.get("username") or creator_meta.get("name")
-    if not author and isinstance(creator_meta, str):
-        author = creator_meta
-    return {
-        "type": type_,
-        "file": rel,
-        "file_name": meta.get("file_name"),
-        "model_name": meta.get("model_name"),
-        "base_model": meta.get("base_model"),
-        "author": author,
-        "size": meta.get("size"),
-        "modified": meta.get("modified"),
-        "sha256": meta.get("sha256"),
-        "preview_url": meta.get("preview_url"),
-        "preview_nsfw_level": meta.get("preview_nsfw_level", 0),
-        "notes": meta.get("notes", ""),
-        "from_civitai": meta.get("from_civitai", False),
-        "tags": tags if isinstance(tags, list) else [],
-        "modelDescription": meta.get("modelDescription", ""),
-        "usage_tips": meta.get("usage_tips", ""),
-        "trainedWords": trained if isinstance(trained, list) else [],
-        "favorite": meta.get("favorite", False),
-        "exclude": meta.get("exclude", False),
-        "civitai": _civitai_summary(meta.get("civitai")),
-    }
-
-
-async def _lora_meta_list(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    roots = []
-    for folder in _META_LOADER_FOLDERS.values():
-        try:
-            roots.extend(folder_paths.get_folder_paths(folder) or [])
-        except Exception:
-            pass
-    return _web.json_response(_scan_cached(("lora_meta",), roots, _lora_meta_build))
-
-
-def _lora_meta_build():
-    out = []
-    seen = set()
-    for type_, folder in _META_LOADER_FOLDERS.items():
-        for root in folder_paths.get_folder_paths(folder):
-            if not root or not os.path.isdir(root):
-                continue
-            root = os.path.normpath(root)
-            for dirpath, _dirs, files in os.walk(root):
-                for fn in files:
-                    if not fn.endswith(".metadata.json"):
-                        continue
-                    meta_path = os.path.join(dirpath, fn)
-                    try:
-                        with open(meta_path, "r", encoding="utf-8-sig") as fh:
-                            meta = json.load(fh)
-                    except Exception:
-                        continue
-                    if not isinstance(meta, dict):
-                        continue
-                    rel = _meta_relative_file(folder, meta, meta_path)
-                    if not rel:
-                        continue
-                    key = (type_, rel)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    out.append(_lora_meta_summary(type_, rel, meta))
-    out.sort(key=lambda x: (x.get("type") or "", x.get("model_name") or x.get("file_name") or ""))
-    return out
-
-
-async def _lora_meta_detail(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    type_ = req.query.get("type", "")
-    file = req.query.get("file", "")
-    folder = LOADER_FOLDERS.get(type_)
-    if not folder or not file:
-        return _web.Response(status=400, text="bad request")
-    try:
-        path = folder_paths.get_full_path_or_raise(folder, file)
-    except Exception:
-        return _web.Response(status=404, text="not found")
-    meta_path = os.path.splitext(path)[0] + ".metadata.json"
-    if not os.path.isfile(meta_path):
-        return _web.Response(status=404, text="no metadata")
-    try:
-        with open(meta_path, "r", encoding="utf-8-sig") as fh:
-            data = json.load(fh)
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-    return _web.json_response(data)
-
-
-try:
-    PromptServer.instance.routes.get("/models_combo/lora_meta")(_lora_meta_list)
-    PromptServer.instance.routes.get("/models_combo/lora_meta_detail")(_lora_meta_detail)
-except Exception:
-    pass
-
-# ===== 预设存储：插件目录 user_data（每个节点一个存档文件，存该节点全部预设）=====
-# 文件可能被编辑器加上 UTF-8 BOM，读取用 utf-8-sig 兼容（否则 json.load 抛 BOM 错，被 except 吞成 []）。
+# 插件目录下的运行期数据根（预设 JSON / 卡片 / 标签库）；首次导入即创建
+# 旧版把预设/词库/日志放在插件目录的 user_data/ 下；现在都搬到 ComfyUI 的 user/EzFlex/。
+# 这里**不再开机 makedirs**：目录只剩「回落路径」（user_directory 不可用）和「种子源」两种用途，
+# 无条件创建会让每个新装用户看到一个永远为空的 user_data/。
 _USER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data")
-try:
-    os.makedirs(_USER_DIR, exist_ok=True)
-except Exception:
-    pass
-
-
-# ===== ComfyUI user 目录下的 EzFlex 子目录：ezflex_*.json 与提示词卡片都收在 user/EzFlex/ =====
 def _ezflex_user_base():
-    """ComfyUI 的官方 user 目录（`folder_paths.user_directory`）。
+    """ComfyUI 官方 user 目录（folder_paths.user_directory）；拿不到返回空串。
 
-    ★ 只用官方字段，**不做兜底**：`user_directory` 从 2024-01（ComfyUI #2160「多用户 / 用户数据存服务端」）
-    就存在，而本插件要求 ComfyUI ≥ 0.3.13（2025）⇒ 任何受支持的版本都必然有这个字段。
-    ⚠️ 原来那句兜底 `os.path.join(os.path.dirname(models_dir), 'user')` 在拿不到 `models_dir` 时
-    （例如测试里的 folder_paths 桩）会退化成**相对路径** `'user'` —— 相对路径跟着**当前工作目录**走，
-    于是跑测试（cwd = 插件根）就在插件目录里凭空造出一个空的 `user/EzFlex`（用户反馈「这个目录总会出现」）。
-    删掉后拿不到就是 ''，各调用点都已有 `if not d` 守卫，不会再产生相对路径。"""
+    只用官方字段、不做兜底：ComfyUI ≥0.3.13 一定有它；拿不到时各调用点都有 `if not d` 守卫。
+    """
     return getattr(folder_paths, 'user_directory', '') or ''
-
-
 def _ezflex_user_dir(sub=''):
+    """user/EzFlex[/sub]，按需创建；user 目录不可用时返回 ''（调用方需判空）。"""
     base = _ezflex_user_base()
     if not base:
         return ''
+    # 注：tag_preview / card_preview 暂时留在顶层——标签 JSON 里存的是相对路径
+    #     （tag_preview/xxx.webp），换目录会让已存的预览图 404。
     d = os.path.join(base, 'EzFlex', sub) if sub else os.path.join(base, 'EzFlex')
+    # 只在缺失时建目录：os.makedirs(exist_ok=True) 每次都要逐级 stat（实测 313 µs，而 isdir 只有 64 µs）。
+    # 这个函数在每个路径判断里都会被调到（_ezflex_user_file → _ez_roots_sig），不能每次付全额。
     try:
-        os.makedirs(d, exist_ok=True)
+        if not os.path.isdir(d):
+            os.makedirs(d, exist_ok=True)
     except Exception:
         pass
     return d
+# 配置类文件统一放到 config/ 下（与缓存、预设、词库分开）
+_CFG_NAMES = {
+    'ezflex_roots.json', 'ezflex_last_dir.json', 'ezflex_model_paths.json', 'ezflex_scan_paths.json',
+    'ezflex_media_roots.json', 'ezflex_media_target.json', 'ezflex_api_hosts.json', 'ezflex_custom_providers.json',
+    'ezflex_prompt_tags.json', 'ezflex_prompt_categories.json', 'ezflex_prompt_rules.json', 'settings.json',
+}
+
+
+_USER_FILE_RESOLVED = set()   # 已经做过「旧位置迁移检查」的目标路径（路径本身是确定的，不必每次 stat）
 
 
 def _ezflex_user_file(name):
-    """user/EzFlex/<name>；以前散落在 user/ 下的同名文件首次访问时自动挪进来（数据不丢）。"""
-    d = _ezflex_user_dir()
+    """配置在 user/EzFlex/config/，其它在 user/EzFlex/；旧位置有同名文件时首次访问复制过来。
+
+    旧位置两处都要看：user/<name>（更早）和 user/EzFlex/<name>（这次整理之前）。
+    ★ 迁移检查每个目标路径只做一次：这个函数在 _ez_roots_sig 里被每个路径判断调到，
+      每次 isfile 0.1 ms 是纯浪费；路径本身由 user_directory 决定，不会中途变。
+    """
+    d = _ezflex_user_dir('config') if name in _CFG_NAMES else _ezflex_user_dir()
     if not d:
         return ''
     dst = os.path.join(d, name)
-    old = os.path.join(_ezflex_user_base(), name)
-    if not os.path.isfile(dst) and os.path.isfile(old):
-        try:
-            os.replace(old, dst)
-        except Exception:
+    if dst in _USER_FILE_RESOLVED:
+        return dst
+    if not os.path.isfile(dst):
+        base = _ezflex_user_base()
+        for old in (os.path.join(base, name) if base else '',
+                    os.path.join(base, 'EzFlex', name) if base else ''):
             try:
-                import shutil
-                shutil.copy2(old, dst)
+                if old and os.path.isfile(old) and os.path.abspath(old) != os.path.abspath(dst):
+                    shutil.copy2(old, dst)
+                    break
             except Exception:
                 pass
+    _USER_FILE_RESOLVED.add(dst)
     return dst
-
-
+# ===== §4 分辨率 / 参数预设存储 =====
 def _preset_file(node_name):
-    return os.path.join(_USER_DIR, node_name + ".json")
-
-
+    """每个节点类型一个存档文件：user_data/<节点类型>.json（预设列表 + 可选额外键）。"""
+    name = node_name + ".json"
+    d = _ezflex_user_dir("presets")
+    if not d:
+        # user_directory 不可用（老 ComfyUI）才回落到插件目录；这时按需建目录，
+        # 平时不建（否则每个用户都会看到一个空的 user_data/）。
+        try:
+            os.makedirs(_USER_DIR, exist_ok=True)
+        except Exception:
+            pass
+        return os.path.join(_USER_DIR, name)
+    dst = os.path.join(d, name)
+    old = os.path.join(_USER_DIR, name)
+    try:
+        if not os.path.exists(dst) and os.path.isfile(old):
+            shutil.copy2(old, dst)                    # 首次访问：旧预设搬过来（旧文件保留）
+    except Exception:
+        return old
+    return dst
 def _read_doc(node_name):
     """读取存档，返回 (doc_dict, presets_list)。兼容两种形状：
     纯列表（ModelsCombo 旧格式）→ 包装成 {'presets': list}；对象 → 取 presets 键。"""
@@ -671,46 +706,35 @@ def _read_doc(node_name):
     if isinstance(data, list):
         return {"presets": data}, data
     return {}, []
-
-
 def _read_all(node_name):
+    """只取预设列表（丢弃 customRatios 等额外键）。"""
     return _read_doc(node_name)[1]
-
-
 def _write_all(node_name, items):
+    """写回预设列表；doc 里没有额外键时保持旧的「纯列表」格式（ModelsCombo 老存档不变）。
+
+    返回是否写成功 —— 路由要据此回 500，别再让「磁盘满/只读目录」也答 ok:true。
+    """
     doc, _ = _read_doc(node_name)
     doc["presets"] = items
-    # 仅当还有额外键（如 customRatios）时写对象，否则维持纯列表（ModelsCombo 旧格式不变）
     extra = {k: v for k, v in doc.items() if k != "presets"}
     out = doc if extra else items
-    try:
-        with open(_preset_file(node_name), "w", encoding="utf-8") as fh:
-            json.dump(out, fh, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
+    return _ez_write_json(_preset_file(node_name), out)
 def _read_ratios(node_name):
+    """自定义比例表（FreeLatent 面板），与 presets 同存一个 doc 的 customRatios 键。"""
     doc, _ = _read_doc(node_name)
     ratios = doc.get("customRatios", [])
     return ratios if isinstance(ratios, list) else []
-
-
 def _write_ratios(node_name, ratios):
+    """写回自定义比例；会一并把 presets 落盘（doc 形状从纯列表升为对象）。返回是否写成功。"""
     doc, presets = _read_doc(node_name)
     doc["presets"] = presets
     doc["customRatios"] = ratios
-    try:
-        with open(_preset_file(node_name), "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-# 同一套预设路由按 node_name 参数化：GET 列表 / POST 保存 / DELETE {name}。
-# 保存时保留客户端除 name 外的全部字段（modelscombo 存 loaders，freelatent 存 config）。
+    return _ez_write_json(_preset_file(node_name), doc)
 def _register_preset_routes(node_name, api_path, with_ratios=False):
     async def _list(req):
+        # 预设里存着素材绝对路径 / 存档目录：只给本机看（与 POST/DELETE 同一门槛）
+        if not _ez_local(req):
+            return _web.json_response({"error": "forbidden: local clients only"}, status=403)
         return _web.json_response(_read_all(node_name))
 
     async def _save(req):
@@ -731,7 +755,8 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
                 items[i] = obj
             else:
                 items.append(obj)
-            _write_all(node_name, items)
+            if not _write_all(node_name, items):
+                return _web.json_response({"error": "cannot write preset file"}, status=500)
             return _web.json_response({"ok": True, "name": name})
         except Exception as e:
             return _web.json_response({"error": str(e)}, status=500)
@@ -742,13 +767,16 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
         try:
             name = req.match_info.get("name", "")
             items = [p for p in _read_all(node_name) if p.get("name") != name]
-            _write_all(node_name, items)
+            if not _write_all(node_name, items):
+                return _web.json_response({"error": "cannot write preset file"}, status=500)
             return _web.json_response({"ok": True})
         except Exception as e:
             return _web.json_response({"error": str(e)}, status=500)
 
     if with_ratios:
         async def _ratio_list(req):
+            if not _ez_local(req):
+                return _web.json_response({"error": "forbidden: local clients only"}, status=403)
             return _web.json_response(_read_ratios(node_name))
 
         async def _ratio_save(req):
@@ -765,7 +793,8 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
                     ratios = _read_ratios(node_name)
                     if ratio not in ratios:
                         ratios = ratios + [ratio]
-                _write_ratios(node_name, ratios)
+                if not _write_ratios(node_name, ratios):
+                    return _web.json_response({"error": "cannot write preset file"}, status=500)
                 return _web.json_response({"ok": True, "ratios": ratios})
             except Exception as e:
                 return _web.json_response({"error": str(e)}, status=500)
@@ -776,102 +805,44 @@ def _register_preset_routes(node_name, api_path, with_ratios=False):
             try:
                 ratio = req.match_info.get("ratio", "")
                 ratios = [r for r in _read_ratios(node_name) if r != ratio]
-                _write_ratios(node_name, ratios)
+                if not _write_ratios(node_name, ratios):
+                    return _web.json_response({"error": "cannot write preset file"}, status=500)
                 return _web.json_response({"ok": True, "ratios": ratios})
             except Exception as e:
                 return _web.json_response({"error": str(e)}, status=500)
 
         try:
-            PromptServer.instance.routes.get(api_path + "/custom_ratios")(_ratio_list)
-            PromptServer.instance.routes.post(api_path + "/custom_ratios")(_ratio_save)
-            PromptServer.instance.routes.delete(api_path + "/custom_ratios/{ratio}")(_ratio_delete)
-        except Exception:
-            pass
+            _ez_route(PromptServer, "get", api_path + "/custom_ratios", _ratio_list)
+            _ez_route(PromptServer, "post", api_path + "/custom_ratios", _ratio_save)
+            _ez_route(PromptServer, "delete", api_path + "/custom_ratios/{ratio}", _ratio_delete)
+        except Exception as _e:
+            _ez_log.warning("%s/custom_ratios: preset routes not registered: %s", api_path, _e)
 
     try:
-        PromptServer.instance.routes.get(api_path)(_list)
-        PromptServer.instance.routes.post(api_path)(_save)
-        PromptServer.instance.routes.delete(api_path + "/{name}")(_delete)
-    except Exception:
-        pass
-
-
+        _ez_route(PromptServer, "get", api_path, _list)
+        _ez_route(PromptServer, "post", api_path, _save)
+        _ez_route(PromptServer, "delete", api_path + "/{name}", _delete)
+    except Exception as _e:
+        _ez_log.warning("%s: preset routes not registered: %s", api_path, _e)
 _register_preset_routes("EzFlex-ModelsCombo", "/models_combo/presets")
 _register_preset_routes("EzFlex-FreeLatent", "/freelatent/presets", with_ratios=True)
+_register_preset_routes("EzFlex-ControlnetPreprocessor", "/ezflex_prep/presets")
 _register_preset_routes("EzFlex-MediaLoader", "/media_loader/presets")
+_MC_NAME_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".sft")
+def _mc_port_name(name, ltype):
+    """端口名 = 面板里填的名字原样，只剥模型文件扩展名。
 
-
-# FreeLatent：「新建节点默认应用的预设」。存进预设文档的 default 键（快照宽高/批次），
-# 这样即使之后删掉该预设，新建节点仍能按当时的值起步。
-async def _fl_default_get(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    doc, _ = _read_doc("EzFlex-FreeLatent")
-    d = doc.get("default")
-    return _web.json_response(d if isinstance(d, dict) else {})
-
-
-async def _fl_default_set(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        data = {}
-    doc, presets = _read_doc("EzFlex-FreeLatent")
-    doc["presets"] = presets
-    if data.get("clear"):
-        doc.pop("default", None)
-    else:
-        name = str(data.get("name") or "").strip()
-        if not name:
-            return _web.json_response({"error": "no name"}, status=400)
-        try:
-            rec = {"name": name, "width": int(data.get("width") or 0), "height": int(data.get("height") or 0),
-                   "batch_size": max(1, int(data.get("batch_size") or 1))}
-        except (TypeError, ValueError):
-            return _web.json_response({"error": "bad size"}, status=400)
-        if rec["width"] <= 0 or rec["height"] <= 0:
-            return _web.json_response({"error": "bad size"}, status=400)
-        doc["default"] = rec
-    try:
-        with open(_preset_file("EzFlex-FreeLatent"), "w", encoding="utf-8") as fh:
-            json.dump(doc, fh, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-    return _web.json_response({"ok": True, "default": doc.get("default") or {}})
-
-
-try:
-    PromptServer.instance.routes.get("/freelatent/presets/default")(_fl_default_get)
-    PromptServer.instance.routes.post("/freelatent/presets/default")(_fl_default_set)
-except Exception:
-    pass
-
-
-# ComfyUI 校验节点输出类型时读的是「类 RETURN_TYPES」（execution.py validate），
-# 而 ModelsCombo 的输出随 config 变化，运行期 load_combo 改类属性赶不上校验。
-# 因此前端在每次输出结构变化时 POST 到这里，把类 RETURN_TYPES/RETURN_NAMES 同步成当前排列，
-# 这样校验（VAE→VAE 解码、CLIP→CLIP 文本编码、MODEL→采样器）类型才对得上。
-def _mc_output_types(loaders):
-    mains = [l for l in (loaders or []) if l.get("type") != "lora"]
-    out_types, out_names = [], []
-    for l in mains:
-        nm = (l.get("name") or "").strip() or l.get("type") or ""
-        if l.get("type") in ("checkpoint", "unet"):
-            out_types.append("MODEL"); out_names.append(nm + "_model")
-        if l.get("type") in ("checkpoint", "clip"):
-            out_types.append("CLIP"); out_names.append(nm + "_clip")
-        if l.get("type") in ("checkpoint", "vae"):
-            out_types.append("VAE"); out_names.append(nm + "_vae")
-    if loaders:   # 有加载器就常驻触发词口（无 LoRA = 空串），固定排最后
-        out_types.append("STRING"); out_names.append("trigger_words")
-    return out_types, out_names
-
-
+    ★ 名字里的点必须保留：前端若能按 '.' 切最后一段，填 wan2.2 会变成 2.2_model，
+      和 RETURN_NAMES（原样拼接）对不上。modelscombo_node.js 的 sr() 用同一条规则，两边必须同时改。
+    """
+    s = str(name or "").strip()
+    low = s.lower()
+    for ext in _MC_NAME_EXTS:
+        if low.endswith(ext):
+            s = s[: -len(ext)]
+            break
+    return s or str(ltype or "")
 _MC_TRIGGER_CACHE = {}   # <metadata.json 路径> -> (mtime, 触发词列表)：同一 LoRA 只解析一次
-
-
 def _mc_lora_words(path):
     mp = os.path.splitext(path)[0] + ".metadata.json"
     try:
@@ -890,8 +861,6 @@ def _mc_lora_words(path):
         words = _lora_trained_words(meta)
     _MC_TRIGGER_CACHE[mp] = (mt, words)
     return words
-
-
 def _mc_trigger_words(loras):
     """按 LoRA 顺序拼触发词串（LoraManager <模型>.metadata.json 的 trainedWords）；没有触发词的跳过。"""
     words = []
@@ -907,86 +876,6 @@ def _mc_trigger_words(loras):
             continue
         words.extend(_mc_lora_words(path))
     return ", ".join(words)
-
-
-# 模型文件列表：优先用 ComfyUI 内核的 /models/<folder>（它按 folder_paths 的配置路径递归扫，含 extra_model_paths.yaml）。
-# 但旧版/整合包的 ComfyUI 里那个路由可能不存在，或 folder 只注册了旧别名（unet/clip）→ 前端就"下载了也读不到"。
-# 这里给一条自己的兜底：先 map_legacy 别名，再退回内置加载节点的 combo 选项（core 一定会填）。
-_MC_FOLDERS = {"checkpoints", "diffusion_models", "unet", "text_encoders", "clip", "vae", "loras"}
-_MC_COMBO = {
-    "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
-    "unet": ("UNETLoader", "unet_name"),
-    "diffusion_models": ("UNETLoader", "unet_name"),
-    "clip": ("CLIPLoader", "clip_name"),
-    "text_encoders": ("CLIPLoader", "clip_name"),
-    "vae": ("VAELoader", "vae_name"),
-    "loras": ("LoraLoader", "lora_name"),
-}
-
-
-def _mc_folder_files(folder):
-    if folder not in _MC_FOLDERS:
-        return []
-    try:
-        name = folder_paths.map_legacy(folder)
-    except Exception:
-        name = folder
-    roots = []
-    try:
-        roots = list(folder_paths.get_folder_paths(name) or [])
-    except Exception:
-        roots = []
-
-    def _build():
-        try:
-            files = folder_paths.get_filename_list(name)
-            if files:
-                return [str(x) for x in files]
-        except Exception:
-            pass
-        try:
-            import nodes as _nodes
-            cls_name, inp = _MC_COMBO.get(folder, (None, None))
-            obj = _nodes.NODE_CLASS_MAPPINGS.get(cls_name) if cls_name else None
-            spec = ((obj.INPUT_TYPES().get("required") or {}) if obj else {}).get(inp)
-            if isinstance(spec, (list, tuple)) and spec and isinstance(spec[0], (list, tuple)):
-                return [str(x) for x in spec[0]]
-        except Exception:
-            pass
-        return []
-
-    return list(_scan_cached(("mc_files", name), roots, _build))
-
-
-async def _mc_files(req):
-    return _web.json_response(_mc_folder_files(str(req.query.get("folder") or "")))
-
-
-async def _mc_outputs(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        config = data.get("config", "")
-        loaders = parse_config(config) if isinstance(config, str) else (config or [])
-        loaders = loaders[:_EZ_OUTPUT_CAP] if isinstance(loaders, list) else []
-        out_types, out_names = _mc_output_types(loaders)
-        out_types = out_types[:_EZ_OUTPUT_CAP]
-        out_names = [str(x)[:128] for x in out_names][:_EZ_OUTPUT_CAP]
-        ModelsComboLoader.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
-        ModelsComboLoader.RETURN_NAMES = tuple(out_names)
-        return _web.json_response({"ok": True, "types": out_types, "names": out_names})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-try:
-    PromptServer.instance.routes.get("/models_combo/files")(_mc_files)
-    PromptServer.instance.routes.post("/models_combo/outputs")(_mc_outputs)
-except Exception:
-    pass
-
-
 def parse_config(config):
     if isinstance(config, str):
         if not config.strip():
@@ -1021,8 +910,6 @@ def parse_config(config):
             "target_id": item.get("targetId"),
         })
     return loaders
-
-
 def device_options(extra):
     device = extra.get("device", "default")
     if device not in DEVICES:
@@ -1034,8 +921,6 @@ def device_options(extra):
     if dev.type == "cpu":
         opts["offload_device"] = dev
     return opts
-
-
 def dtype_options(extra, allowed=WEIGHT_DTYPES):
     weight_dtype = extra.get("weight_dtype", "default")
     if weight_dtype not in allowed:
@@ -1047,15 +932,11 @@ def dtype_options(extra, allowed=WEIGHT_DTYPES):
         if weight_dtype == "fp8_e4m3fn_fast":
             opts["fp8_optimizations"] = True
     return opts
-
-
 def model_options(extra):
     opts = {}
     opts.update(dtype_options(extra))
     opts.update(device_options(extra))
     return opts
-
-
 def load_checkpoint(loader):
     path = folder_paths.get_full_path_or_raise("checkpoints", loader["file"])
     out = comfy.sd.load_checkpoint_guess_config(
@@ -1064,13 +945,9 @@ def load_checkpoint(loader):
         model_options=model_options(loader["extra"]),
     )
     return out[0], out[1], out[2]
-
-
 def load_unet(loader):
     path = folder_paths.get_full_path_or_raise("diffusion_models", loader["file"])
     return comfy.sd.load_diffusion_model(path, model_options=model_options(loader["extra"]))
-
-
 def load_clip(loader):
     path = folder_paths.get_full_path_or_raise("text_encoders", loader["file"])
     clip_type_name = loader["extra"].get("type", "stable_diffusion")
@@ -1083,8 +960,6 @@ def load_clip(loader):
         clip_type=clip_type,
         model_options=model_options(loader["extra"]),
     )
-
-
 def load_vae(loader):
     path = folder_paths.get_full_path_or_raise("vae", loader["file"])
     sd, metadata = comfy.utils.load_torch_file(path, return_metadata=True)
@@ -1102,16 +977,13 @@ def load_vae(loader):
     if factory is not None:
         vae.patcher.cached_patcher_init = (factory, (path, metadata, vae_device))
     return vae
-
-
+# ===== §5 动态输出类型 =====
 class _DynamicOutputTypes(tuple):
-    """动态输出节点的类 RETURN_TYPES 容器：越界取槽位返回 "*"（ANY），不再抛 IndexError。
+    """类 RETURN_TYPES 的容器：越界取槽位返回 "*"（ANY），不抛 IndexError。
 
-    `execution.py:934` 校验链接类型时按「上游节点类 RETURN_TYPES[链接槽位]」取类型再和下游输入比对。
-    类的 RETURN_TYPES 全局共享，而同屏多个同类型节点端口数不同、前端同步还可能滞后或被链路守卫拦住 ——
-    表比链接槽位短时那里一取就越界，报出来的是看不懂的 `tuple index out of range`
-    （「EzFlex-ParamPresetOutput 无法校验 input_1」就是这么来的）。越界槽位当 ANY：校验放行，
-    真实数据仍来自 run() 的返回元组；len() 语义不变（execution.py 用它复制标量输出）。
+    execution.py:947 校验链接时按「上游类的 RETURN_TYPES[槽位]」取类型再比下游输入。类表全局一份，
+    而不同实例端口数可能不同，表比槽位短时那里一取就越界 → 越界返回 ANY 让校验放行；
+    真实返回值来自 run() 的元组，len() 语义不变（execution.py 用它复制标量输出）。
     """
 
     def __getitem__(self, i):
@@ -1119,8 +991,7 @@ class _DynamicOutputTypes(tuple):
             return tuple.__getitem__(self, i)
         except IndexError:
             return "*"
-
-
+# 节点：加载 checkpoint/unet/clip/vae 并串联 LoRA；输出口按加载器顺序动态生成（LoRA 不占口）。
 class ModelsComboLoader:
     @classmethod
     def INPUT_TYPES(s):
@@ -1177,6 +1048,12 @@ class ModelsComboLoader:
         )
         applied = []
         for lora in ordered_loras:
+            strength_model = float(lora["extra"].get("strength_model", 1.0))
+            strength_clip = float(lora["extra"].get("strength_clip", 1.0))
+            if strength_model == 0 and strength_clip == 0:
+                # 与内置 LoraLoader（nodes.py:741）一致：0 强度不加载文件、原样透传。
+                # 触发词也按「这个 LoRA 没装」处理，否则面板显示 0、提示词里还留着它的触发词。
+                continue
             target = by_id.get(lora["target_id"])
             if target is None:
                 print(f"[ModelsCombo] LoRA '{lora['name']}': target loader not found, skipped")
@@ -1184,11 +1061,6 @@ class ModelsComboLoader:
             model, clip = target["model"], target["clip"]
             if model is None and clip is None:
                 print(f"[ModelsCombo] LoRA '{lora['name']}': target has no MODEL/CLIP, skipped")
-                continue
-            strength_model = float(lora["extra"].get("strength_model", 1.0))
-            strength_clip = float(lora["extra"].get("strength_clip", 1.0))
-            if strength_model == 0 and strength_clip == 0:   # 与内置 LoraLoader 一致：0 强度不加载文件、原样透传
-                applied.append(lora)
                 continue
             lora_path = folder_paths.get_full_path_or_raise("loras", lora["file"])
             # 与内置 LoraLoader 一致：safe_load + 带上 metadata（新模型的 lora_metadata 附件靠它）
@@ -1206,28 +1078,24 @@ class ModelsComboLoader:
             applied.append(lora)
 
         # 动态输出：按「加载器顺序」逐个产出其拥有的端口（checkpoint=model/clip/vae 相邻、unet=model、clip=clip、vae=vae，
-        # lora 不占输出端口）。保证与前端 updatePorts 的顺序一致，其它节点接线时类型才对得上。
+        # lora 不占输出端口）。槽位必须和 routes_nodes._mc_output_types 完全一致：那边按**类型**发口，
+        # 这里若按「值非 None」跳过，缺 CLIP 的 checkpoint 会让后面的值前移一格、落进 CLIP 口。
         out_types, out_names, outputs = [], [], []
         for loader in mains:
             entry = by_id[loader["id"]]
-            nm = (loader.get("name") or "").strip() or loader["type"]
-            if loader["type"] in ("checkpoint", "unet") and entry["model"] is not None:
+            nm = _mc_port_name(loader.get("name"), loader["type"])
+            if loader["type"] in ("checkpoint", "unet"):
                 out_types.append("MODEL"); out_names.append(nm + "_model"); outputs.append(entry["model"])
-            if loader["type"] in ("checkpoint", "clip") and entry["clip"] is not None:
+            if loader["type"] in ("checkpoint", "clip"):
                 out_types.append("CLIP"); out_names.append(nm + "_clip"); outputs.append(entry["clip"])
-            if loader["type"] in ("checkpoint", "vae") and entry["vae"] is not None:
+            if loader["type"] in ("checkpoint", "vae"):
                 out_types.append("VAE"); out_names.append(nm + "_vae"); outputs.append(entry["vae"])
 
         if loaders:   # 触发词串常驻（无 LoRA = 空串）；空配置不加，端口数与前端一致
             out_types.append("STRING"); out_names.append("trigger_words")
             outputs.append(_mc_trigger_words(applied))
 
-        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in out_types)
-        self.__class__.RETURN_NAMES = tuple(out_names)
-        return tuple(outputs)
-
-
-# ===== EzFlex-FreeLatent：按「分辨率选择器」面板配置生成空 Latent =====
+        return _ez_apply_dynamic_ports(self, out_names, outputs)
 def parse_freelatent_config(config):
     if isinstance(config, str):
         if not config.strip():
@@ -1251,11 +1119,9 @@ def parse_freelatent_config(config):
     h = to_int(data.get("height"), 1024)
     b = to_int(data.get("batch_size", data.get("batch")), 1)
 
-    # 严格按面板「对齐」值对齐（.5 向上，与前端一致；是否 8 的倍数在 execute 校验）
-    mult = _freelatent_align(config)
-    return _fl_round_step(w, mult), _fl_round_step(h, mult), max(1, b)
-
-
+    # 只做解析：对齐统一在 execute 里做（那里还要处理外部 width/height 的覆盖值），
+    # 两处都对齐是纯冗余，且会让"面板值"和"外部值"走两条不同的取整路径。
+    return w, h, max(1, b)
 def _freelatent_force(config):
     """读取「强(force)」标志：为真时忽略外部 width/height/batch，强制用面板值。"""
     if isinstance(config, str):
@@ -1270,10 +1136,12 @@ def _freelatent_force(config):
     if isinstance(data, dict):
         return bool(data.get("force"))
     return False
-
-
 def _freelatent_align(config):
-    """读取面板「对齐」值（原样返回，不做 8 约束）；最终 generate 时若结果非 8 的倍数会报错提示。"""
+    """读取面板「对齐」值，并**向 8 取整**。
+
+    对齐值必须是 8 的倍数：宽高按 mult 取整后就是 mult 的倍数，若 mult 不是 8 的倍数，
+    latent 的 h//8 / w//8 会静默截断（例：align=12、width=1024 → 1020，1020//8=127，
+    实际出图 1016 而不是 1024）。取整后 mult 仍是"用户意图的近似值"，但不会产生非法尺寸。"""
     if isinstance(config, str):
         if not config.strip():
             return 8
@@ -1285,49 +1153,44 @@ def _freelatent_align(config):
         data = config
     if isinstance(data, dict):
         a = int(data.get("align") or 8)
-        return a if a >= 1 else 8
+        if a < 1:
+            return 8
+        return max(8, int(a / 8 + 0.5) * 8)
     return 8
-
-
-def _fl_round_step(v, mult, lo=64):
-    """按 mult 四舍五入（.5 向上取整），与前端 JS Math.round 一致；并保底 lo。"""
+def _fl_round_step(v, mult, lo=8):
+    """按 mult 四舍五入（.5 向上取整），与前端 JS Math.round 一致；只保底到 8（latent 最小单位）。"""
     return max(lo, int(v / mult + 0.5) * mult)
-
-
-class FreeLatentNode(io.ComfyNode):
-    """V3 节点：output 为 Latent/Width/Height/Batch；width/height/batch_size 用 force_input 保证是
-    可连接 socket（不再走 widget→socket 转换 hack，避免 socket 圆点悬停漂移），未连接时用面板 config 值。"""
-
-    @classmethod
-    def define_schema(cls) -> io.Schema:
-        return io.Schema(
-            node_id="EzFlex-FreeLatent",
-            display_name="EzFlex-FreeLatent",
-            category="EzFlex",
-            description="Resolution / Latent Selector",
-            inputs=[
-                io.String.Input("config", socketless=True, default="{}",
-                                tooltip="Config JSON generated by the resolution panel (width / height / batch / algorithm / ratio)."),
-                io.Int.Input("width", display_name="Width", optional=True, default=0,
-                             min=0, max=32768, step=8, force_input=True,
-                             tooltip="External width: >0 overrides the panel width (0 / empty = use the panel value)."),
-                io.Int.Input("height", display_name="Height", optional=True, default=0,
-                             min=0, max=32768, step=8, force_input=True,
-                             tooltip="External height: >0 overrides the panel height (0 / empty = use the panel value)."),
-                io.Int.Input("batch_size", display_name="Batch", optional=True, default=0,
-                             min=0, max=4096, force_input=True,
-                             tooltip="External batch: >0 overrides the panel batch (0 / empty = use the panel value)."),
-            ],
-            outputs=[
-                io.Latent.Output("Latent", tooltip="Empty latent (batch, 4, height/8, width/8)"),
-                io.Int.Output("Width", tooltip="Width in pixels"),
-                io.Int.Output("Height", tooltip="Height in pixels"),
-                io.Int.Output("Batch", tooltip="Batch size"),
-            ],
-        )
+# 节点：空 latent + 宽高/批次；面板 config 为底，外部宽高覆盖后再按 align 对齐（align 恒为 8 的倍数）。
+class FreeLatentNode:
+    """V1 节点（与其它 22 个节点统一）：output 为 Latent/Width/Height/Batch；
+    width/height/batch_size 用 forceInput 保证是可连接 socket，未连接时用面板 config 值。"""
 
     @classmethod
-    def execute(cls, config="{}", width=0, height=0, batch_size=0):
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "config": ("STRING", {"multiline": True, "default": "{}",
+                                      "tooltip": "Config JSON generated by the resolution panel (width / height / batch / algorithm / ratio)."}),
+            },
+            "optional": {
+                "width": ("INT", {"default": 0, "min": 0, "max": 32768, "step": 8, "forceInput": True,
+                                  "tooltip": "External width: >0 overrides the panel width (0 / empty = use the panel value)."}),
+                "height": ("INT", {"default": 0, "min": 0, "max": 32768, "step": 8, "forceInput": True,
+                                   "tooltip": "External height: >0 overrides the panel height (0 / empty = use the panel value)."}),
+                "batch_size": ("INT", {"default": 0, "min": 0, "max": 4096, "forceInput": True,
+                                       "tooltip": "External batch: >0 overrides the panel batch (0 / empty = use the panel value)."}),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT", "INT", "INT", "INT")
+    RETURN_NAMES = ("Latent", "Width", "Height", "Batch")
+    RETURN_TOOLTIPS = ("Empty latent (batch, 4, height/8, width/8)", "Width in pixels",
+                       "Height in pixels", "Batch size")
+    FUNCTION = "execute"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Resolution / Latent Selector"
+
+    def execute(self, config="{}", width=0, height=0, batch_size=0):
         w, h, batch = parse_freelatent_config(config)
         # 「强(force)」生效时忽略外部 width/height/batch，强制用面板值
         if not _freelatent_force(config):
@@ -1337,7 +1200,8 @@ class FreeLatentNode(io.ComfyNode):
                 h = height
             if batch_size and batch_size > 0:
                 batch = batch_size
-        # 严格按面板「对齐」值对齐（.5 向上，与前端一致）；最终宽高必须是 8 的倍数，否则报错提示用户调整
+        # 严格按面板「对齐」值对齐（.5 向上，与前端一致）。_freelatent_align 恒返回 8 的倍数，
+        # 取整后必然是合法 latent 尺寸；下面的检查只是兜底断言，正常永远不触发。
         mult = _freelatent_align(config)
         w, h = _fl_round_step(w, mult), _fl_round_step(h, mult)
         if (w % 8) != 0 or (h % 8) != 0:
@@ -1350,11 +1214,16 @@ class FreeLatentNode(io.ComfyNode):
         latent = torch.zeros([batch, 4, h // 8, w // 8],
                              device=comfy.model_management.intermediate_device(),
                              dtype=comfy.model_management.intermediate_dtype())
-        return io.NodeOutput({"samples": latent, "downscale_ratio_spacial": 8}, w, h, batch)
-
-
+        # ui 回传「实际生效值」：外部宽高接线时，面板在 onExecuted 里把自己当手动输入一样更新
+        return {"ui": {"fl_size": [[int(w), int(h), int(batch)]]},
+                "result": ({"samples": latent, "downscale_ratio_spacial": 8}, w, h, batch)}
 def _control_input_types(tooltip):
-    """控制类节点的标准输入：隐藏 config STRING 承载面板状态。"""
+    """控制类节点（Group/Master/Main）共用的输入声明：只有一个隐藏 config STRING。
+
+    这三个节点在 Python 侧没有输出、run() 返回 ()：真正的开关动作发生在浏览器 ——
+    面板把目标节点的 node.mode 设为 0/2/4，排队时由前端序列化进 prompt 生效。
+    因此 API 直接提交 prompt 时它们不产生任何效果（与 rgthree Fast Groups Muter 同类）。
+    """
     return {
         "required": {
             "config": ("STRING", {
@@ -1364,8 +1233,8 @@ def _control_input_types(tooltip):
             }),
         },
     }
-
-
+# ===== §6 控制类节点（纯前端容器） =====
+# 节点：纯前端容器：按画布分组匹配，批量设目标节点 node.mode；Python 只存 config。
 class NodeSwitchGroupNode:
     """分组预设（方案A，参考 rgthree Fast Groups Muter/Bypasser）：前端内嵌面板管理
     「开关 → 匹配（画布分组 颜色/标题正则）→ node.mode 0/2/4」。
@@ -1385,8 +1254,7 @@ class NodeSwitchGroupNode:
 
     def run(self, config="{}", **kwargs):
         return ()
-
-
+# 节点：纯前端容器：把多个 NodeSwitchGroup 实例映射到各自的分组预设名。
 class NodeSwitchMasterNode:
     """节点控制总预设：总预设 = {NodeSwitchGroup 节点 id -> 该分组预设名} 的映射。
     行（目标分组节点）由前端从画布发现；应用时前端把映射写进各分组节点的 config.current 并触发其应用。"""
@@ -1405,8 +1273,7 @@ class NodeSwitchMasterNode:
 
     def run(self, config="{}", **kwargs):
         return ()
-
-
+# 节点：纯前端容器：总预设，把 Master / ParamPreset / ModelsCombo / FreeLatent 映射到预设名并级联下推。
 class MainControlNode:
     """总控制节点：总预设 = {目标节点 id -> 该节点预设名} 的映射，目标是画布上的
     EzFlex-NodeSwitchMaster / EzFlex-ParamPresetControl / EzFlex-ModelsCombo / EzFlex-FreeLatent
@@ -1426,8 +1293,7 @@ class MainControlNode:
 
     def run(self, config="{}", **kwargs):
         return ()
-
-
+# 节点：参数组 → 一组一个 EZFLEX_PARAM_GROUP 出口；组数变化时前端同步类表。
 class ParamPresetControlNode:
     """参数预设控制：前端面板管理参数组（组/参数可拖拽排序），动态输出端口与参数组卡片一一对应
     （一个分组一个 EZFLEX_PARAM_GROUP 端口，携带该组参数数据）。分组增删/排序后由前端 POST
@@ -1446,11 +1312,9 @@ class ParamPresetControlNode:
     DESCRIPTION = "Param Preset Control"
 
     def run(self, config="{}", **kwargs):
-        groups = parse_param_groups(config)
-        _ez_sync_dynamic_types(self.__class__, _ppc_output_names(groups))
-        return tuple(groups)
-
-
+        groups = parse_param_groups(config)[:_EZ_OUTPUT_CAP]
+        return _ez_apply_dynamic_ports(self, _ppc_output_names(groups), groups)
+# 节点：接一个参数组，按参数逐个出口（按类型映射）；面板可局部禁用某参数。
 class ParamPresetOutputNode:
     """参数预设输出：输入一个 EZFLEX_PARAM_GROUP 分组端口（从 ParamPresetControl 对应分组端口连线）。
     输出端口 = 固定的整组数据红色圆点（透传 EZFLEX_PARAM_GROUP 整组数据）+ 每个激活参数一个端口
@@ -1489,8 +1353,24 @@ class ParamPresetOutputNode:
             p = dict(p)
             ptype = (p.get("type") or "string").lower()
             val = p.get("value")
-            actual = "string" if (isinstance(val, str) and ptype != "string") else ptype
-            p["type"] = actual
+            # 值是字符串时按「声明类型」转换，而不是把类型改成 string：
+            # 以前 int 参数的值是 "0" 会把端口变成 STRING，前端口径跟着变、还会标红。
+            if isinstance(val, str) and ptype in ("int", "float", "bool"):
+                s = val.strip()
+                try:
+                    if ptype == "int":
+                        val = int(float(s))
+                    elif ptype == "float":
+                        val = float(s)
+                    else:
+                        val = s.lower() in ("1", "true", "yes", "on")
+                    p["value"] = val
+                except (TypeError, ValueError):
+                    _ez_log.warning(
+                        "[EzFlex-ParamPresetOutput] param %r: value %r is not a valid %s -> output as string",
+                        p.get("name"), val, ptype)
+                    ptype = "string"
+            p["type"] = ptype
             params.append(p)
         group["params"] = params
         active = _ppo_effective_params(group)
@@ -1502,2553 +1382,21 @@ class ParamPresetOutputNode:
                 outputs.append(_ppo_disabled_value(ptype))
             else:
                 outputs.append(param_value_to_comfy(p.get("value"), ptype))
-        _ez_sync_dynamic_types(self.__class__, names)
-        return tuple(outputs)
-
-
-# ===== EzFlex-PreviewAny：任意预览 =====
-# 参考 AUNPassthroughAnyMulti 的做法：固定 input_1..N ANY 输入槽 + STRING 输出；
-# 前端白板管理卡片（拖拽排序/增删），卡片顺序通过 workflow 里的 input 顺序读取。
+        return _ez_apply_dynamic_ports(self, names, outputs)
 class _AlwaysEqualProxy(str):
     def __eq__(self, _): return True
     def __ne__(self, _): return False
-
 _ANY = _AlwaysEqualProxy("*")
-# MediaLoader 卡片 → MediaOut 的专属端口类型：这两个口传的是「卡片对象」而不是媒体值，
-# 用专属类型可以挡住误连（内置节点拖不上去），但 PreviewAny 这类 * 口仍可透传。
 _MEDIA_CARD = "EZFLEX_MEDIA_CARD"
-_PREVIEW_MAX = 16
-_PREVIEW_MAX_VALUE_LEN = 500
-_PREVIEW_MAX_IMG_SIDE = 1600
-_PREVIEW_MAX_BATCH = 64      # 单卡最多导出的批次帧数（视频抽帧可能有几百张，别把临时目录写满）
-# 张量本身区分不了「批量出图」与「视频抽帧」，只有工作流里上游节点的类名能给出线索。
-_PREVIEW_FRAME_HINTS = ("video", "frame", "sequence", "gif", "webm", "mp4", "mov")
-
-
-def _pv_truncate(s, max_len=_PREVIEW_MAX_VALUE_LEN):
-    if max_len and len(s) > max_len:
-        return s[:max_len] + "... [truncated]", s
-    return s, None
-
-
-def _pv_str(value):
-    try:
-        return str(value)
-    except Exception:
-        return f"Object (type={type(value).__name__}, unable to display)"
-
-
-def _pv_sanitize(obj):
-    """递归确保对象树可 JSON 序列化。"""
-    if isinstance(obj, dict):
-        return {k: _pv_sanitize(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_pv_sanitize(v) for v in obj]
-    if obj is None or isinstance(obj, (str, int, float, bool)):
-        return obj
-    return _pv_str(obj)
-
-
-def _file3d_source(value):
-    """File3D 对象（内置 Load3D 的 FILE_3D 类型）落到磁盘文件的绝对路径；没有则 ''。"""
-    try:
-        src = value.get_source() if hasattr(value, "get_source") else None
-        if isinstance(src, str) and os.path.isfile(src):
-            return os.path.abspath(src)
-    except Exception:
-        pass
-    return ""
-
-
-class PreviewAnyNode:
-    """EzFlex-PreviewAny：一块白板，内含多个可拖拽排序的预览卡片；每个卡片对应一个任意输入端口 +
-    一个字符串输出端口（同 AUNPassthroughAnyMulti 的思路：输出该卡解析后的字符串）。"""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        inputs = {
-            "required": {
-                "config": ("STRING", {
-                    "multiline": True,
-                    "default": "{\"save\":false,\"savePath\":\"\"}",
-                    "tooltip": "Preview Any settings (save to disk + relative save folder).",
-                }),
-            },
-            "optional": {},
-            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
-        }
-        for i in range(1, _PREVIEW_MAX + 1):
-            inputs["optional"][f"input_{i}"] = (_ANY, {"forceInput": True, "tooltip": f"Any input {i}."})
-        return inputs
-
-    RETURN_TYPES = _DynamicOutputTypes()
-    RETURN_NAMES = ()
-    OUTPUT_NODE = True
-    FUNCTION = "preview"
-    CATEGORY = "EzFlex"
-    DESCRIPTION = "Preview Any"
-
-    def preview(self, config="{}", unique_id=None, extra_pnginfo=None, **kwargs):
-        _ezpv_sweep()      # 顺带回收 temp 下过期的导出件（有最小间隔，不会每次执行都扫目录）
-        cfg = self._parse_config(config)
-        connected = self._connected_inputs(unique_id, extra_pnginfo)
-        wf_meta = PreviewAnyNode._workflow_gen_meta((extra_pnginfo or {}).get("workflow", {}))
-        entries, outputs = [], []
-        for i, (name, label, upstream) in enumerate(connected):
-            entry = self._entry(label or f"Input {i + 1}", kwargs.get(name), upstream, wf_meta, cfg)
-            entry["input"] = name      # 卡片上的「多图保存类型」按这个名称存在节点 config 里
-            entry = self._maybe_save(entry, cfg, label or f"card_{i + 1}", extra_pnginfo)
-            entries.append(entry)
-            outputs.append(kwargs.get(name))   # 透传原始值（不是卡文字），供工作流中间连接继续传递
-        # 用 "*" 通配类型，让输出能连到任意类型的输入端口（透传原始值）
-        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in range(len(outputs)))
-        self.__class__.RETURN_NAMES = tuple(f"output_{i + 1}" for i in range(len(outputs)))
-        return {"ui": {"entries": _pv_sanitize(entries)}, "result": tuple(outputs)}
-
-    # ── 配置 / 已连接输入 ──────────────────────────────────────────
-    def _parse_config(self, config):
-        if isinstance(config, str):
-            if not config.strip():
-                return {"save": False, "savePath": ""}
-            try:
-                data = json.loads(config)
-            except json.JSONDecodeError:
-                return {"save": False, "savePath": ""}
-        else:
-            data = config or {}
-        if not isinstance(data, dict):
-            data = {}
-        return {"save": bool(data.get("save")), "savePath": str(data.get("savePath") or ""),
-                "saveFormats": data.get("saveFormats") if isinstance(data.get("saveFormats"), dict) else {},
-                "batchMode": str(data.get("batchMode") or "auto")}
-
-    def _connected_inputs(self, unique_id, extra_pnginfo):
-        """返回已连接输入 (name, label)，按 workflow 里 input 顺序。label 取上游输出标签。"""
-        names = []
-        if unique_id is None or extra_pnginfo is None:
-            return names
-        workflow = extra_pnginfo.get("workflow", {})
-        nodelist = workflow.get("nodes", [])
-        my_node = next((n for n in nodelist if str(n.get("id")) == str(unique_id)), None)
-        if not my_node:
-            return names
-        inputs_data = my_node.get("inputs", [])
-        input_list = inputs_data.values() if isinstance(inputs_data, dict) else inputs_data if isinstance(inputs_data, list) else []
-        # ComfyUI 工作流的 links 可能是 dict，也可能是数组 [id, origin_id, origin_slot, ...]，两种都兼容
-        links = {}
-        for l in (workflow.get("links") or []):
-            if isinstance(l, dict):
-                links[str(l.get("id"))] = l
-            elif isinstance(l, (list, tuple)) and len(l) >= 2:
-                links[str(l[0])] = {"id": l[0], "origin_id": l[1], "origin_slot": l[2] if len(l) > 2 else None,
-                                    "target_id": l[3] if len(l) > 3 else None, "target_slot": l[4] if len(l) > 4 else None}
-        for slot in input_list:
-            if not isinstance(slot, dict):
-                continue
-            nm = slot.get("name", "")
-            if not nm.startswith("input_"):
-                continue
-            link_id = slot.get("link")
-            if link_id is None:
-                continue
-            label = (slot.get("label") or "").strip()
-            link = links.get(str(link_id))
-            upstream = None
-            if link:
-                for n in nodelist:
-                    if str(n.get("id")) == str(link.get("origin_id")):
-                        upstream = n
-                        if not label:
-                            outs = n.get("outputs", [])
-                            if isinstance(outs, list) and link.get("origin_slot") is not None and link["origin_slot"] < len(outs):
-                                o = outs[link["origin_slot"]]
-                                if isinstance(o, dict):
-                                    label = (o.get("label") or "").strip() or o.get("name", "") or ""
-                        break
-            names.append((nm, label or nm, upstream))
-        return names
-
-    # ── 单卡解析 ────────────────────────────────────────────────────
-    def _entry(self, caption, value, upstream=None, wf_meta=None, cfg=None):
-        entry = {"caption": caption or "", "type": "", "value": "", "full_value": None, "preview": None,
-                 "audio": None, "frames": 0, "meta": None}
-        if value is None:
-            entry["type"] = "EMPTY"
-            entry["value"] = "(not connected)"
-            return entry
-        try:
-            type_name = self._infer_type(value)
-            # ★★ 「多帧图像」的呈现形态由节点设置里的「多图显示 / 保存」决定（默认 auto = 按类型推断）：
-            #   一串图像（4D 批次张量 / 张量列表）既能当图片序列看，也能编成视频看 ——
-            #   以前一律判成 VIDEO 编视频，用户选了「图片序列」却还是视频（2026-10-05 用户反馈）。
-            #   auto 保持原样：批次张量 → 图片序列；张量列表 → 视频（那是视频帧的常见形态）。
-            frames_probe = PreviewAnyNode._image_frames(value)
-            if frames_probe is not None:
-                mode = str((cfg or {}).get("batchMode") or "auto")
-                if mode == "images":
-                    type_name = "IMAGE"
-                elif mode == "video":
-                    type_name = "VIDEO"
-            entry["type"] = type_name
-            if type_name == "IMAGE":
-                # 支持两种容器：4D 批次张量、张量列表（循环累积出来的那种）
-                frames = PreviewAnyNode._image_frames(value)
-                first = frames[0] if frames else value
-                entry["preview"] = self._image_to_base64(first)
-                src = self._export_image_url(first)
-                if src:
-                    entry["image_src"] = src
-                count = len(frames) if frames else (int(value.shape[0]) if isinstance(value, torch.Tensor) and value.dim() == 4 else 1)
-                if count > 1:
-                    # 批次：逐帧导出临时文件（弹窗翻页 + 存档都要用）；batch_kind 只按上游节点类名猜来源。
-                    entry["images"] = [u for u in (self._export_image_url(f) for f in (frames or [])[:min(count, _PREVIEW_MAX_BATCH)]) if u]
-                    entry["batch_kind"] = self._image_batch_kind(upstream)
-                    if count > _PREVIEW_MAX_BATCH:
-                        entry["batch_total"] = count
-                if frames:
-                    h, w = int(frames[0].shape[0]), int(frames[0].shape[1])
-                    entry["value"] = (f"{w} x {h} × {count}" if count > 1 else f"{w} x {h}")
-                else:
-                    val, full = self._image_summary(value)
-                    entry["value"] = val
-                    if full:
-                        entry["full_value"] = full
-                gm = PreviewAnyNode._image_gen_meta(upstream)
-                if gm:
-                    entry["gen_meta"] = json.dumps(gm, ensure_ascii=False, default=str)
-            elif type_name == "MASK":
-                entry["preview"] = self._mask_to_base64(value)
-                msrc = self._export_mask_url(value)
-                if msrc:
-                    entry["image_src"] = msrc
-                val, full = _pv_truncate(f"Mask shape={list(value.shape)}")
-                entry["value"] = val
-                if full:
-                    entry["full_value"] = full
-            elif type_name == "AUDIO":
-                entry["value"] = self._audio_summary(value)
-                src = self._audio_file_src(value)
-                if src:
-                    entry["audio_src"] = src
-                    try:
-                        from urllib.parse import urlparse, parse_qs, unquote
-                        p = (parse_qs(urlparse(src).query).get("path") or [None])[0]
-                        if p:
-                            apath = unquote(p)
-                            if os.path.isfile(apath):
-                                gm = self._file_gen_meta(apath)
-                                if gm:
-                                    entry["gen_meta"] = json.dumps(gm, ensure_ascii=False, default=str)
-                    except Exception:
-                        pass
-                else:
-                    entry["audio"] = self._audio_to_data_uri(value)
-            elif type_name == "VIDEO":
-                # 1) 底层是磁盘上的视频文件（内置 Load Video / 我们的 MediaOut 都是）：直接挂原文件播放，绝不重编码。
-                # 2) 内存型视频对象（内置 Create Video 的 VideoFromComponents 等）：它自己 get_stream_source() 出来的就是
-                #    「带音轨 + 原始帧率」的完整视频（save_to 会把 audio 一起写进去），落一个临时文件同样直接播 ——
-                #    音轨 / 帧率 / 时长都不丢。（原来是只抓前 60 帧重编码成无音轨 webm：音轨丢了，帧率也是猜的。）
-                # 先问「自己那股流」（文件型直接给路径、内存型只编码这一次），再退回路径探测
-                fsrc = None
-                if not isinstance(value, (dict, list, tuple)) and hasattr(value, "get_stream_source"):
-                    fsrc = PreviewAnyNode._video_stream_temp(value)
-                if not fsrc:
-                    fsrc = PreviewAnyNode._video_file_source(value)
-                if fsrc:
-                    from urllib.parse import quote
-                    entry["video_src"] = "/preview_any/serve_video?path=" + quote(fsrc)
-                    poster, vfps, dims = self._video_file_poster(fsrc)
-                    if poster:
-                        entry["preview"] = poster
-                    entry["fps"] = vfps
-                    entry["value"] = self._video_file_summary(vfps, dims)
-                    gm = self._file_gen_meta(fsrc)
-                    if gm:
-                        entry["gen_meta"] = json.dumps(gm, ensure_ascii=False, default=str)
-                elif isinstance(value, (dict, list, tuple)) or not hasattr(value, "get_stream_source"):
-                    first, count = self._video_first_frame(value)
-                    entry["preview"] = first
-                    entry["frames"] = count
-                    frames, fps = self._video_frames(value)
-                    entry["fps"] = fps
-                    entry["value"] = self._video_summary(frames, fps)
-                    webm = self._video_to_webm(frames, fps)
-                    if webm:
-                        entry["video"] = webm
-                else:
-                    entry["value"] = "Video"   # 内存型视频但拿不到它的编码流，只能显示个类型
-            elif type_name == "CONDITIONING":
-                entry["value"] = self._conditioning_summary(value)
-                entry["full_value"] = entry["value"]
-            elif type_name in ("LIST", "TUPLE", "SET", "DICT"):
-                norm = self._python_to_json(value)
-                val, full = self._safe_json(norm)
-                entry["value"] = val
-                if full:
-                    entry["full_value"] = full
-            elif type_name == "STRING":
-                val, full = _pv_truncate(str(value))
-                entry["value"] = val
-                if full:
-                    entry["full_value"] = full
-            elif type_name == "LATENT":
-                val, full = self._latent_summary(value)
-                entry["value"] = val
-                entry["meta"] = ("Latent is the hidden latent space of a diffusion model (compressed features); shape=[B,C,H,W] means:"
-                                 "B=batch, C=channels (usually 4), H=height, W=width. It is not the final image;"
-                                 " it must be decoded by a VAE into an image. This shows its shape/dtype stats.")
-                if full:
-                    entry["full_value"] = full
-            elif type_name in ("MODEL_3D", "FILE_3D"):
-                entry["value"] = self._object_3d_summary(value)
-                url = self._export_3d_url(value)
-                if url:
-                    entry["model3d"] = url
-                p3d = getattr(value, "path", None) or getattr(value, "file", None) or _file3d_source(value)
-                if isinstance(p3d, str) and os.path.isfile(p3d):
-                    entry["save_src"] = p3d       # 存不存由 save_skip（来源）决定
-                    gm = self._file_gen_meta(p3d)
-                    if gm:
-                        entry["gen_meta"] = json.dumps(gm, ensure_ascii=False, default=str)
-            elif type_name in ("MESH", "SPLAT", "VOXEL"):
-                entry["value"] = self._geometry_summary(value, type_name)
-                entry["full_value"] = entry["value"]
-                if type_name == "MESH":
-                    url = PreviewAnyNode._mesh_obj_url(value)   # 顶点/面张量 → 临时 OBJ，交给内置 3D 查看器
-                    if url:
-                        entry["model3d"] = url
-                        from urllib.parse import urlparse, parse_qs
-                        _fn = (parse_qs(urlparse(url).query).get("filename") or [""])[0]
-                        _mp = os.path.join(folder_paths.get_temp_directory(), _fn) if _fn else ""
-                        if _mp and os.path.isfile(_mp):
-                            entry["save_src"] = _mp
-            elif type_name in ("MODEL", "CLIP", "VAE", "CONTROL_NET", "CLIP_VISION", "STYLE_MODEL",
-                               "UPSCALE_MODEL", "LORA_MODEL", "GLIGEN", "SAMPLER", "SIGMAS", "GUIDER",
-                               "NOISE", "SEGS"):
-                entry["value"] = self._object_summary(value, type_name)
-                if type_name in ("MODEL", "CLIP", "VAE", "LORA_MODEL"):
-                    meta = self._model_meta(value, type_name, upstream)
-                    if meta:
-                        entry["meta"] = meta
-            elif isinstance(value, dict):
-                norm = self._python_to_json(value)
-                val, full = self._safe_json(norm)
-                entry["value"] = val
-                if full:
-                    entry["full_value"] = full
-            elif isinstance(value, (list, tuple)):
-                norm = self._python_to_json(value)
-                val, full = self._safe_json(norm)
-                entry["value"] = val
-                if full:
-                    entry["full_value"] = full
-            elif isinstance(value, torch.Tensor):
-                val, full = _pv_truncate(
-                    f"Tensor(shape={list(value.shape)}, dtype={value.dtype}, device={value.device})"
-                )
-                entry["value"] = val
-                if full:
-                    entry["full_value"] = full
-            else:
-                # 兜底：模型类对象（类名/模块/属性探测）若未被识别，给出摘要而非裸 repr
-                _mod = type(value).__module__ or ""
-                _nm = type(value).__name__
-                is_model = ("model_patcher" in _mod) or ("ModelPatcher" in _nm) or getattr(value, "cached_patcher_init", None) is not None
-                is_clip = (_mod.startswith("comfy.sd") and (_nm == "CLIP" or "CLIP" in _nm)) or getattr(value, "patcher", None) is not None
-                is_vae = _mod.startswith("comfy.sd") and (_nm == "VAE" or "VAE" in _nm)
-                if is_model or is_clip or is_vae:
-                    mtype = "MODEL" if is_model else ("CLIP" if is_clip else "VAE")
-                    entry["type"] = mtype
-                    entry["value"] = self._object_summary(value, mtype)
-                    meta = self._model_meta(value, mtype, upstream)
-                    if meta:
-                        entry["meta"] = meta
-                else:
-                    val, full = _pv_truncate(str(value))
-                    entry["value"] = val
-                    if full:
-                        entry["full_value"] = full
-        except Exception:
-            try:
-                # 兜底：模型/CLIP/VAE 对象即使前面某步异常，也尽量给摘要而非裸 repr
-                _mod = type(value).__module__ or ""
-                _nm = type(value).__name__
-                if "model_patcher" in _mod or "ModelPatcher" in _nm:
-                    mtype = "MODEL"
-                elif _mod.startswith("comfy.sd") and ("CLIP" in _nm or _nm == "CLIP"):
-                    mtype = "CLIP"
-                elif _mod.startswith("comfy.sd") and ("VAE" in _nm or _nm == "VAE"):
-                    mtype = "VAE"
-                else:
-                    mtype = None
-                if mtype:
-                    entry["type"] = mtype
-                    entry["value"] = self._object_summary(value, mtype)
-                    try:
-                        meta = self._model_meta(value, mtype, upstream)
-                        if meta:
-                            entry["meta"] = meta
-                    except Exception:
-                        pass
-                else:
-                    entry["value"] = _pv_str(value)
-                    entry["type"] = _nm.upper()
-            except Exception:
-                entry["value"] = _pv_str(value)
-                entry["type"] = type(value).__name__.upper()
-        # 视频/3D/音频等「文件不含生成元数据」的类型，若当前工作流图能提取到使用的模型/提示词/采样参数，
-        # 则也挂上「生成信息」，让用户看到本次生成用了哪些模型（MODEL/CLIP/VAE 卡片已有自身元数据，不再覆盖）。
-        # 但若上游是「从文件加载」（LoadImage/LoadVideo/VideoFromFile/Load3D 等），说明该值不是本次生成的，
-        # 不能用当前工作流参数冒充，避免误导。
-        _up_type = (upstream.get("type") or "") if isinstance(upstream, dict) else ""
-        _is_file_src = ("Load" in _up_type or "FromFile" in _up_type) and "Save" not in _up_type and "Sampler" not in _up_type
-        entry["save_skip"] = _is_file_src   # 来源就是文件 → 自动存档直接跳过（加载物本来就在硬盘上）
-        if not entry.get("gen_meta") and not entry.get("meta") and wf_meta and not _is_file_src:
-            entry["gen_meta"] = json.dumps(wf_meta, ensure_ascii=False, default=str)
-        return entry
-
-    @staticmethod
-    def _infer_type(value):
-        if isinstance(value, torch.Tensor):
-            if value.ndim == 4 and value.shape[-1] in (1, 3, 4):
-                return "IMAGE"
-            if value.ndim == 3 and value.shape[-1] in (1, 3, 4):
-                return "IMAGE"
-            if value.ndim in (2, 3):
-                return "MASK"
-            return "TENSOR"
-        if isinstance(value, dict):
-            if "samples" in value:
-                return "LATENT"
-            if "conditioning" in value or "context" in value:
-                return "CONDITIONING"
-            if "waveform" in value or "audio" in value or "sample_rate" in value:
-                return "AUDIO"
-            return "DICT"
-        if isinstance(value, (list, tuple)):
-            # 一列图像帧 -> 视频
-            if len(value) > 1 and all(isinstance(x, torch.Tensor) and x.ndim in (3, 4) for x in value):
-                return "VIDEO"
-            if len(value) == 1 and isinstance(value[0], torch.Tensor) and value[0].ndim == 4:
-                return "VIDEO"
-            # 列表里含视频对象（MediaOut 卡片/卡片组/分组模式的批量输出）→ 也按视频预览
-            if any(hasattr(x, "get_stream_source") or hasattr(x, "get_components") for x in value):
-                return "VIDEO"
-            # ComfyUI 的 CONDITIONING 是 [[cond_tensor, {…}], …]：**第二个元素**才是元数据 dict
-            # （原来判的是 value[0][0]，真 CONDITIONING 一律被当成 LIST）
-            if value and isinstance(value[0], (list, tuple)) and len(value[0]) >= 2 and isinstance(value[0][1], dict):
-                return "CONDITIONING"
-            return "LIST"
-        if isinstance(value, str):
-            s = value.strip()
-            if s.startswith("[") and s.endswith("]"):
-                return "LIST"
-            if s.startswith("(") and s.endswith(")"):
-                return "TUPLE"
-            if s.startswith("{") and s.endswith("}") and ":" in s:
-                return "DICT"
-            if s.startswith("{") and s.endswith("}") and ":" not in s:
-                return "SET"
-            return "STRING"
-        if isinstance(value, bool):
-            return "BOOLEAN"
-        if isinstance(value, int):
-            return "INT"
-        if isinstance(value, float):
-            return "FLOAT"
-        # ComfyUI 对象类型（按类名识别）
-        cls = type(value).__name__
-        if cls.startswith("VideoFrom") or "Video" in cls or cls in ("VideoFile", "VideoFrame"):
-            return "VIDEO"
-        if cls == "File3D" or hasattr(value, "get_source") and hasattr(value, "save_to") and hasattr(value, "format"):
-            return "FILE_3D"
-        mod = type(value).__module__ or ""
-        # ComfyUI 0.30 的 3D 几何类型（comfy_api.latest.Types 的 MESH / SPLAT / VOXEL，
-        # 出自 Hunyuan3D / Trellis / MoGe / 高斯泼溅 等节点）—— 不认的话会掉进「裸 repr」那条兜底
-        if mod.endswith("geometry_types") and cls in ("MESH", "SPLAT", "VOXEL"):
-            return cls
-        # 模型/CLIP/VAE：按类名 + 模块判定（模块判定比属性探测更稳，覆盖 ModelPatcher 系列子类）
-        if ("ModelPatcher" in cls or cls in ("CLIPModel", "ModelPatcher", "ModelPatcherDynamic")) or ("model_patcher" in mod):
-            return "MODEL"
-        if cls in ("CLIP",) or (mod.startswith("comfy.sd") and cls == "CLIP"):
-            return "CLIP"
-        if cls in ("VAE",) or (mod.startswith("comfy.sd") and cls == "VAE"):
-            return "VAE"
-        if cls in ("ControlNet", "ContrlNet", "Controlnet"):
-            return "CONTROL_NET"
-        if cls in ("CLIPVisionModel", "CLIPVision", "CLIPVisionModelWrapper", "CLIPVisionModelProjection"):
-            return "CLIP_VISION"
-        if cls in ("StyleModel",):
-            return "STYLE_MODEL"
-        if cls in ("UpscaleModel", "UpscaleModelLoader"):
-            return "UPSCALE_MODEL"
-        if cls in ("LoraModel", "LoRA", "Lora"):
-            return "LORA_MODEL"
-        if cls in ("GLIGEN",):
-            return "GLIGEN"
-        if cls in ("KSampler", "Sampler", "SamplerCustom"):
-            return "SAMPLER"
-        if cls in ("SigmaSchedule", "Sigmas", "SIGMAS"):
-            return "SIGMAS"
-        if cls in ("CFGGuider", "Guider"):
-            return "GUIDER"
-        if cls in ("Noise",):
-            return "NOISE"
-        if cls in ("SEGS", "Segs", "SEG"):
-            return "SEGS"
-        if hasattr(value, "cached_patcher_init") and "model_patcher" in mod:
-            return "MODEL"
-        if cls.startswith("File3D") or cls in ("File3D", "File3DAny"):
-            return "MODEL_3D"
-        if hasattr(value, "patcher") and mod.startswith("comfy.sd"):
-            return "CLIP"
-        if mod.startswith("comfy.sd"):
-            if cls == "CLIP" or "CLIP" in cls:
-                return "CLIP"
-            if cls == "VAE" or "VAE" in cls:
-                return "VAE"
-        return cls.upper()
-
-    @staticmethod
-    def _image_frames(value):
-        """把「一串图像」摊成逐帧张量列表（每项 [H,W,C]）；不是图像序列时返回 None。
-
-        支持两种容器（都是「多帧图像」的合法写法）：
-          · 4D 批次张量 [N,H,W,C] → N 帧；3D 单图 → 1 帧；
-          · 张量列表 [t1, t2, …]（每个 t 是 4D/3D）→ 逐帧摊平（**循环累积出来的就是这种**）。
-        用途：① 让「多图显示/保存 = 图片序列」能把张量列表按图片序列渲染（不再一律编视频）；
-              ② IMAGE 分支统一按「帧列表」处理，两种容器走同一条路。
-        ⚠️ 列表里混了非张量（例如视频对象）→ 返回 None，交回原类型推断（那确实是视频）。
-        """
-        try:
-            def dims_ok(t):
-                return isinstance(t, torch.Tensor) and t.dim() in (3, 4) and int(t.shape[-1]) in (1, 3, 4)
-            if isinstance(value, torch.Tensor):
-                if value.dim() == 4 and dims_ok(value):
-                    return [value[i] for i in range(int(value.shape[0]))]
-                if value.dim() == 3 and dims_ok(value):
-                    return [value]
-                return None
-            if isinstance(value, (list, tuple)):
-                if not value:
-                    return None
-                out = []
-                for t in value:
-                    if not dims_ok(t):
-                        return None
-                    if t.dim() == 4:
-                        out.extend(t[i] for i in range(int(t.shape[0])))
-                    else:
-                        out.append(t)
-                return out or None
-        except Exception:
-            pass
-        return None
-
-    @staticmethod
-    def _image_to_base64(tensor):
-        try:
-            if isinstance(tensor, torch.Tensor):
-                t = tensor
-                if t.dim() == 3:
-                    t = t.unsqueeze(0)
-                if t.dim() == 4:
-                    t = t[0]
-                img_np = t.detach().cpu().numpy()
-            else:
-                return None
-            img_np = np.clip(img_np * 255, 0, 255).astype(np.uint8)
-            if img_np.ndim == 3 and img_np.shape[2] == 1:
-                img_np = img_np[:, :, 0]
-            from io import BytesIO
-            from PIL import Image
-            img = Image.fromarray(img_np)
-            if max(img.size) > _PREVIEW_MAX_IMG_SIDE:
-                img.thumbnail((_PREVIEW_MAX_IMG_SIDE, _PREVIEW_MAX_IMG_SIDE), Image.LANCZOS)
-            buf = BytesIO()
-            img.save(buf, format="PNG")   # optimize=True 对 PNG 很慢，缩略图不值得
-            return base64.b64encode(buf.getvalue()).decode("ascii")
-        except Exception:
-            return None
-
-    @staticmethod
-    def _export_image_url(tensor):
-        """保存原图到临时文件并返回可访问 URL（全屏用原图）。"""
-        try:
-            if isinstance(tensor, torch.Tensor):
-                t = tensor
-                if t.dim() == 3:
-                    t = t.unsqueeze(0)
-                if t.dim() == 4:
-                    t = t[0]
-                img_np = t.detach().cpu().numpy()
-            else:
-                return None
-            img_np = np.clip(img_np * 255, 0, 255).astype(np.uint8)
-            if img_np.ndim == 3 and img_np.shape[2] == 1:
-                img_np = img_np[:, :, 0]
-            from PIL import Image
-            import uuid
-            import tempfile
-            img = Image.fromarray(img_np)
-            tmp = os.path.join(folder_paths.get_temp_directory(), f"ezpv_img_{uuid.uuid4().hex}.png")
-            img.save(tmp, format="PNG")
-            from urllib.parse import quote
-            return "/view?type=temp&filename=" + quote(os.path.basename(tmp))
-        except Exception:
-            return None
-
-    @staticmethod
-    def _image_batch_kind(upstream):
-        """IMAGE 批次的来源只能从工作流上游节点类名猜：张量本身区分不了批量出图与视频抽帧。"""
-        t = (upstream.get("type") or "").lower() if isinstance(upstream, dict) else ""
-        return "frames" if any(h in t for h in _PREVIEW_FRAME_HINTS) else "images"
-
-    @staticmethod
-    def _image_summary(tensor, max_len=_PREVIEW_MAX_VALUE_LEN):
-        if isinstance(tensor, torch.Tensor):
-            t = tensor
-            batch = int(t.shape[0]) if t.dim() == 4 else 1
-            if t.dim() == 4:
-                t = t[0]
-            if t.dim() == 3:
-                h, w = t.shape[0], t.shape[1]
-                return (f"{w} x {h} × {batch}" if batch > 1 else f"{w} x {h}"), None
-        return _pv_truncate(str(tensor), max_len)
-
-    @staticmethod
-    def _video_file_source(value):
-        """视频值底层是否对应磁盘上的文件：是则返回绝对路径（预览直接播原文件，不编码）。
-        支持 VideoFromFile / 带 get_source()·path·file 的对象 / 字符串路径 / 列表·字典里的第一个视频项。"""
-        def from_obj(v):
-            for attr in ("get_stream_source", "get_source"):
-                fn = getattr(v, attr, None)
-                if callable(fn):
-                    try:
-                        p = fn()
-                    except Exception:
-                        p = None
-                    if isinstance(p, str) and p and os.path.isfile(p):
-                        return os.path.abspath(p)
-            for attr in ("path", "file", "source_path"):
-                p = getattr(v, attr, None)
-                if isinstance(p, str) and p and os.path.isfile(p):
-                    return os.path.abspath(p)
-            if isinstance(v, str) and v and os.path.isfile(v):
-                return os.path.abspath(v)
-            return None
-        try:
-            if isinstance(value, (list, tuple)):
-                for it in value:
-                    hit = from_obj(it)
-                    if hit:
-                        return hit
-                return None
-            if isinstance(value, dict):
-                for key in ("path", "file", "src", "video", "video_src", "frames", "images"):
-                    hit = from_obj(value.get(key))
-                    if hit:
-                        return hit
-                return None
-            return from_obj(value)
-        except Exception:
-            return None
-
-    @staticmethod
-    def _audio_file_src(data):
-        """音频：文件型用原 URL；否则把波形写临时 WAV 并返回 serve URL（流式，避免 base64 卡顿）。"""
-        try:
-            from urllib.parse import quote
-            def _url(p):
-                if isinstance(p, str) and p and os.path.exists(p):
-                    return "/preview_any/serve_3d?path=" + quote(os.path.abspath(p))
-                return None
-            if isinstance(data, dict):
-                u = _url(data.get("file") or data.get("path") or data.get("src"))
-                if u:
-                    return u
-            elif isinstance(data, (list, tuple)):
-                # 多文件（MediaOut 卡片/卡片组/分组模式）：第一个能落到文件的就用它，不重新编码
-                for it in data:
-                    if isinstance(it, dict):
-                        u = _url(it.get("file") or it.get("path") or it.get("src"))
-                    else:
-                        u = _url(getattr(it, "path", None) or getattr(it, "file", None))
-                    if u:
-                        return u
-            else:
-                src = None
-                if hasattr(data, "get_stream_source"):
-                    try:
-                        src = data.get_stream_source()
-                    except Exception:
-                        src = None
-                if not src:
-                    src = getattr(data, "path", None) or getattr(data, "file", None) or getattr(data, "name", None)
-                u = _url(src)
-                if u:
-                    return u
-            # 无文件 → 写临时 WAV（直接拿 WAV 字节，不再 base64 编一遍再解回来）
-            wav = PreviewAnyNode._audio_wav_bytes(data)
-            if wav:
-                import uuid
-                tmp = os.path.join(folder_paths.get_temp_directory(), f"ezpv_audio_{uuid.uuid4().hex}.wav")
-                with open(tmp, "wb") as fh:
-                    fh.write(wav)
-                return "/view?type=temp&filename=" + quote(os.path.basename(tmp))
-            return None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _audio_wav_bytes(data):
-        """把 ComfyUI 音频编成 WAV 字节（data URI 与临时文件共用，省掉 encode→decode 一转）。"""
-        try:
-            waveform = None
-            sample_rate = 44100
-            if isinstance(data, dict):
-                waveform = data.get("waveform", data.get("audio"))
-                sample_rate = data.get("sample_rate", sample_rate)
-            elif isinstance(data, (list, tuple)) and len(data) >= 2:
-                waveform, sample_rate = data[0], data[1]
-            else:
-                waveform = data
-            if waveform is None:
-                return None
-            w = waveform.detach().cpu().numpy() if isinstance(waveform, torch.Tensor) else np.asarray(waveform)
-            w = np.clip(w.reshape(-1), -1.0, 1.0)
-            audio16 = (w * 32767).astype(np.int16)
-            from io import BytesIO
-            import wave
-            buf = BytesIO()
-            with wave.open(buf, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(int(sample_rate))
-                wf.writeframes(audio16.tobytes())
-            return buf.getvalue()
-        except Exception:
-            return None
-
-    @staticmethod
-    def _audio_to_data_uri(data):
-        """把 ComfyUI 音频（dict 含 waveform/sample_rate，或 (waveform, sample_rate)）编码为 WAV data URI。"""
-        wav = PreviewAnyNode._audio_wav_bytes(data)
-        return ("data:audio/wav;base64," + base64.b64encode(wav).decode("ascii")) if wav else None
-
-    @staticmethod
-    def _audio_summary(data):
-        try:
-            if isinstance(data, dict):
-                sample_rate = data.get("sample_rate")
-                w = data.get("waveform", data.get("audio"))
-                if isinstance(w, torch.Tensor):
-                    return f"Audio {w.shape[-1]} samples @ {sample_rate}Hz" if sample_rate else f"Audio {w.shape[-1]} samples"
-                return "Audio"
-            if isinstance(data, (list, tuple)) and len(data) >= 2:
-                sample_rate = data[1]
-                w = data[0]
-                if isinstance(w, torch.Tensor):
-                    return f"Audio {w.shape[-1]} samples @ {sample_rate}Hz"
-                return "Audio"
-            return "Audio"
-        except Exception:
-            return "Audio"
-
-    @staticmethod
-    def _video_extract_frames(value):
-        """从 dict/list/tensor/Video 对象提取 (帧列表, fps)，最多 30 帧。
-        优先用内存里的张量（不解码、不落盘）：Video 对象的 get_components().images 就是 [T,H,W,3]。"""
-        frames = []
-        fps = 8
-        try:
-            if isinstance(value, dict):
-                f = value.get("frames") or value.get("images") or []
-                if isinstance(f, (list, tuple)):
-                    frames = [x for x in f if isinstance(x, torch.Tensor)]
-                fps = value.get("fps", fps) or fps
-            elif isinstance(value, torch.Tensor):
-                if value.ndim == 4:
-                    frames = [value[i] for i in range(min(value.shape[0], 30))]
-                elif value.ndim == 3:
-                    frames = [value]
-            elif isinstance(value, (list, tuple)):
-                frames = [x for x in value if isinstance(x, torch.Tensor)]
-                if len(frames) == 1 and frames[0].ndim == 4:
-                    frames = [frames[0][i] for i in range(min(frames[0].shape[0], 30))]
-            else:
-                # Video 对象（VideoFromComponents 等）：直接取 components，避免 av 解码整段视频
-                if hasattr(value, "get_components"):
-                    try:
-                        comp = value.get_components()
-                        imgs = getattr(comp, "images", None)
-                        if isinstance(imgs, torch.Tensor) and imgs.ndim == 4:
-                            frames = [imgs[i] for i in range(min(imgs.shape[0], 30))]
-                        fr = getattr(comp, "frame_rate", None)
-                        if fr:
-                            fps = float(fr)
-                    except Exception:
-                        frames = []
-                if not frames:
-                    cand = None
-                    for attr in ("frames", "images", "tensors", "data"):
-                        cand = getattr(value, attr, None)
-                        if isinstance(cand, (list, tuple)):
-                            frames = [x for x in cand if isinstance(x, torch.Tensor)]
-                            if frames:
-                                break
-                if not frames:
-                    try:
-                        if hasattr(value, "to_images"):
-                            cand = value.to_images()
-                            if isinstance(cand, (list, tuple)):
-                                frames = [x for x in cand if isinstance(x, torch.Tensor)]
-                    except Exception:
-                        frames = []
-        except Exception:
-            frames = []
-        if len(frames) > 30:
-            frames = frames[:30]
-        return frames, fps
-
-    @staticmethod
-    def _video_first_frame(data):
-        """视频/多帧：返回 (首帧 base64, 帧数)。"""
-        frames, _ = PreviewAnyNode._video_extract_frames(data)
-        if frames:
-            return (PreviewAnyNode._image_to_base64(frames[0]) if frames[0] is not None else None), len(frames)
-        return None, 0
-
-    @staticmethod
-    def _video_frames(value):
-        """提取视频帧列表 + fps（最多 30 帧），兼容 dict/list/VideoFromFile 对象。"""
-        return PreviewAnyNode._video_extract_frames(value)
-
-    @staticmethod
-    def _video_summary(frames, fps):
-        try:
-            n = len(frames)
-            if not n:
-                return "Video"
-            t = frames[0]
-            if t.ndim == 4:
-                t = t[0]
-            if t.ndim == 3:
-                return f"{n} frames @ {fps}fps  {t.shape[1]}x{t.shape[0]}"
-            return f"{n} frames @ {fps}fps"
-        except Exception:
-            return "Video"
-
-    @staticmethod
-    def _video_to_webm(frames, fps=8):
-        """把帧序列快速编码成 WebM(data URI) 供浏览器内联播放。
-        只有「底层没有源文件」时才走到这里，所以按预览标准做：缩到 512 宽 + VP9 实时档（默认档很慢）。"""
-        if not frames or not isinstance(frames[0], torch.Tensor):
-            return None
-        import av
-        from io import BytesIO
-
-        def render(fast):
-            buf = BytesIO()
-            rate = max(1, int(fps) if fps else 8)
-            container = av.open(buf, mode="w", format="webm")
-            stream = container.add_stream("libvpx-vp9", rate=rate)
-            stream.pix_fmt = "yuv420p"
-            if fast:
-                try:
-                    stream.bit_rate = 2000000
-                    stream.options = {"deadline": "realtime", "cpu-used": "8", "lag-in-frames": "0"}
-                except Exception:
-                    pass
-            for t in frames:
-                np_img = t.detach().cpu().numpy()
-                if np_img.ndim == 4:
-                    np_img = np_img[0]
-                np_img = (np.clip(np_img, 0.0, 1.0) * 255).astype(np.uint8)
-                if np_img.ndim == 2:
-                    np_img = np.stack([np_img] * 3, axis=-1)
-                elif np_img.shape[-1] == 1:
-                    np_img = np_img[:, :, 0]
-                    np_img = np.stack([np_img] * 3, axis=-1)
-                if np_img.shape[-1] != 3:
-                    np_img = np_img[..., :3]
-                if np_img.shape[1] > 512:   # 预览用：等比缩到 512 宽，编码量小一个数量级
-                    from PIL import Image as _Im
-                    nh = max(2, int(round(np_img.shape[0] * 512.0 / np_img.shape[1])))
-                    np_img = np.asarray(_Im.fromarray(np_img).resize((512, nh), _Im.BILINEAR))
-                if np_img.shape[0] % 2 or np_img.shape[1] % 2:
-                    np_img = np_img[:np_img.shape[0] - (np_img.shape[0] % 2), :np_img.shape[1] - (np_img.shape[1] % 2)]
-                if stream.width is None:
-                    stream.width = np_img.shape[1]
-                    stream.height = np_img.shape[0]
-                avf = av.VideoFrame.from_ndarray(np_img, format="rgb24")
-                for p in stream.encode(avf):
-                    container.mux(p)
-            for p in stream.encode():
-                container.mux(p)
-            container.close()
-            return buf.getvalue()
-
-        raw = None
-        for fast in (True, False):   # 先试实时档；某些 libvpx 版本不吃这些选项，就退回默认档
-            try:
-                raw = render(fast)
-                if raw:
-                    break
-            except Exception:
-                raw = None
-        if not raw:
-            return None
-        return "data:video/webm;base64," + base64.b64encode(raw).decode("ascii")
-
-    @staticmethod
-    def _video_stream_temp(value):
-        """内存型视频对象 → 临时文件，返回绝对路径（失败 None）。
-        value.get_stream_source() 内部走 save_to()，出来的就是「视频 + 音轨 + 原始帧率」的完整编码流
-        （内置 Create Video 的 VideoFromComponents 就是这么实现的），所以直接落盘给浏览器播最省事：
-        音轨、帧率、时长全都不丢，也不用再逐帧重编码。按内容哈希命名 → 同一段视频反复预览只占一个文件。"""
-        try:
-            src = value.get_stream_source()
-        except Exception:
-            return None
-        try:
-            if isinstance(src, str) and src and os.path.isfile(src):
-                return os.path.abspath(src)
-            if hasattr(src, "getvalue"):
-                data = src.getvalue()
-            elif isinstance(src, (bytes, bytearray)):
-                data = bytes(src)
-            else:
-                return None
-            if not data:
-                return None
-            fmt = ""
-            try:
-                import io as _io
-                import av
-                with av.open(_io.BytesIO(data), mode="r") as probe:
-                    fmt = (probe.format.name or "").lower()
-            except Exception:
-                pass
-            ext = ".webm" if "webm" in fmt else (".mkv" if "matroska" in fmt else (".mov" if "mov" in fmt and "mp4" not in fmt else ".mp4"))
-            import hashlib
-            tmp = os.path.join(folder_paths.get_temp_directory(), "ezpv_vid_" + hashlib.sha1(data).hexdigest()[:16] + ext)
-            if not os.path.isfile(tmp):
-                with open(tmp, "wb") as fh:
-                    fh.write(data)
-            return os.path.abspath(tmp)
-        except Exception:
-            return None
-
-    @staticmethod
-    def _image_np_to_base64(arr):
-        try:
-            from io import BytesIO
-            from PIL import Image
-            if arr.ndim == 2:
-                img = Image.fromarray(arr, mode="L")
-            else:
-                img = Image.fromarray(arr[:, :, :3])
-            if max(img.size) > _PREVIEW_MAX_IMG_SIDE:
-                img.thumbnail((_PREVIEW_MAX_IMG_SIDE, _PREVIEW_MAX_IMG_SIDE), Image.LANCZOS)
-            buf = BytesIO()
-            img.save(buf, format="PNG", optimize=True)
-            return base64.b64encode(buf.getvalue()).decode("ascii")
-        except Exception:
-            return None
-
-    @staticmethod
-    def _video_file_poster(src):
-        """只解首帧做封面，返回 (base64, fps, (w,h))。"""
-        try:
-            import av
-            if not (isinstance(src, str) and src and os.path.exists(src)):
-                return None, 8, None
-            with av.open(src, mode="r") as container:
-                video = next((s for s in container.streams if s.type == "video"), None)
-                if video is None:
-                    return None, 8, None
-                fps = float(video.average_rate) if video.average_rate else 8
-                dims = (video.width, video.height)
-                for frame in container.decode(video):
-                    arr = frame.to_ndarray(format="rgb24")
-                    return PreviewAnyNode._image_np_to_base64(arr), fps, dims
-        except Exception:
-            return None, 8, None
-        return None, 8, None
-
-    @staticmethod
-    def _video_file_summary(fps, dims):
-        try:
-            if dims:
-                w, h = dims
-                return f"Video @ {fps:.0f}fps  {w}x{h}"
-        except Exception:
-            pass
-        return "Video"
-
-    @staticmethod
-    def _resolve_model_path(path):
-        """把相对模型路径解析为绝对路径（遍历 ComfyUI 各模型目录，支持子路径如 画风\\风格\\Anima\\xxx.safetensors）。"""
-        if not path:
-            return path
-        if os.path.isabs(path) and os.path.isfile(path):
-            return path
-        try:
-            import folder_paths
-            base = os.path.basename(path.replace("\\", "/"))
-            rel = path.replace("\\", "/")
-            for folder in ("checkpoints", "diffusion_models", "unet", "loras", "controlnet", "vae", "clip", "text_encoders", "embeddings"):
-                try:
-                    # 1) 相对子路径
-                    fp = folder_paths.get_full_path(folder, rel)
-                    if fp and os.path.isfile(fp):
-                        return fp
-                    # 2) 仅文件名
-                    fp = folder_paths.get_full_path(folder, base)
-                    if fp and os.path.isfile(fp):
-                        return fp
-                    # 3) 直接拼接各文件夹根目录
-                    for root in folder_paths.get_folder_paths(folder):
-                        cand = os.path.join(root, rel)
-                        if os.path.isfile(cand):
-                            return cand
-                except Exception:
-                    continue
-        except Exception:
-            pass
-        return path
-
-    @staticmethod
-    def _model_type_str(value):
-        """从模型对象提取架构/类型字符串（处理 callable 的 model_type，避免输出 bound method 的 repr）。"""
-        def _clean(v):
-            if v is None:
-                return None
-            if callable(v):
-                try:
-                    v = v()
-                except Exception:
-                    return None
-            if isinstance(v, str):
-                v = v.strip()
-                if v:
-                    return v
-            return None
-        try:
-            # 只安全探测已知存在的 model_type，避免访问 model_config 上不存在的
-            # model_type_name/architecture 触发 ComfyUI 的“accessed non-existing attr”警告。
-            for obj in (value, getattr(value, "model", None)):
-                if obj is None:
-                    continue
-                s = _clean(getattr(obj, "model_type", None))
-                if s:
-                    return s
-            cfg = getattr(getattr(value, "model", None), "model_config", None)
-            if cfg is not None:
-                s = _clean(getattr(cfg, "model_type", None))
-                if s:
-                    return s
-            # 兜底：底层模型类名（comfy.supported_models.Anima -> "anima"，Krea -> "krea" 等）
-            for o in (getattr(value, "model", None), value):
-                if o is None:
-                    continue
-                onm = type(o).__name__
-                omod = type(o).__module__ or ""
-                if onm and (omod.startswith("comfy.supported_models") or onm in ("Anima", "Krea", "Krea2", "Flux", "SDXL", "SD3", "Wan", "Mochi", "PixArt", "Hunyuan", "AuraFlow", "QwenImage", "Lumina", "Sana", "OmniGen", "Hidream", "Chroma", "Ace", "LongCat", "CogVideoX", "LTXVideo", "Playground", "SVD")):
-                    return onm.lower()
-        except Exception:
-            pass
-        return ""
-
-    @staticmethod
-    def _read_raw_meta(path):
-        """读取模型文件的原始元数据 dict（含 ss_* / modelspec.* 等）。"""
-        if not path:
-            return None
-        ext = os.path.splitext(path)[1].lower()
-        raw = None
-        try:
-            if ext == ".safetensors":
-                import safetensors
-                with safetensors.safe_open(path, framework="pt") as f:
-                    raw = f.metadata() or {}
-            elif ext == ".gguf":
-                import gguf
-                reader = gguf.GGUFReader(path)
-                raw = {k: (v.value if hasattr(v, "value") else str(v)) for k, v in reader.fields.items()}
-            elif ext == ".onnx":
-                import onnx
-                m = onnx.load(path, load_external_data=False)
-                raw = {"producer": m.producer_name or "", "graph": m.graph.name or ""}
-        except Exception:
-            raw = None
-        return raw
-
-    @staticmethod
-    def _base_model_path(value, type_name):
-        """从模型对象自身取基础模型路径（不含上游 lora）。"""
-        try:
-            path = None
-            if type_name in ("MODEL", "CONTROL_NET", "STYLE_MODEL", "UPSCALE_MODEL", "LORA_MODEL", "GLIGEN"):
-                init = getattr(value, "cached_patcher_init", None)
-                if init:
-                    p = init[1][0]
-                    path = str(p[0] if isinstance(p, (list, tuple)) else p)
-            elif type_name in ("CLIP", "VAE"):
-                patcher = getattr(value, "patcher", None)
-                init = getattr(patcher, "cached_patcher_init", None)
-                if init:
-                    p = init[1][0]
-                    path = str(p[0] if isinstance(p, (list, tuple)) else p)
-            if path:
-                return PreviewAnyNode._resolve_model_path(path)
-        except Exception:
-            pass
-        return None
-
-    @staticmethod
-    def _lora_file_path(value, type_name, upstream):
-        """从上游节点取 LoRA 文件路径（Lora 节点的 lora_name 或 ModelsCombo 的 lora file）。"""
-        if not isinstance(upstream, dict):
-            return None
-        try:
-            node_hint = " ".join(str(upstream.get(k) or "") for k in ("type", "title", "name"))
-            is_lora_node = "lora" in node_hint.lower()
-            wv = upstream.get("widgets_values") or []
-            # ModelsCombo：JSON 清单里的 type=lora 项
-            for w in wv:
-                if isinstance(w, str) and w.strip().startswith("[") and '"file"' in w:
-                    try:
-                        entries = json.loads(w)
-                    except Exception:
-                        entries = None
-                    if isinstance(entries, list):
-                        for e in entries:
-                            if isinstance(e, dict) and (e.get("type") or "").lower() == "lora" and e.get("file"):
-                                return PreviewAnyNode._resolve_model_path(e["file"])
-                    break
-            # Lora 节点：直接取 lora_name 之类的文件
-            if is_lora_node:
-                for w in wv:
-                    if isinstance(w, str) and ("lora" in w.lower() or w.lower().endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".lora"))):
-                        rp = PreviewAnyNode._resolve_model_path(w)
-                        if rp:
-                            return rp
-        except Exception:
-            pass
-        return None
-
-    @staticmethod
-    def _build_sub_meta(path, name, type_name, value, kind):
-        """把单个模型文件的元数据整理成“重要字段在前、中文标签”的 dict。kind：模型/LoRA/None。"""
-        raw = PreviewAnyNode._read_raw_meta(path)
-        rawd = raw or {}
-        out = {}
-
-        def pick(*keys):
-            for k in keys:
-                if k in rawd and rawd[k] not in (None, ""):
-                    return rawd[k]
-            return None
-
-        out["Name"] = name or (os.path.basename(path) if path else (kind or "Model"))
-        out["Type"] = kind or type_name
-        arch = pick("modelspec.architecture", "architecture", "model_type", "ss_base_model_version", "ss_model_description", "model_type_name")
-        if arch:
-            out["Architecture"] = str(arch)
-        else:
-            ts = PreviewAnyNode._model_type_str(value)
-            if ts:
-                out["Architecture"] = ts
-        author = pick("modelspec.author", "created_by", "ss_creator", "author")
-        if author:
-            out["Author/Source"] = str(author)
-        org = pick("modelspec.organization", "modelspec.tags", "ss_sd_model_name", "modelspec.civitai_resources")
-        if org:
-            out["Organization"] = str(org)
-        base = pick("ss_base_model_version", "base_model", "ss_sd_model_name")
-        if base and kind == "LoRA":
-            out["Base model"] = str(base)
-        dim = pick("ss_network_dim", "ss_network_dims")
-        if dim:
-            out["Train dim"] = str(dim)
-        alpha = pick("ss_network_alpha")
-        if alpha:
-            out["Train alpha"] = str(alpha)
-        tf = pick("ss_tag_frequency")
-        if tf:
-            try:
-                tfv = json.loads(tf) if isinstance(tf, str) else tf
-                if isinstance(tfv, dict):
-                    out["Training tags/weights"] = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in tfv.items()}
-                else:
-                    out["Training tags/weights"] = str(tfv)
-            except Exception:
-                out["Training tags/weights"] = str(tf)
-        # 主要触发词：按出现次数取前若干（与完整「训练关键词/比重」并存，快速看）
-        try:
-            tfj = json.loads(tf) if isinstance(tf, str) else tf
-            if isinstance(tfj, dict):
-                items = []
-                for k, v in tfj.items():
-                    cnt = v[0] if isinstance(v, (list, tuple)) and len(v) > 0 else v
-                    try:
-                        cnt = float(cnt)
-                    except Exception:
-                        cnt = 0
-                    items.append((k, cnt))
-                items.sort(key=lambda x: -x[1])
-                topw = [k for k, _ in items[:8]]
-                if topw:
-                    out["Top trigger words"] = ", ".join(topw)
-        except Exception:
-            pass
-        ntype = pick("ss_network_module", "ss_module", "ss_network_args", "ss_network_type")
-        if ntype:
-            out["Network type"] = str(ntype)
-        contains = pick("modelspec.contains")
-        vae_ok = None
-        if contains:
-            try:
-                cj = json.loads(contains) if isinstance(contains, str) else contains
-                if isinstance(cj, list):
-                    vae_ok = any("vae" in str(x).lower() for x in cj)
-            except Exception:
-                vae_ok = False
-        if vae_ok is None:
-            vae_ok = bool(rawd.get("ss_vae_hash") or rawd.get("vae_hash"))
-        if vae_ok is not None:
-            out["Has embedded VAE"] = "Yes (built-in VAE)" if vae_ok else "No (may need external VAE)"
-        desc = pick("modelspec.description", "ss_model_description", "ss_training_comment", "ss_caption")
-        if desc:
-            out["Description"] = str(desc)
-        title = pick("modelspec.title", "ss_model_name")
-        if title and title != name:
-            out["Model name"] = str(title)
-        ver = pick("modelspec.sd_version", "modelspec.version", "modelspec.schema_version", "ss_version", "modelspec.training_version")
-        if ver and str(ver) != str(arch):
-            out["Version"] = str(ver)
-        use_prompt = pick("modelspec.usage")
-        if use_prompt and str(use_prompt) != str(desc):
-            out["Usage prompt/trigger words"] = str(use_prompt)
-        src = None
-        for k in ("modelspec.civitai_resources", "civitai_resources", "modelspec.usage"):
-            v = rawd.get(k)
-            if not v:
-                continue
-            tv = v
-            try:
-                if isinstance(v, str):
-                    tv = json.loads(v)
-            except Exception:
-                tv = v
-            if isinstance(tv, dict):
-                for sub in (tv.get("url"), tv.get("uri"), tv.get("link"), tv.get("source"), tv.get("model_url"), tv.get("download_url")):
-                    if isinstance(sub, str) and sub.startswith("http"):
-                        src = sub
-                        break
-                if not src:
-                    for sub in tv.values():
-                        if isinstance(sub, str) and sub.startswith("http"):
-                            src = sub
-                            break
-                if not src and (tv.get("modelId") or tv.get("model_id") or tv.get("model_id") is not None):
-                    mid = tv.get("modelId") if tv.get("modelId") is not None else tv.get("model_id")
-                    if mid is not None:
-                        src = "https://civitai.com/models/" + str(mid)
-            elif isinstance(tv, str) and tv.startswith("http"):
-                src = tv
-            if src:
-                break
-        if not src:
-            for k in ("ss_training_comment", "modelspec.description", "ss_model_description"):
-                v = rawd.get(k)
-                if isinstance(v, str):
-                    m = re.search(r"https?://[^\s\"'<>]+", v)
-                    if m:
-                        src = m.group(0)
-                        break
-        if src:
-            out["Source/Link"] = str(src)
-        # 常用训练参数（放中间，较次要）
-        tr = {}
-        for k in ("ss_optimizer", "ss_optimizer_args", "ss_learning_rate", "ss_lr", "ss_unet_lr", "ss_text_encoder_lr",
-                  "ss_train_batch_size", "ss_batch_size", "ss_num_batches_per_epoch", "ss_training_steps", "ss_epoch",
-                  "ss_resolution", "ss_clip_skip", "ss_mixed_precision", "ss_noise_offset", "ss_prior_loss_weight",
-                  "ss_seed", "ss_gradient_accumulation_steps", "ss_warmup_steps", "ss_keep_tokens", "ss_shuffle_caption",
-                  "ss_caption_dropout_rate", "ss_tag_dropout_rate", "ss_enable_bucket", "ss_min_bucket_reso", "ss_max_bucket_reso",
-                  "ss_bucket_info", "ss_num_images", "ss_dataset_repeats", "ss_cache_latents", "ss_flip_aug", "ss_color_aug",
-                  "ss_output_name", "ss_sd_model_hash", "ss_vae_hash", "ss_text_encoder_hash", "ss_full_bf16",
-                  "ss_lowram", "ss_latents_upscaler", "ss_prior_loss_weight"):
-            if k in rawd and rawd[k] not in (None, ""):
-                try:
-                    tr[k] = json.loads(rawd[k]) if isinstance(rawd[k], str) and (rawd[k].strip().startswith("{") or rawd[k].strip().startswith("[")) else rawd[k]
-                except Exception:
-                    tr[k] = rawd[k]
-        if tr:
-            out["Training params"] = tr
-        if path:
-            out["File"] = os.path.basename(path)
-            out["Path"] = os.path.abspath(path)
-            try:
-                sz = os.path.getsize(path)
-                out["Size"] = _fmt_size(sz)
-                if sz <= (1 << 30):
-                    out["SHA256"] = _sha256(path)
-                else:
-                    out["SHA256"] = "(skipped for large files)"
-            except Exception:
-                pass
-            try:
-                out["Modified"] = _fmt_mtime(os.path.getmtime(path))
-            except Exception:
-                pass
-        if raw:
-            out["All metadata"] = raw
-        return out
-
-    @staticmethod
-    def _model_meta(value, type_name, upstream=None):
-        """读取模型元数据，按 模型/LoRA 分叉、重要字段在前、中文标签排版，返回 JSON 字符串供前端键值树。"""
-        try:
-            base_path = PreviewAnyNode._base_model_path(value, type_name)
-            lora_path = PreviewAnyNode._lora_file_path(value, type_name, upstream)
-            name = PreviewAnyNode._extract_name(value, type_name)
-            if lora_path and lora_path != base_path:
-                result = {
-                    "Model": PreviewAnyNode._build_sub_meta(base_path, name, type_name, value, "Model"),
-                    "LoRA": PreviewAnyNode._build_sub_meta(lora_path, os.path.splitext(os.path.basename(lora_path))[0] if lora_path else "LoRA", type_name, value, "LoRA")
-                }
-            else:
-                result = PreviewAnyNode._build_sub_meta(base_path or lora_path, name, type_name, value, None)
-            return json.dumps(result, ensure_ascii=False, default=str)
-        except Exception:
-            return None
-
-    @staticmethod
-    def _read_image_text_chunks(path):
-        """读取图片内嵌文本块（ComfyUI 的 prompt/workflow，WebUI 的 parameters 等）。"""
-        try:
-            from PIL import Image
-            im = Image.open(path)
-            info = im.info or {}
-            return {k: v for k, v in info.items() if isinstance(v, str)}
-        except Exception:
-            return {}
-
-    @staticmethod
-    def _parse_img_meta(text):
-        """把图片文本块解析成结构化 dict（模型/LoRA/CLIP/VAE/提示词/采样参数 + 原始块）。"""
-        out = {}
-        try:
-            prompt = None
-            if "prompt" in text:
-                try:
-                    prompt = json.loads(text["prompt"])
-                except Exception:
-                    prompt = None
-            parameters = text.get("parameters")
-            nodes = prompt if isinstance(prompt, dict) else None
-            model, lora, clip, vae, prompts, neg, sampler = [], [], [], [], [], [], {}
-
-            def ct(n):
-                return (n.get("class_type") or "") if isinstance(n, dict) else ""
-
-            def inp(n):
-                return (n.get("inputs") or {}) if isinstance(n, dict) else {}
-
-            def _combo_append(entries, model, lora, clip, vae):
-                if isinstance(entries, list):
-                    for e in entries:
-                        if not isinstance(e, dict):
-                            continue
-                        t = (e.get("type") or "").lower()
-                        f = e.get("file")
-                        if not f:
-                            continue
-                        if t == "lora":
-                            lora.append(f)
-                        elif t in ("unet", "checkpoint", "diffusion_models", "model"):
-                            model.append(f)
-                        elif t in ("clip", "text_encoders"):
-                            clip.append(f)
-                        elif t == "vae":
-                            vae.append(f)
-
-            def _try_combo(val, model, lora, clip, vae):
-                if isinstance(val, str) and val.strip().startswith("[") and '"file"' in val:
-                    try:
-                        _combo_append(json.loads(val), model, lora, clip, vae)
-                    except Exception:
-                        pass
-
-            if nodes:
-                for _dummy, n in nodes.items():
-                    c = ct(n)
-                    i = inp(n)
-                    if "Checkpoint" in c or c in ("UNETLoader", "ModelSamplingSD3", "ModelSamplingAuraFlow", "LoraLoaderModelOnly"):
-                        for k in ("ckpt_name", "model_name", "unet_name", "checkpoint"):
-                            if isinstance(i.get(k), str):
-                                model.append(i[k])
-                    if "Lora" in c and isinstance(i.get("lora_name"), str):
-                        lora.append(i["lora_name"])
-                    if "VAE" in c and isinstance(i.get("vae_name"), str):
-                        vae.append(i["vae_name"])
-                    if "CLIPLoader" in c and isinstance(i.get("clip_name"), str):
-                        clip.append(i["clip_name"])
-                    if "CLIPTextEncode" in c and isinstance(i.get("text"), str):
-                        prompts.append(i["text"])
-                    if ("CLIPSetLastLayer" in c or "SetClip" in c or "CLIPLastLayer" in c) and "clip_skip" in i:
-                        clip.append("clip_skip=" + str(i["clip_skip"]))
-                    if ("Sampler" in c or "KSampler" in c or "SamplerCustom" in c):
-                        for k in ("seed", "steps", "cfg", "sampler_name", "scheduler"):
-                            if k in i:
-                                sampler[k] = str(i[k])
-                    # 组合配置（EzFlex-ModelsCombo 等）：inputs 里可能出现描述 unet/clip/vae/lora 的 JSON 数组
-                    for v in i.values():
-                        _try_combo(v, model, lora, clip, vae)
-            # workflow 图兜底：当只有 workflow 文本块、或多个节点用类 type 表示时也能提取
-            wf = None
-            if "workflow" in text:
-                try:
-                    wf = json.loads(text["workflow"])
-                except Exception:
-                    wf = None
-            if isinstance(wf, dict):
-                for n in (wf.get("nodes") or []):
-                    if not isinstance(n, dict):
-                        continue
-                    c = (n.get("type") or "")
-                    wv = n.get("widgets_values") or []
-                    if "Checkpoint" in c or c in ("UNETLoader", "CheckpointLoaderSimple", "ModelSamplingSD3", "LoraLoaderModelOnly"):
-                        for w in wv:
-                            if isinstance(w, str) and w.lower().endswith((".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin")) and "lora" not in w.lower():
-                                model.append(w)
-                                break
-                    if "Lora" in c:
-                        for w in wv:
-                            if isinstance(w, str) and w.lower().endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".lora")):
-                                lora.append(w)
-                                break
-                    if "VAE" in c:
-                        for w in wv:
-                            if isinstance(w, str) and w.lower().endswith((".safetensors", ".pt", ".ckpt")):
-                                vae.append(w)
-                                break
-                    if "CLIPLoader" in c:
-                        for w in wv:
-                            if isinstance(w, str) and w.lower().endswith((".safetensors", ".pt", ".ckpt")):
-                                clip.append(w)
-                                break
-                    for w in wv:
-                        _try_combo(w, model, lora, clip, vae)
-            # 通用回退：不依赖硬编码节点类名，扫描所有节点 input，按「像模型文件名的字符串」归类，
-            # 覆盖 krea2 / flux2 / qwen 等新加载器或使用自定义节点时 prompt 元数据的提取。
-            if nodes:
-                def _mf(s):
-                    s = str(s)
-                    return s.lower().endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".onnx", ".lora", ".zip"))
-                for _dummy, n in nodes.items():
-                    c = (ct(n) or "").lower()
-                    i = inp(n)
-                    for k, v in i.items():
-                        if isinstance(v, str) and not v.strip():
-                            continue
-                        kl = (k or "").lower()
-                        if isinstance(v, str) and _mf(v):
-                            if "lora" in kl or "lora" in c:
-                                lora.append(v)
-                            elif "vae" in kl or "vae" in c:
-                                vae.append(v)
-                            elif "clip" in kl or "clip" in c:
-                                clip.append(v)
-                            elif any(x in kl for x in ("ckpt", "checkpoint", "unet", "model", "diffusion")) or any(x in c for x in ("checkpoint", "unet", "diffusion", "loadmodel", "load_model")):
-                                model.append(v)
-                        if isinstance(v, str) and kl == "text" and any(x in c for x in ("encode", "text", "prompt")):
-                            prompts.append(v)
-                        if any(x in c for x in ("sampler",)) and kl in ("seed", "steps", "cfg", "sampler_name", "scheduler", "denoise", "guidance"):
-                            sampler[kl] = str(v)
-                    for v in i.values():
-                        _try_combo(v, model, lora, clip, vae)
-            if parameters:
-                lines = [l for l in str(parameters).splitlines() if l.strip()]
-                if lines:
-                    prompts.insert(0, lines[0])
-                for l in lines[1:]:
-                    if l.strip().lower().startswith("negative prompt:"):
-                        neg.append(l.split(":", 1)[1].strip())
-                if lines:
-                    for kv in lines[-1].split(","):
-                        if ":" in kv:
-                            k, v = kv.split(":", 1)
-                            k = k.strip()
-                            if k in ("Steps", "Sampler", "CFG scale", "Seed", "Model", "VAE", "Model hash", "Clip skip", "Lora hashes", "RNG", "Schedule type"):
-                                sampler[k] = v.strip()
-                                if k == "Model":
-                                    model.append(v.strip())
-            if model:
-                out["Model"] = list(dict.fromkeys(model))
-            if lora:
-                out["LoRA"] = list(dict.fromkeys(lora))
-            if clip:
-                out["CLIP"] = list(dict.fromkeys(clip))
-            if vae:
-                out["VAE"] = list(dict.fromkeys(vae))
-            if prompts:
-                out["Prompt"] = prompts
-            if neg:
-                out["Negative prompt"] = neg
-            if sampler:
-                out["Sampling params"] = sampler
-            rawc = {k: text[k] for k in ("prompt", "workflow", "parameters") if k in text}
-            if rawc:
-                out["Raw text blocks"] = rawc
-        except Exception:
-            pass
-        return out
-
-    @staticmethod
-    def _image_gen_meta(upstream):
-        """从上游节点的 image 文件名读取生成图片的元信息，返回结构化 dict（无则 None）。"""
-        if not isinstance(upstream, dict):
-            return None
-        try:
-            wv = upstream.get("widgets_values") or []
-            fname = None
-            for w in wv:
-                if isinstance(w, str) and w.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                    fname = w
-                    break
-            if not fname:
-                return None
-            path = None
-            try:
-                import folder_paths
-                base = fname.replace("\\", "/")
-                name = os.path.basename(base)
-                # 生成图通常在 output/，也兼容 temp/input/；filename 可能是子路径
-                for root in (folder_paths.get_output_directory(), folder_paths.get_temp_directory(), folder_paths.get_input_directory()):
-                    if not root:
-                        continue
-                    for cand in (os.path.join(root, base), os.path.join(root, name)):
-                        if os.path.isfile(cand):
-                            path = cand
-                            break
-                    if path:
-                        break
-                if not path:
-                    try:
-                        path = folder_paths.get_full_path("input", name) or None
-                    except Exception:
-                        path = None
-            except Exception:
-                path = fname if fname and os.path.isfile(fname) else None
-            if not path or not os.path.isfile(path):
-                return None
-            text = PreviewAnyNode._read_image_text_chunks(path)
-            if not text:
-                return None
-            parsed = PreviewAnyNode._parse_img_meta(text)
-            parsed["Source file"] = os.path.basename(path)
-            return parsed
-        except Exception:
-            return None
-
-    @staticmethod
-    def _file_gen_meta(path):
-        """读取任意输出文件的生成/容器元信息。顺序：PIL 内嵌文本块（PNG/WEBP/JPEG/动画 webp）→ 同名 sidecar
-        JSON/txt → 容器内嵌元数据（GLB/glTF asset/extras、视频 ffprobe/音频 mutagen 标签）。无则 None。"""
-        if not path or not os.path.isfile(path):
-            return None
-        text = PreviewAnyNode._read_image_text_chunks(path)
-        if text:
-            parsed = PreviewAnyNode._parse_img_meta(text)
-            if parsed:
-                parsed["Source file"] = os.path.basename(path)
-                return parsed
-        sc = PreviewAnyNode._read_sidecar_meta(path)
-        if sc:
-            sc.setdefault("Source file", os.path.basename(path))
-            return sc
-        cont = PreviewAnyNode._container_meta(path)
-        if cont:
-            cont.setdefault("Source file", os.path.basename(path))
-            return cont
-        return None
-
-    @staticmethod
-    def _read_sidecar_meta(path):
-        """查找同名的 <base>.json / <base>.metadata.json / <file>.json / <base>.txt，能读到就返回其内容。"""
-        try:
-            base = os.path.splitext(path)[0]
-            cands = [base + ".json", base + ".metadata.json", path + ".json", base + ".txt"]
-            for c in cands:
-                if not os.path.isfile(c):
-                    continue
-                try:
-                    with open(c, "r", encoding="utf-8", errors="replace") as f:
-                        raw = f.read()
-                except Exception:
-                    continue
-                if c.lower().endswith(".txt"):
-                    return {"Raw text blocks": raw[:200000]}
-                try:
-                    data = json.loads(raw)
-                except Exception:
-                    return {"Raw text blocks": raw[:200000]}
-                if isinstance(data, dict):
-                    return data
-                if isinstance(data, list):
-                    return {"Data": data}
-            return None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _container_meta(path):
-        """容器内嵌元数据：GLB/glTF 资产信息（extras/generator），视频容器标签（ffprobe），音频标签（mutagen）。"""
-        try:
-            ext = os.path.splitext(path)[1].lower()
-            if ext == ".glb":
-                return PreviewAnyNode._glb_meta(path)
-            if ext == ".gltf":
-                return PreviewAnyNode._gltf_meta(path)
-            if ext in (".mp4", ".webm", ".mov", ".m4v", ".mkv"):
-                return PreviewAnyNode._video_container_meta(path)
-            if ext in (".mp3", ".flac", ".ogg", ".m4a", ".wav", ".opus"):
-                return PreviewAnyNode._audio_tag_meta(path)
-            return None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _glb_meta(path):
-        with open(path, "rb") as f:
-            header = f.read(12)
-            if len(header) < 12 or header[:4] != b"glTF":
-                return None
-            chunk_len, _chunk_type = struct.unpack("<II", f.read(8))
-            data = json.loads(f.read(chunk_len).decode("utf-8", "replace"))
-        out = {}
-        if isinstance(data.get("asset"), dict):
-            out["Assets"] = data["asset"]
-        if data.get("extras"):
-            out["Extra info"] = data["extras"]
-        if data.get("meshes"):
-            out["Meshes"] = len(data["meshes"])
-        if data.get("materials"):
-            out["Materials"] = len(data["materials"])
-        if data.get("animations"):
-            out["Animations"] = len(data["animations"])
-        return out if out else None
-
-    @staticmethod
-    def _gltf_meta(path):
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            data = json.load(f)
-        out = {}
-        if isinstance(data.get("asset"), dict):
-            out["Assets"] = data["asset"]
-        if data.get("extras"):
-            out["Extra info"] = data["extras"]
-        if data.get("meshes"):
-            out["Meshes"] = len(data["meshes"])
-        if data.get("materials"):
-            out["Materials"] = len(data["materials"])
-        if data.get("animations"):
-            out["Animations"] = len(data["animations"])
-        return out if out else None
-
-    @staticmethod
-    def _video_container_meta(path):
-        try:
-            import json as _json
-            import shutil
-            import subprocess
-            ffprobe = shutil.which("ffprobe")
-            if ffprobe:
-                out = subprocess.run(
-                    [ffprobe, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path],
-                    capture_output=True, text=True, timeout=12,
-                )
-                if out.returncode == 0 and out.stdout:
-                    data = _json.loads(out.stdout)
-                    res = {}
-                    fmt = data.get("format", {}) or {}
-                    tags = fmt.get("tags") or {}
-                    if isinstance(tags, dict) and tags:
-                        res["Container tags"] = tags
-                    for st in (data.get("streams") or []):
-                        codec = st.get("codec_type")
-                        if codec:
-                            res.setdefault("Streams", []).append({
-                                codec: st.get("codec_name"),
-                                "Width": st.get("width"),
-                                "Height": st.get("height"),
-                                "Duration": st.get("duration"),
-                                "fps": st.get("avg_frame_rate"),
-                            })
-                    return res if res else None
-            try:
-                import mutagen
-            except Exception:
-                return None
-            m = mutagen.File(path)
-            if m and getattr(m, "tags", None):
-                return {"Tags": {str(k): str(v) for k, v in m.tags.items() if str(v)}}
-            return None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _audio_tag_meta(path):
-        try:
-            import mutagen
-        except Exception:
-            return None
-        try:
-            m = mutagen.File(path)
-            if m and getattr(m, "tags", None):
-                return {"Tags": {str(k): str(v) for k, v in m.tags.items() if str(v)}}
-            if m and hasattr(m, "info"):
-                info = {}
-                for attr in ("length", "bitrate", "sample_rate", "channels"):
-                    try:
-                        v = getattr(m.info, attr)
-                        if v is not None:
-                            info[attr] = v
-                    except Exception:
-                        pass
-                if info:
-                    return {"Audio": info}
-            return None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _workflow_gen_meta(workflow):
-        """从当前工作流图（extra_pnginfo['workflow'] 的 nodes/widgets_values）尽力提取使用的模型/LoRA/CLIP/VAE、
-        提示词与采样参数，供视频/3D/音频等「容器不内嵌元数据」的类型也看到生成的模型参数。无则 None。"""
-        if not isinstance(workflow, dict):
-            return None
-        nodes = workflow.get("nodes") or []
-        model, lora, clip, vae, prompts, sampler, upscale = [], [], [], [], [], {}, []
-        _MODEL_EXT = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".sft", ".onnx", ".lora", ".zip")
-        # 放大/超分权重不是本次出图的底模；检测/控制/换脸等辅助权重同样不算。
-        _UPSCALE_HINTS = ("upscale", "superresolution", "super_resolution", "esrgan", "swinir", "gfpgan", "codeformer", "restoreformer")
-        _AUX_HINTS = ("control", "detector", "insightface", "ipadapter", "faceid", "segment", "yolo", "samloader", "clipvision", "style_model", "gligen")
-
-        def _is_model_ext(s):
-            return isinstance(s, str) and s.lower().endswith(_MODEL_EXT)
-
-        def _num(v):
-            try:
-                float(v)
-                return True
-            except Exception:
-                return False
-
-        # 连线穿透：CLIPTextEncode 的 text 常常是连线（如 EzFlex-PromptHelper 的「Merged prompt」），
-        # 只读自己的 widget 会读空 —— 按 workflow.links 上溯去找真正写着提示词的那个节点。
-        by_id = {}
-        for n in nodes:
-            if isinstance(n, dict) and n.get("id") is not None:
-                by_id[str(n.get("id"))] = n
-        link_src = {}
-        for l in (workflow.get("links") or []):
-            if isinstance(l, dict):
-                link_src[str(l.get("id"))] = (l.get("origin_id"), l.get("origin_slot"))
-            elif isinstance(l, (list, tuple)) and len(l) >= 3:
-                link_src[str(l[0])] = (l[1], l[2])
-
-        def _plain_widget(n):
-            wv = n.get("widgets_values") or []
-            if not isinstance(wv, (list, tuple)):
-                wv = [wv]
-            for w in wv:
-                if not isinstance(w, str):
-                    continue
-                ws = w.strip()
-                if not ws or _is_model_ext(ws) or ws[0] in "{[" or _num(ws):
-                    continue
-                return ws
-            return ""
-
-        def _prompt_of(n, depth=0, seen=None, slot=None):
-            """穿透连线取提示词正文。PromptHelper 特殊：正文在 config JSON 的卡片里（slot 0 = 合并，slot N = 第 N 张卡）。"""
-            if not isinstance(n, dict) or depth > 8:
-                return ""
-            if seen is None:
-                seen = set()
-            nid = str(n.get("id"))
-            if nid in seen:
-                return ""
-            seen.add(nid)
-            cl = str(n.get("type") or "").lower()
-            wv = n.get("widgets_values") or []
-            if not isinstance(wv, (list, tuple)):
-                wv = [wv]
-            if "prompthelper" in cl or "prompt_helper" in cl:
-                for w in wv:
-                    if not isinstance(w, str) or not w.strip().startswith("{"):
-                        continue
-                    try:
-                        cfg = json.loads(w)
-                    except Exception:
-                        continue
-                    cards = parse_prompt_cards(cfg)
-                    if not cards:
-                        continue
-                    if isinstance(slot, int) and 1 <= slot <= len(cards):
-                        c = cards[slot - 1]                 # PromptHelper 的 Card N 输出口
-                        t = str(c.get("content") or "").strip() or _ph_html_to_text(c.get("contentHTML") or "").strip()
-                        if t:
-                            return t
-                    ov = parse_prompt_overall(cfg)
-                    if ov.get("useOptimized") and str(ov.get("text") or "").strip():
-                        return str(ov["text"]).strip()
-                    sep = parse_prompt_rules(cfg)["mergeSep"]
-                    parts = []
-                    for c in cards:
-                        if c.get("mergeOff"):
-                            continue
-                        t = str(c.get("content") or "").strip() or _ph_html_to_text(c.get("contentHTML") or "").strip()
-                        if t:
-                            parts.append(t)
-                    if parts:
-                        return sep.join(parts)
-                return ""
-            t = _plain_widget(n)
-            if t:
-                return t
-            for i in (n.get("inputs") or []):
-                if isinstance(i, dict) and i.get("link") is not None:
-                    hit = link_src.get(str(i.get("link")))
-                    if hit:
-                        t = _prompt_of(by_id.get(str(hit[0])), depth + 1, seen, hit[1])
-                        if t:
-                            return t
-            return ""
-
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            c = (n.get("type") or "")
-            cl = c.lower()
-            wv = n.get("widgets_values") or []
-            if not isinstance(wv, (list, tuple)):
-                wv = [wv]
-            for w in wv:
-                if not isinstance(w, str):
-                    continue
-                wl = w.lower()
-                if wl.endswith(_MODEL_EXT):
-                    if "lora" in cl:
-                        lora.append(w)
-                    elif "vae" in cl:
-                        vae.append(w)
-                    elif any(x in cl for x in _AUX_HINTS):
-                        pass                     # 检测/控制/换脸等辅助权重：不是出图模型
-                    elif any(x in cl for x in _UPSCALE_HINTS):
-                        upscale.append(w)
-                    elif "clip" in cl:
-                        clip.append(w)
-                    elif any(x in cl for x in ("checkpoint", "unet", "diffusion", "loadmodel", "load_model", "model")):
-                        model.append(w)
-            # EzFlex-ModelsCombo：模型文件在 config JSON 里（不是独立的 *.safetensors widget），要单独解出来
-            if "modelscombo" in cl:
-                for w in wv:
-                    if not isinstance(w, str):
-                        continue
-                    try:
-                        loaders = json.loads(w)
-                    except Exception:
-                        continue
-                    if not isinstance(loaders, list):
-                        continue
-                    for L in loaders:
-                        if not isinstance(L, dict):
-                            continue
-                        f = L.get("file")
-                        if not isinstance(f, str) or not f.strip():
-                            continue
-                        t = str(L.get("type") or "").lower()
-                        if t == "lora":
-                            lora.append(f)
-                        elif t == "vae":
-                            vae.append(f)
-                        elif t == "clip":
-                            clip.append(f)
-                        else:
-                            model.append(f)
-            # 提示词：CLIPTextEncode / 带 text 的编码节点；正文可能是连线（PromptHelper / 文本节点），要穿透
-            if ("clip" in cl and "encode" in cl) or "text" in cl or "prompt" in cl:
-                t = _prompt_of(n)
-                if t:
-                    prompts.append(t)
-            # 采样参数：K/Sampler 常见 widget 顺序尽力推断（含 control_after_generate 偏移）
-            if "sampler" in cl and isinstance(wv, (list, tuple)) and len(wv) >= 3:
-                has_ctrl = len(wv) > 1 and isinstance(wv[1], str) and wv[1].lower() in ("randomize", "fixed", "increment", "decrement")
-                off = 1 if has_ctrl else 0
-                if _num(wv[0]):
-                    sampler["seed"] = str(wv[0])
-                steps_i = 1 + off
-                if len(wv) > steps_i and _num(wv[steps_i]):
-                    sampler["steps"] = str(wv[steps_i])
-                if len(wv) > steps_i + 1 and _num(wv[steps_i + 1]):
-                    sampler["cfg"] = str(wv[steps_i + 1])
-                if len(wv) > steps_i + 2 and isinstance(wv[steps_i + 2], str):
-                    sampler["sampler_name"] = wv[steps_i + 2]
-                if len(wv) > steps_i + 3 and isinstance(wv[steps_i + 3], str) and not _num(wv[steps_i + 3]):
-                    sampler["scheduler"] = wv[steps_i + 3]
-                if len(wv) > steps_i + 4 and _num(wv[steps_i + 4]):
-                    sampler["denoise"] = str(wv[steps_i + 4])
-        out = {}
-        if model:
-            out["Model"] = list(dict.fromkeys(model))
-        if lora:
-            out["LoRA"] = list(dict.fromkeys(lora))
-        if clip:
-            out["CLIP"] = list(dict.fromkeys(clip))
-        if vae:
-            out["VAE"] = list(dict.fromkeys(vae))
-        if upscale:
-            out["Upscale model"] = list(dict.fromkeys(upscale))
-        if prompts:
-            out["Prompt"] = list(dict.fromkeys(prompts))
-        if sampler:
-            out["Sampling params"] = sampler
-        return out if out else None
-
-    @staticmethod
-    def _mask_to_base64(tensor):
-        """灰度 mask (H,W)/(B,H,W) -> PNG base64。"""
-        try:
-            t = tensor
-            if t.dim() == 3 and t.shape[-1] == 1:
-                t = t[..., 0]
-            if t.dim() == 3:
-                t = t[0]
-            arr = np.clip(t.detach().cpu().numpy(), 0.0, 1.0)
-            arr = (arr * 255).astype(np.uint8)
-            from io import BytesIO
-            from PIL import Image
-            img = Image.fromarray(arr, mode="L")
-            if max(img.size) > _PREVIEW_MAX_IMG_SIDE:
-                img.thumbnail((_PREVIEW_MAX_IMG_SIDE, _PREVIEW_MAX_IMG_SIDE), Image.LANCZOS)
-            buf = BytesIO()
-            img.save(buf, format="PNG", optimize=True)
-            return base64.b64encode(buf.getvalue()).decode("ascii")
-        except Exception:
-            return None
-
-    @staticmethod
-    def _export_mask_url(tensor):
-        """保存灰度 mask 原图到临时文件并返回 URL（全屏用原图）。"""
-        try:
-            t = tensor
-            if isinstance(t, torch.Tensor):
-                if t.dim() == 3 and t.shape[-1] == 1:
-                    t = t[..., 0]
-                if t.dim() == 3:
-                    t = t[0]
-                arr = np.clip(t.detach().cpu().numpy(), 0.0, 1.0)
-            else:
-                return None
-            arr = (arr * 255).astype(np.uint8)
-            from PIL import Image
-            import uuid
-            import tempfile
-            img = Image.fromarray(arr, mode="L")
-            tmp = os.path.join(folder_paths.get_temp_directory(), f"ezpv_mask_{uuid.uuid4().hex}.png")
-            img.save(tmp, format="PNG")
-            from urllib.parse import quote
-            return "/view?type=temp&filename=" + quote(os.path.basename(tmp))
-        except Exception:
-            return None
-
-    @staticmethod
-    def _conditioning_summary(value):
-        try:
-            if isinstance(value, (list, tuple)):
-                parts = []
-                for item in value:
-                    if isinstance(item, list) and item:
-                        cond = item[0]
-                        if isinstance(cond, torch.Tensor):
-                            parts.append(f"emb{list(cond.shape)}")
-                        elif isinstance(cond, dict):
-                            parts.append(",".join(str(k) for k in cond.keys()))
-                        else:
-                            parts.append(str(type(cond).__name__))
-                    elif isinstance(item, dict):
-                        parts.append(",".join(str(k) for k in item.keys()))
-                    else:
-                        parts.append(str(type(item).__name__))
-                return "Conditioning: " + " ".join(parts)
-            return "Conditioning"
-        except Exception:
-            return "Conditioning"
-
-    @staticmethod
-    def _object_summary(value, type_name):
-        try:
-            name = None
-            if type_name in ("MODEL", "CLIP", "VAE"):
-                try:
-                    name = PreviewAnyNode._extract_name(value, type_name)
-                except Exception:
-                    name = None
-            arch = ""
-            if type_name in ("MODEL", "CLIP", "VAE"):
-                try:
-                    arch = PreviewAnyNode._model_type_str(value) or ""
-                except Exception:
-                    arch = ""
-            parts = [p for p in (name, arch) if p]
-            if parts:
-                return f"{type_name}: {', '.join(parts)}"
-            return f"{type_name} object ({type(value).__name__})"
-        except Exception:
-            return f"{type_name} object ({type(value).__name__})"
-
-    @staticmethod
-    def _object_3d_summary(value):
-        try:
-            fmt = getattr(value, "format", None) or ""
-            path = getattr(value, "path", None) or getattr(value, "file", None) or _file3d_source(value)
-            name = os.path.basename(str(path)) if path else ""
-            if fmt:
-                return f"3D model ({fmt})" + (f": {name}" if name else "")
-            return f"3D model ({type(value).__name__})" + (f": {name}" if name else "")
-        except Exception:
-            return f"3D model ({type(value).__name__})"
-
-    @staticmethod
-    def _geometry_summary(value, type_name):
-        """MESH / SPLAT / VOXEL（都是张量，不是文件）的文本摘要：张量形状 + 关键数量，不再掉进裸 repr。"""
-        try:
-            if type_name == "MESH":
-                v = getattr(value, "vertices", None)
-                f = getattr(value, "faces", None)
-                nv = int(v.shape[1]) if isinstance(v, torch.Tensor) and v.ndim == 3 else 0
-                nf = int(f.shape[1]) if isinstance(f, torch.Tensor) and f.ndim == 3 else 0
-                batch = int(v.shape[0]) if isinstance(v, torch.Tensor) and v.ndim == 3 else 1
-                vc, fc = getattr(value, "vertex_counts", None), getattr(value, "face_counts", None)
-                if isinstance(vc, torch.Tensor) and vc.numel():
-                    nv = int(vc.reshape(-1)[0])
-                if isinstance(fc, torch.Tensor) and fc.numel():
-                    nf = int(fc.reshape(-1)[0])
-                extra = [k for k, attr in (("UV", "uvs"), ("Vertex colors", "vertex_colors"), ("Textures", "texture")) if getattr(value, attr, None) is not None]
-                return (f"Mesh {nv} vertices / {nf} faces" + (f" ×{batch}" if batch > 1 else "")
-                        + ("（" + " · ".join(extra) + "）" if extra else ""))
-            if type_name == "SPLAT":
-                p = getattr(value, "positions", None)
-                sh = getattr(value, "sh", None)
-                n = int(p.shape[1]) if isinstance(p, torch.Tensor) and p.ndim == 3 else 0
-                k = int(sh.shape[-2]) if isinstance(sh, torch.Tensor) and sh.ndim == 4 else 0
-                deg = int(round(k ** 0.5)) - 1 if k else 0
-                return f"Gaussian splat {n} points" + (f" · SH {k} coeff (degree {deg})" if k else "") + "(visualization not supported yet)"
-            d = getattr(value, "data", None)
-            shape = "×".join(str(x) for x in d.shape) if isinstance(d, torch.Tensor) else ""
-            res = getattr(value, "resolution", None)
-            return ("Voxel " + shape if shape else "Voxel") + (f" · resolution {res}" if res else "") + "(visualization not supported yet)"
-        except Exception:
-            return {"MESH": "Mesh", "SPLAT": "Gaussian splat"}.get(type_name, "Voxel")
-
-    @staticmethod
-    def _mesh_obj_url(value):
-        """Types.MESH（顶点/面张量）→ 临时 .obj，交给 PreviewAny 的 3D 查看器（只导几何：贴图/顶点色/UV 不写）。
-        按内容 sha1 命名，同一网格反复预览只占一个文件；过大的网格不导（避免几百 MB 的 OBJ）。"""
-        try:
-            v = getattr(value, "vertices", None)
-            f = getattr(value, "faces", None)
-            if not (isinstance(v, torch.Tensor) and isinstance(f, torch.Tensor)):
-                return None
-            if v.numel() == 0 or f.numel() == 0:
-                return None
-            verts = (v[0] if v.ndim == 3 else v).detach().cpu().float().numpy()
-            faces = (f[0] if f.ndim == 3 else f).detach().cpu().long().numpy()
-            vc, fc = getattr(value, "vertex_counts", None), getattr(value, "face_counts", None)
-            if isinstance(vc, torch.Tensor) and vc.numel():
-                verts = verts[: max(1, int(vc.reshape(-1)[0]))]
-            if isinstance(fc, torch.Tensor) and fc.numel():
-                faces = faces[: max(1, int(fc.reshape(-1)[0]))]
-            if verts.shape[0] > 500000 or faces.shape[0] > 1000000:
-                return None
-            lines = ["# EzFlex PreviewAny mesh"]
-            lines += [f"v {a:.6g} {b:.6g} {c:.6g}" for a, b, c in verts[:, :3]]
-            lines += [f"f {int(a) + 1} {int(b) + 1} {int(c) + 1}" for a, b, c in faces[:, :3]]
-            data = ("\n".join(lines) + "\n").encode("utf-8")
-            import hashlib
-            tmp = os.path.join(folder_paths.get_temp_directory(), "ezpv3d_mesh_" + hashlib.sha1(data).hexdigest()[:16] + ".obj")
-            if not os.path.isfile(tmp):
-                with open(tmp, "wb") as fh:
-                    fh.write(data)
-            from urllib.parse import quote
-            return "/view?type=temp&filename=" + quote(os.path.basename(tmp))
-        except Exception:
-            return None
-
-    @staticmethod
-    def _export_3d_url(value):
-        """返回 3D 模型可访问 URL。优先用 path-based URL（/preview_any/fs/<abs>）以便外部贴图/缓冲的相对路径正确解析，否则 save_to 导出。"""
-        try:
-            path = getattr(value, "path", None) or getattr(value, "file", None) or _file3d_source(value)
-            safe_path = _ez_inside(path) if isinstance(path, str) and path else ""   # 只给允许目录内的模型 path-URL
-            if safe_path and os.path.isfile(safe_path):
-                from urllib.parse import quote
-                abs_p = safe_path.replace("\\", "/")
-                return "/preview_any/fs/" + quote(abs_p, safe="/")
-            if not hasattr(value, "save_to"):
-                return None
-            fmt = getattr(value, "format", None) or "glb"
-            import uuid
-            import tempfile
-            tmp = os.path.join(folder_paths.get_temp_directory(), f"ezpv3d_{uuid.uuid4().hex}.{fmt}")
-            value.save_to(tmp)
-            if os.path.exists(tmp):
-                from urllib.parse import quote
-                return "/view?type=temp&filename=" + quote(os.path.basename(tmp))
-        except Exception:
-            return None
-        return None
-
-    @staticmethod
-    def _output_dir():
-        try:
-            paths = folder_paths.get_folder_paths("output")
-            if paths:
-                return paths[0]
-        except Exception:
-            pass
-        return getattr(folder_paths, "output_directory", os.getcwd())
-
-    @staticmethod
-    def _sanitize_filename(name):
-        import re
-        s = re.sub(r"[\\/:*?\"<>|]+", "_", str(name)).strip() or "preview"
-        return s[:80]
-
-    @staticmethod
-    def _save_base(cfg, dirpath, name):
-        """存档文件名基名：用「保存类型」里写的模板（支持 %year% %month% %day% %hour% %minute% %second%），
-        空则用卡片名。返回 (base, counter)，counter 按目录里已有的 <base>_NNNNN_ 递增（与内置 Save Image 同款）。"""
-        import time as _t
-        pat = str((cfg.get("saveFormats") or {}).get("_name") or "").strip()
-        if pat:
-            if "%" in pat:
-                now = _t.localtime()
-                for k, v in (("%year%", f"{now.tm_year}"), ("%month%", f"{now.tm_mon:02d}"), ("%day%", f"{now.tm_mday:02d}"),
-                             ("%hour%", f"{now.tm_hour:02d}"), ("%minute%", f"{now.tm_min:02d}"), ("%second%", f"{now.tm_sec:02d}")):
-                    pat = pat.replace(k, v)
-            base = PreviewAnyNode._sanitize_filename(os.path.basename(pat.replace("\\", "/")))
-        else:
-            base = PreviewAnyNode._sanitize_filename(name)   # 没写模板 → 用卡片名，同样要按目录里的编号接着排，别覆盖旧档
-        counter = 0
-        try:
-            for fn in os.listdir(dirpath):
-                if fn.startswith(base + "_"):
-                    # 单图存档是 <base>_00001.png（编号后面直接跟扩展名），要先去掉扩展名再认编号，
-                    # 否则 head 永远不是纯数字、counter 恒为 0 → 每次保存都覆盖同一个文件。
-                    head = fn[len(base) + 1:].split("_")[0].split(".")[0]
-                    if head.isdigit():
-                        counter = max(counter, int(head))
-        except Exception:
-            pass
-        return base, counter
-
-    @staticmethod
-    def _png_meta(extra_pnginfo):
-        """PNG 文本块：workflow / prompt（与内置 Save Image 同款，值序列化成字符串）。"""
-        if not isinstance(extra_pnginfo, dict) or not extra_pnginfo:
-            return None
-        meta = {}
-        for k, v in extra_pnginfo.items():
-            try:
-                meta[str(k)] = json.dumps(v)
-            except Exception:
-                pass
-        return meta or None
-
-    @staticmethod
-    def _src_file_of(url):
-        """entry 里的媒体 URL → 本机文件（/view?type=temp&filename=… 或 /preview_any/fs/…）；找不到返回 None。"""
-        if not isinstance(url, str):
-            return None
-        try:
-            from urllib.parse import urlparse, parse_qs, unquote
-            if url.startswith("/view?"):
-                q = parse_qs(urlparse(url).query)
-                fn = (q.get("filename") or [""])[0]
-                if q.get("type", ["temp"])[0] == "temp" and fn:
-                    cand = os.path.join(folder_paths.get_temp_directory(), os.path.basename(unquote(fn)))
-                    return cand if os.path.isfile(cand) else None
-            elif url.startswith("/preview_any/fs/"):
-                cand = unquote(url[len("/preview_any/fs/"):])
-                return cand if os.path.isfile(cand) else None
-        except Exception:
-            pass
-        return None
-
-    @staticmethod
-    def _image_save_bytes(src_file, raw, fmt, quality, meta):
-        """一张图 → (存档 bytes, 扩展名)：优先原图文件，退回复预览 bytes；失败 (None, None)。"""
-        from io import BytesIO
-        from PIL import Image as _Im
-        if fmt == "png":
-            if src_file and not meta:
-                with open(src_file, "rb") as fh:
-                    return fh.read(), ".png"          # 原图直存：零重编码、零损失
-            if src_file:
-                png = _Im.open(src_file)
-                buf = BytesIO()
-                try:
-                    from PIL.PngImagePlugin import PngInfo
-                    info = PngInfo()
-                    for k, v in meta.items():
-                        info.add_text(k, v)
-                    png.save(buf, format="PNG", pnginfo=info)
-                except Exception:
-                    png.save(buf, format="PNG")
-                return buf.getvalue(), ".png"
-            if raw is None:
-                return None, None
-            return raw, ".png"
-        if src_file:
-            img = _Im.open(src_file)
-        elif raw is not None:
-            img = _Im.open(BytesIO(raw))
-        else:
-            return None, None
-        buf = BytesIO()
-        kwargs = {"quality": quality} if fmt in ("jpeg", "webp") else {}
-        if fmt == "jpeg" and img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        img.save(buf, format=fmt.upper(), **kwargs)
-        return buf.getvalue(), "." + fmt
-
-    def _save_target_dir(self, cfg):
-        """存档目录：相对路径落在 output 下；绝对路径只允许 output 或本机登记过的目录。"""
-        rel = cfg.get("savePath", "").strip()
-        base = _ez_real(PreviewAnyNode._output_dir())
-        if os.path.isabs(rel):
-            # 绝对路径只允许 output，或本机「选择文件夹」对话框登记过的目录（服务端状态）
-            dirpath = _ez_inside(rel, _pv_save_roots() + [base])
-        else:
-            dirpath = _ez_inside(os.path.join(base, rel), [base])
-        if not dirpath:
-            print(f"[PreviewAny] save path {rel!r} is outside the allowed save folders; saved under output instead")
-            dirpath = base
-        os.makedirs(dirpath, exist_ok=True)
-        return dirpath
-
-    def _save_image_batch(self, entry, cfg, name, sources, fmt, quality, meta):
-        """批次图片存档：默认逐张存图片序列；选「合成视频」或判定为抽帧时，编成一个视频。
-        name_<counter>_NN.<ext>；saved_path 指向第一张，saved_paths 给全部。"""
-        try:
-            dirpath = self._save_target_dir(cfg)
-        except Exception:
-            return entry
-        base, counter = PreviewAnyNode._save_base(cfg, dirpath, name)
-        sf = cfg.get("saveFormats") or {}
-        acfg = sf.get("animated") if isinstance(sf.get("animated"), dict) else {}
-        # 多图保存为是**全局**的（节点 config 的 batchMode）；动图格式走独立的 animated 段
-        mode = str(cfg.get("batchMode") or "auto")
-        if mode == "auto":
-            mode = "video" if entry.get("batch_kind") == "frames" else "images"   # 抽帧 → 视频；批量出图 → 序列
-        if mode == "animation":
-            afmt = str(acfg.get("fmt") or "webp")
-            afps = acfg.get("afps") or 6
-            _al = acfg.get("alossless")
-            aloss = not (_al is False or str(_al).strip().lower() in ("no", "false", "0", "off"))
-            paths = [p for p in (PreviewAnyNode._src_file_of(u) for u in sources) if p and os.path.isfile(p)]
-            res = _encode_frames_animated(paths, afmt, afps, acfg.get("quality") or quality, aloss, acfg.get("method"))
-            if res and res[1].lower() in _SAVE_ALLOWED_EXTS:
-                data, ext = res
-                fname = f"{base}_{counter + 1:05}{ext}"
-                try:
-                    with open(os.path.join(dirpath, fname), "wb") as fh:
-                        fh.write(data)
-                    p = os.path.abspath(os.path.join(dirpath, fname))
-                    entry["saved_path"] = p; entry["saved_name"] = os.path.basename(p); entry["saved_paths"] = [p]
-                    return entry
-                except Exception:
-                    pass
-            # 编不出来就退回图片序列
-        if mode == "video":
-            vcfg = sf.get("video") if isinstance(sf.get("video"), dict) else {}
-            vfmt = str(vcfg.get("fmt") or "") or "mp4"
-            if vfmt not in ("mp4", "webm", "mov", "mkv", "avi"):
-                vfmt = "mp4"
-            paths = [p for p in (PreviewAnyNode._src_file_of(u) for u in sources) if p and os.path.isfile(p)]
-            res = _encode_frames_to_video(paths, entry.get("fps") or vcfg.get("fps") or 24, vfmt, vcfg.get("codec") or "", vcfg.get("crf"))
-            if res and res[1].lower() in _SAVE_ALLOWED_EXTS:
-                data, ext = res
-                fname = f"{base}_{counter + 1:05}{ext}"
-                try:
-                    with open(os.path.join(dirpath, fname), "wb") as fh:
-                        fh.write(data)
-                    p = os.path.abspath(os.path.join(dirpath, fname))
-                    entry["saved_path"] = p; entry["saved_name"] = os.path.basename(p); entry["saved_paths"] = [p]
-                    return entry
-                except Exception:
-                    pass
-            # 编不出来就退回图片序列
-        written = []
-        for i, url in enumerate(sources):
-            data, ext = PreviewAnyNode._image_save_bytes(PreviewAnyNode._src_file_of(url), None, fmt, quality, meta)
-            if data is None or not ext or ext.lower() not in _SAVE_ALLOWED_EXTS:
-                continue
-            fname = f"{base}_{counter + 1:05}_{i + 1:02d}{ext}"
-            try:
-                with open(os.path.join(dirpath, fname), "wb") as fh:
-                    fh.write(data)
-            except Exception:
-                continue
-            written.append(os.path.abspath(os.path.join(dirpath, fname)))
-        if written:
-            entry["saved_path"] = written[0]
-            entry["saved_name"] = os.path.basename(written[0])
-            entry["saved_paths"] = written
-        return entry
-
-    def _maybe_save(self, entry, cfg, name, extra_pnginfo=None):
-        """存档开启时把卡片内容写到 <output>/<savePath>/，并回填 saved_path。
-        图片存档用「原图」（与全屏同一份导出文件），不是预览缩图；PNG 会带上工作流/提示词元数据（对齐内置 Save Image）。"""
-        if not cfg.get("save") or entry.get("save_skip"):
-            return entry      # save_skip：值是从文件加载来的（LoadImage/LoadVideo/LoadAudio/Load3D…），不是本次生成物，无需再存一份
-        data = None
-        ext = None
-        sf = cfg.get("saveFormats") or {}
-        # 视频/音频卡片也带 preview（视频是封面图）：先让它们走各自的媒体分支，别把封面当图片存了
-        if entry.get("preview") and not entry.get("audio") and not entry.get("audio_src") and not entry.get("video") and not entry.get("video_src"):
-            try:
-                img_cfg = sf.get("image")
-                fmt = ""; quality = 95
-                if isinstance(img_cfg, dict):
-                    fmt = str(img_cfg.get("fmt") or "")
-                    try: quality = int(img_cfg.get("quality") or 95)
-                    except Exception: quality = 95
-                meta = PreviewAnyNode._png_meta(extra_pnginfo)
-                sources = entry.get("images") or []
-                if len(sources) > 1:
-                    return self._save_image_batch(entry, cfg, name, sources, fmt or "png", quality, meta)   # 批次逐张存档
-                raw = base64.b64decode(entry["preview"])       # 兜底：预览图（MASK 等没有原图导出时）
-                # 优先用原图文件（_export_image_url 导出的全分辨率 PNG，全屏看的就是它）
-                src_file = PreviewAnyNode._src_file_of(entry.get("image_src"))
-                if not fmt and src_file:      # 「保持原样」：加载进来的原图直接复制，不重编码
-                    with open(src_file, "rb") as fh:
-                        data = fh.read()
-                    ext = os.path.splitext(src_file)[1].lower()
-                else:
-                    data, ext = PreviewAnyNode._image_save_bytes(src_file, raw, fmt or "png", quality, meta)
-            except Exception:
-                data = None
-        elif entry.get("audio") or entry.get("audio_src"):
-            try:
-                raw = None
-                src_path = None
-                if entry.get("audio_src"):
-                    from urllib.parse import urlparse, parse_qs
-                    _q = parse_qs(urlparse(entry["audio_src"]).query)
-                    p = (_q.get("path") or [None])[0]
-                    if not p and _q.get("filename"):     # /view?type=temp&filename=… → 到临时目录取原文件
-                        p = os.path.join(folder_paths.get_temp_directory(), _q["filename"][0])
-                    if p and os.path.exists(p):
-                        src_path = p
-                        with open(p, "rb") as fh:
-                            raw = fh.read()
-                else:
-                    uri = entry["audio"] or ""
-                    if uri.startswith("data:audio/wav;base64,") or (uri.startswith("data:audio/") and "base64," in uri):
-                        raw = base64.b64decode(uri.split(",", 1)[1])
-                if raw:
-                    acfg = sf.get("audio")
-                    afmt = ""; bitrate = "192k"; sr = None
-                    if isinstance(acfg, dict):
-                        afmt = str(acfg.get("fmt") or "")
-                        bitrate = acfg.get("bitrate") or "192k"
-                        sr = acfg.get("sr")
-                    src_ext = os.path.splitext(src_path)[1].lower() if src_path else ""
-                    if not afmt:
-                        afmt = src_ext.lstrip(".") if src_path else "wav"   # 保持原样：加载进来的音频不重编码
-                    if src_path and src_ext == ("." + str(afmt).lower().lstrip(".")) and not sr:
-                        data, ext = raw, src_ext          # 格式一致且没改采样率 → 直接落盘，不重新编码
-                    else:
-                        res = _encode_audio(raw, afmt, bitrate, sr)
-                        if res:
-                            data, ext = res
-            except Exception:
-                data = None
-        elif entry.get("video"):
-            try:
-                uri = entry["video"]
-                if uri.startswith("data:video/") and "base64," in uri:
-                    raw = base64.b64decode(uri.split(",", 1)[1])
-                    vcfg = sf.get("video")
-                    vfmt = ""; vcodec = ""; crf = None; fps = None
-                    if isinstance(vcfg, dict):
-                        vfmt = str(vcfg.get("fmt") or "")
-                        vcodec = vcfg.get("codec") or ""
-                        crf = vcfg.get("crf"); fps = vcfg.get("fps")
-                    res = _encode_video(raw, vfmt, vcodec, crf, fps)
-                    if res:
-                        data, ext = res
-            except Exception:
-                data = None
-        elif entry.get("video_src"):
-            try:
-                from urllib.parse import urlparse, parse_qs
-                u = entry["video_src"]
-                src = (parse_qs(urlparse(u).query).get("path") or [None])[0]
-                if src and os.path.isfile(src):
-                    with open(src, "rb") as fh:
-                        raw = fh.read()
-                    vcfg = sf.get("video")
-                    vfmt = ""; vcodec = ""; crf = None; fps = None
-                    if isinstance(vcfg, dict):
-                        vfmt = str(vcfg.get("fmt") or "")
-                        vcodec = vcfg.get("codec") or ""
-                        crf = vcfg.get("crf"); fps = vcfg.get("fps")
-                    src_ext = os.path.splitext(src)[1].lower()
-                    if not vfmt:
-                        vfmt = src_ext.lstrip(".")      # 保持原样：加载进来的视频不重编码（容器相同就直接复制，保音轨）
-                    if src_ext == ("." + str(vfmt).lower().lstrip(".")) and not vcodec and not crf and not fps:
-                        data, ext = raw, src_ext          # 格式一致且没改编码/画质/帧率 → 直接落盘（保留音轨）
-                    else:
-                        res = _encode_video(raw, vfmt, vcodec, crf, fps)
-                        if res:
-                            data, ext = res
-            except Exception:
-                data = None
-        elif entry.get("save_src"):
-            # 3D / MESH：源文件直接复制到存档目录（生成的 3D 跟着自动存档走）。
-            # 不做格式转换（safetensors→gguf 那种要重新导出），
-            # 选了别的扩展名时按源文件格式落盘，避免写出一个名不副实的文件。
-            try:
-                src = entry["save_src"]
-                if os.path.isfile(src):
-                    with open(src, "rb") as fh:
-                        raw = fh.read()
-                    src_ext = os.path.splitext(src)[1].lower()
-                    mcfg = sf.get("model3d") if entry.get("type") in ("MODEL_3D", "FILE_3D") else sf.get("model")
-                    want = ""
-                    if isinstance(mcfg, dict):
-                        want = str(mcfg.get("fmt") or "").lower().lstrip(".")
-                    ext = ("." + want) if want else src_ext
-                    if want and ext != src_ext:
-                        ext = src_ext
-                    data = raw
-            except Exception:
-                data = None
-        elif entry.get("value"):
-            _txt = str(entry.get("full_value") or entry["value"])
-            if entry.get("meta"):                     # 模型卡片：摘要正文 + 元数据 JSON，都写进信息文本
-                _txt += "\n\n" + str(entry["meta"])
-            data = _txt.encode("utf-8")
-            tf = sf.get("text")
-            text_fmt = tf.get("fmt", "txt") if isinstance(tf, dict) else (tf if isinstance(tf, str) else "txt")
-            ext = "." + (text_fmt if text_fmt in ("txt", "md", "json", "csv", "log", "html") else "txt")
-        if data is None:
-            return entry
-        if not ext or ext.lower() not in _SAVE_ALLOWED_EXTS:
-            return entry      # 只写媒体/文本文档后缀；未知格式（.bat/.desktop/.sh 等）不落盘
-        try:
-            dirpath = self._save_target_dir(cfg)
-            base, counter = PreviewAnyNode._save_base(cfg, dirpath, name)
-            fname = f"{base}_{counter + 1:05}{ext}"
-            fpath = os.path.join(dirpath, fname)
-            with open(fpath, "wb") as fh:
-                fh.write(data)
-            entry["saved_path"] = os.path.abspath(fpath)
-            entry["saved_name"] = fname
-        except Exception:
-            pass
-        return entry
-
-    @staticmethod
-    def _latent_summary(latent, max_len=_PREVIEW_MAX_VALUE_LEN):
-        if isinstance(latent, dict):
-            samples = latent.get("samples")
-            if isinstance(samples, torch.Tensor):
-                return f"Latent tensor shape={list(samples.shape)}, dtype={samples.dtype}", None
-            return f"Latent dict with keys: {', '.join(latent.keys())}", None
-        return _pv_truncate(str(latent), max_len)
-
-    @staticmethod
-    @staticmethod
-    def _python_to_json(obj):
-        """递归把 Python 字面量字符串（含单引号 dict/list/tuple/set）解析成原生 JSON 结构，供树展开。"""
-        import ast
-        if isinstance(obj, str):
-            s = obj.strip()
-            if s and (s.startswith("{") or s.startswith("[") or s.startswith("(") or s.startswith("set(")):
-                try:
-                    return PreviewAnyNode._python_to_json(ast.literal_eval(s))
-                except Exception:
-                    return obj
-            return obj
-        if isinstance(obj, dict):
-            return {k: PreviewAnyNode._python_to_json(v) for k, v in obj.items()}
-        if isinstance(obj, (list, tuple, set)):
-            return [PreviewAnyNode._python_to_json(v) for v in obj]
-        return obj
-
-    @staticmethod
-    def _safe_json(obj, max_len=_PREVIEW_MAX_VALUE_LEN):
-        try:
-            s = json.dumps(obj, default=str, ensure_ascii=False)
-        except Exception:
-            s = str(obj)
-        return _pv_truncate(s, max_len)
-
-    @staticmethod
-    def _extract_name(value, type_name):
-        try:
-            if type_name == "MODEL":
-                init = getattr(value, "cached_patcher_init", None)
-                if init is None:
-                    return None
-                path = init[1][0]
-                return os.path.splitext(os.path.basename(path))[0]
-            if type_name == "CLIP":
-                patcher = getattr(value, "patcher", None)
-                init = getattr(patcher, "cached_patcher_init", None)
-                if init is None:
-                    return None
-                paths = init[1][0]
-                if isinstance(paths, (list, tuple)):
-                    return ", ".join(os.path.splitext(os.path.basename(p))[0] for p in paths)
-                return os.path.splitext(os.path.basename(paths))[0]
-            if type_name == "VAE":
-                patcher = getattr(value, "patcher", None)
-                init = getattr(patcher, "cached_patcher_init", None)
-                if init is None:
-                    return None
-                path = init[1][0]
-                return os.path.splitext(os.path.basename(path))[0]
-        except Exception:
-            return None
-        return None
-
-
 _register_preset_routes("EzFlex-NodeSwitchMaster", "/nodeswitch_master/presets", with_ratios=False)
 _register_preset_routes("EzFlex-MainControl", "/main_control/presets", with_ratios=False)
 _register_preset_routes("EzFlex-ParamPresetControl", "/param_preset_control/presets", with_ratios=False)
-
-
-
-
 def _py_literal(s):
     import ast
     try:
         return ast.literal_eval(s)
     except Exception:
         return s
-
-
 def _norm_param_value(value, ptype):
     """按类型把字符串值解析成原生（有效）；不符合保留字符串。"""
     if not isinstance(value, str):
@@ -4078,192 +1426,12 @@ def _norm_param_value(value, ptype):
             return v if isinstance(v, dict) else value
         return value
     return value  # string / complex
-
-
-def _bitrate_int(s):
-    """码率：接受 '192k' / '192000' / 192（裸数字 < 1000 当 kbps）。"""
-    try:
-        if isinstance(s, (int, float)):
-            n = int(s)
-            return n * 1000 if 0 < n < 1000 else n
-        s = str(s).strip().lower()
-        if s.endswith("k"):
-            return int(float(s[:-1]) * 1000)
-        n = int(float(s))
-        return n * 1000 if 0 < n < 1000 else n
-    except Exception:
-        return None
-
-
-def _encode_audio(data_bytes, fmt, bitrate=None, sample_rate=None):
-    """把 WAV 字节按所选格式/码率/采样率重编码（av）。"""
-    try:
-        import av
-        from io import BytesIO
-        fmt = (fmt or "wav").lower()
-        codec = {"wav": "pcm_s16le", "mp3": "libmp3lame", "flac": "flac", "ogg": "libvorbis", "m4a": "aac", "aac": "aac", "opus": "libopus"}.get(fmt)
-        if not codec:
-            return data_bytes, "." + fmt
-        container = {"m4a": "mp4", "aac": "adts", "opus": "ogg"}.get(fmt, fmt)   # pyav 的容器名和扩展名不总一样
-        oidx = BytesIO()
-        fsrc = BytesIO(data_bytes); fsrc.seek(0)
-        with av.open(fsrc, mode="r") as inp:
-            with av.open(oidx, mode="w", format=container) as out:
-                ostream = out.add_stream(codec)
-                if fmt not in ("wav", "flac"):   # 无损格式码率由内容决定，设了也没用
-                    br = _bitrate_int(bitrate)
-                    if br:
-                        ostream.bit_rate = br
-                if sample_rate:
-                    try:
-                        ostream.sample_rate = int(sample_rate)
-                    except Exception:
-                        pass
-                for frame in inp.decode(audio=0):
-                    for p in ostream.encode(frame):
-                        out.mux(p)
-                for p in ostream.encode():
-                    out.mux(p)
-        oidx.seek(0)
-        return oidx.getvalue(), "." + fmt
-    except Exception:
-        return None
-
-
-def _encode_frames_animated(paths, fmt, fps, quality=None, lossless=True, method=None):
-    """一批帧 → 动图（webp / png / gif），参数对齐内置 SaveAnimatedWEBP / SaveAnimatedPNG。"""
-    try:
-        if not paths:
-            return None
-        from io import BytesIO
-        from PIL import Image
-        fmt = (fmt or "webp").lower()
-        if fmt not in ("webp", "png", "gif"):
-            fmt = "webp"
-        imgs = []
-        for p in paths:
-            im = Image.open(p)
-            imgs.append(im.convert("RGB" if fmt == "gif" else "RGBA"))
-        if not imgs:
-            return None
-        dur = max(10, int(round(1000.0 / (float(fps) or 6.0))))
-        buf = BytesIO()
-        kw = {"save_all": True, "append_images": imgs[1:], "duration": dur, "loop": 0}
-        if fmt == "webp":
-            kw["lossless"] = bool(lossless)
-            if not lossless and quality:
-                kw["quality"] = int(quality)
-            m = {"fastest": 0, "default": 4, "slowest": 6}.get(str(method or ""))
-            if m is not None:
-                kw["method"] = m
-            imgs[0].save(buf, format="WEBP", **kw)
-            return buf.getvalue(), ".webp"
-        if fmt == "png":
-            imgs[0].save(buf, format="PNG", **kw)
-            return buf.getvalue(), ".png"
-        imgs[0].save(buf, format="GIF", **kw)
-        return buf.getvalue(), ".gif"
-    except Exception:
-        return None
-
-
-def _encode_frames_to_video(paths, fps, fmt="mp4", codec="", crf=None):
-    """一串图片帧 → 一个视频（内置 SaveVideo / SaveWEBM 做的事，PreviewAny 抽帧存档用）。"""
-    try:
-        if not paths:
-            return None
-        import av
-        from io import BytesIO
-        fmt = (fmt or "mp4").lower()
-        # 没选编码器时按容器给默认：webm 用 vp9，其它用 h264（原来一律 libx264，写 webm 会失败）
-        codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec) or ("libvpx-vp9" if fmt == "webm" else "libx264")
-        container = {"mkv": "matroska", "mov": "mov", "avi": "avi"}.get(fmt, fmt)
-        rate = float(fps) if fps else 24
-        oidx = BytesIO()
-        with av.open(oidx, mode="w", format=container) as out:
-            stream = out.add_stream(codec_name, rate=rate)
-            stream.pix_fmt = "yuv420p"
-            if crf:
-                try:
-                    stream.options = {"crf": str(int(crf))}
-                except Exception:
-                    pass
-            for p in paths:
-                with av.open(p, mode="r") as im:
-                    for frame in im.decode(video=0):
-                        frame.pts = None
-                        for pkt in stream.encode(frame):
-                            out.mux(pkt)
-            for pkt in stream.encode():
-                out.mux(pkt)
-        oidx.seek(0)
-        return oidx.getvalue(), "." + fmt
-    except Exception:
-        return None
-
-
-def _encode_video(data_bytes, fmt, codec="h264", crf=None, fps=None):
-    """按所选容器/编码器/CRF/帧率重编码视频。**音轨跟着一起走**（内置 Save Video 也是这么做的）：
-    优先原样复制音轨（不重编码），容器不吃这个音频编码时再转码；实在不行才退回纯视频。"""
-    try:
-        import av
-        from io import BytesIO
-        fmt = (fmt or "webm").lower()
-        # 没选编码器时按容器给默认（空 codec 原来落成 libvpx-vp9，写 mp4 会失败）
-        codec_name = {"h264": "libx264", "vp9": "libvpx-vp9", "av1": "libsvtav1"}.get(codec) or ("libvpx-vp9" if fmt == "webm" else "libx264")
-        container = {"mkv": "matroska", "mov": "mov", "avi": "avi"}.get(fmt, fmt)
-        oidx = BytesIO()
-        fsrc = BytesIO(data_bytes); fsrc.seek(0)
-        with av.open(fsrc, mode="r") as inp:
-            vstream = next((s for s in inp.streams if s.type == "video"), None)
-            if vstream is None:
-                return None
-            astream = next((s for s in inp.streams if s.type == "audio"), None)
-            rate = float(fps) if fps else (float(vstream.average_rate) if vstream.average_rate else 24)
-            with av.open(oidx, mode="w", format=container) as out:
-                ostream = out.add_stream(codec_name, rate=rate)
-                ostream.pix_fmt = "yuv420p"
-                if crf:
-                    try:
-                        ostream.options = {"crf": str(int(crf))}
-                    except Exception:
-                        pass
-                oaudio = None
-                if astream is not None:
-                    try:
-                        oaudio = out.add_stream_from_template(astream)   # 直接复制音轨（不重编码）
-                    except Exception:
-                        try:
-                            acodec = "libopus" if fmt in ("webm", "ogg") else ("libmp3lame" if fmt == "avi" else "aac")
-                            oaudio = out.add_stream(acodec, rate=astream.rate)
-                        except Exception:
-                            oaudio = None
-                streams = [vstream] + ([astream] if astream is not None else [])
-                for packet in inp.demux(*streams):
-                    if packet.stream is vstream:
-                        for frame in packet.decode():
-                            for p in ostream.encode(frame):
-                                out.mux(p)
-                    elif astream is not None and packet.stream is astream and oaudio is not None:
-                        try:
-                            packet.stream = oaudio
-                            out.mux(packet)
-                        except Exception:
-                            pass
-                for p in ostream.encode():
-                    out.mux(p)
-                if astream is not None and oaudio is not None:
-                    try:
-                        for p in oaudio.encode():
-                            out.mux(p)
-                    except Exception:
-                        pass
-        oidx.seek(0)
-        return oidx.getvalue(), "." + fmt
-    except Exception:
-        return None
-
-
+_FMTS_BY_VIDEO_CODEC = {
+    "h264": ("mp4", "mov", "avi", "mkv"),
+    "h265": ("mp4", "mov", "mkv"),
+    "vp9": ("webm", "mkv"),
+    "av1": ("mp4", "webm", "mkv"),
+}
 def parse_param_groups(config):
     """把 ParamPresetControl 的 config JSON 解析成参数组列表（与前端面板数据同构）。"""
     if isinstance(config, str):
@@ -4300,14 +1468,12 @@ def parse_param_groups(config):
             ],
         })
     return groups
-
-
 def param_value_to_comfy(value, ptype):
     """把面板里的参数值按类型严格转成 ComfyUI 端口值；复杂类型 JSON 序列化为 STRING。
 
     bool：按「非空/非零即真」的 Python 真值语义——"2"/"abcd"→True；只有明确的假表示
     ("", "0", "false", "no", "off", "none", "null") 或 0 才为 False。
-    int/float 宽松解析（int(val)/float(val)），解析失败回退 0，避免下游抛错。
+    int/float 宽松解析（int(val)/float(val)）；解析失败**保留原字符串**（不静默变 0），让下游按字符串报错。
     """
     if ptype == "int":
         if isinstance(value, str):
@@ -4350,45 +1516,52 @@ def param_value_to_comfy(value, ptype):
         except (TypeError, ValueError):
             return str(value)
     return str(value)
-
-
+# 动态端口上限：路由（前端同步）与各节点 run() 共用这一个数。以前 128/256/512 混用，
+# 超过上限时会出现「前端能加卡、执行时少口」的不一致。
+_EZ_OUTPUT_CAP = 512
+_EZ_TYPE_LOCK = threading.Lock()
 def _ez_sync_dynamic_types(cls, names):
-    """动态输出节点的类 RETURN_TYPES/RETURN_NAMES 同步（前端结构变化时 POST 调，run() 也调）。
+    """把「当前端口名」同步到类级 RETURN_TYPES / RETURN_NAMES（前端端口变化时 POST 调，run() 也调）。
 
-    ⚠️ 类的 RETURN_TYPES 是**全局共享的一份**（`execution.py:934` 用「上游类 RETURN_TYPES[链接槽位]」取类型
-    再和下游输入比对），而同屏多个同类型节点各自的端口数不同 —— 谁最后同步谁说了算。老写法「精确同步」一收缩，
-    另一个实例的高位槽就被挤掉：那条链接一校验就取越界，报错是看不懂的 `tuple index out of range`
-    （表现成「EzFlex-ParamPresetOutput 无法校验 input_1」）。两条不变量：
-
-      ① 长度**只增不减**：收缩时保留原表尾，不碰别的实例的高位槽；
-      ② 动态槽类型统一 `*`（ANY）：同槽位在不同实例可能是不同类型，写死任一个都会让另一个误报类型不匹配；
-         真实数据来自 run() 的返回元组，`*` 只放宽校验。
+    背景：类表全局只有一份（execution.py:947 校验链接时按槽位读类表的 RETURN_TYPES），
+    而同类型多个实例的端口数可能不同。两条不变量（勿改）：
+      ① 长度只增不减 —— 收缩会挤掉另一实例的高位槽，那条链接校验时越界；
+      ② 槽位类型统一 `*` —— 同一槽位在不同实例可能是不同类型，写死任一个都会误伤另一个。
+    因此它只影响 /object_info 与校验放行；节点真实返回值来自 run() 的元组，与此无关。
+    ★ 高位槽补**通用名**，不能沿用上一个实例的名字（那会让 /object_info 出现别人的端口名）。
     """
-    names = list(names or [])
-    prev_types = tuple(getattr(cls, "RETURN_TYPES", ()) or ())
-    prev_names = tuple(getattr(cls, "RETURN_NAMES", ()) or ())
-    n = max(len(names), len(prev_types))
-    if len(names) < n:
-        names += list(prev_names[len(names):n])
-        names += [f"Output {i + 1}" for i in range(len(names), n)]
-    cls.RETURN_TYPES = _DynamicOutputTypes(["*"] * n)
-    cls.RETURN_NAMES = tuple(names)
+    names = list(names or [])[:_EZ_OUTPUT_CAP]
+    with _EZ_TYPE_LOCK:
+        prev_types = tuple(getattr(cls, "RETURN_TYPES", ()) or ())[:_EZ_OUTPUT_CAP]
+        n = min(max(len(names), len(prev_types)), _EZ_OUTPUT_CAP)
+        if len(names) < n:
+            names += [f"Output {i + 1}" for i in range(len(names), n)]
+        cls.RETURN_TYPES = _DynamicOutputTypes(["*"] * n)
+        cls.RETURN_NAMES = tuple(names)
+def _ez_apply_dynamic_ports(node, names, outputs):
+    """run() 的动态端口统一收口：类表只增不减 + 返回值补齐到类表长度。
 
-
+    类表是**全局一份**、`execution.py:947` 校验链接时按槽位取它；同类型两个实例的端口数可能不同。
+    以前每个实例在 run() 里用自己的长度**覆盖**类表（后跑的挤短先跑的），违背了 _ez_sync_dynamic_types
+    的「只增不减」约定，也让 /object_info 的端口数随执行顺序跳变。这里改成：
+      ① 类表走 _ez_sync_dynamic_types（只增不减，槽位类型恒 `*`）；
+      ② 返回值补齐到类表长度（多出的槽为 None），高位槽的连线取值时不会越界。
+    只改类表和返回值，不碰 node.outputs / 连线。
+    """
+    cls = type(node)
+    _ez_sync_dynamic_types(cls, (names or ())[:_EZ_OUTPUT_CAP])
+    outs = tuple(outputs or ())[:_EZ_OUTPUT_CAP]
+    # 列表型输出（OUTPUT_IS_LIST）不能补 None：merge_result_data 对 is_list 槽会 value.extend(o[i])，
+    # extend(None) 直接抛错。这类节点只对齐类表、不补长度（它的端口数就是真实槽位数）。
+    if getattr(node, "OUTPUT_IS_LIST", None) is None:
+        total = len(getattr(cls, "RETURN_TYPES", ()) or ())
+        if len(outs) < total:
+            outs = outs + (None,) * (total - len(outs))
+    return outs
 def _ppc_output_names(groups):
     """按参数组顺序算 ParamPresetControl 的输出名（一个分组一个 EZFLEX_PARAM_GROUP 端口）。"""
     groups = groups or []
     return tuple((g.get("name") or "").strip() or f"Group {i + 1}" for i, g in enumerate(groups))
-
-
-def _ppo_output_names(params):
-    """按输出顺序算 ParamPresetOutput 的输出名：第 0 个固定为整组数据，其后每个激活参数一个端口。"""
-    names = ["Data combo"]
-    for i, p in enumerate(params or []):
-        names.append((p.get("name") or "").strip() or f"Parameter {i + 1}")
-    return tuple(names)
-
-
 def _ppo_effective_params(group):
     """参数组实际输出的参数：全部绿色(启用)参数；若组设了 out（单个参数 id）则只保留该参数。"""
     params = (group or {}).get("params") or []
@@ -4397,8 +1570,6 @@ def _ppo_effective_params(group):
     if out != "all":
         active = [p for p in active if str(p.get("id")) == str(out)]
     return active
-
-
 def _parse_local_off(config):
     """解析 Output 节点 config 里的局部禁用参数 id 集合（Output 面板自身启/禁用，不写回控制节点）。"""
     if isinstance(config, str):
@@ -4414,8 +1585,6 @@ def _parse_local_off(config):
         return set()
     off = data.get("off", [])
     return {str(x) for x in off} if isinstance(off, list) else set()
-
-
 def _ppo_disabled_value(ptype):
     """禁用/未选中参数输出“中性默认值”（int→0、float→0.0、bool→0、complex→0，其它→空串）。"""
     if ptype in ("int", "bool", "complex"):
@@ -4423,265 +1592,6 @@ def _ppo_disabled_value(ptype):
     if ptype == "float":
         return 0.0
     return ""  # string/tuple/list/set/dictionary -> 空串占位
-
-
-async def _ppc_outputs(req):
-    """前端在分组增删/排序后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前端口排列（校验用）。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        groups = data.get("groups", [])
-        groups = groups[:128] if isinstance(groups, list) else []
-        _ez_sync_dynamic_types(ParamPresetControlNode, _ppc_output_names(groups))
-        return _web.json_response({"ok": True, "types": list(ParamPresetControlNode.RETURN_TYPES),
-                                   "names": list(ParamPresetControlNode.RETURN_NAMES)})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ppo_outputs(req):
-    """前端在连接变化/参数增删排序后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前参数排列（校验用）。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        params = data.get("params", [])
-        params = params[:256] if isinstance(params, list) else []
-        _ez_sync_dynamic_types(ParamPresetOutputNode, _ppo_output_names(params))
-        return _web.json_response({"ok": True, "types": list(ParamPresetOutputNode.RETURN_TYPES),
-                                   "names": list(ParamPresetOutputNode.RETURN_NAMES)})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-try:
-    PromptServer.instance.routes.post("/param_preset_control/outputs")(_ppc_outputs)
-    PromptServer.instance.routes.post("/param_preset_output/outputs")(_ppo_outputs)
-except Exception:
-    pass
-
-
-# ===== EzFlex-PreviewAny：文件系统辅助路由（存档位置浏览 / 打开文件夹选中文件）=====
-async def _preview_any_folders(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    base = PreviewAnyNode._output_dir()
-    rel = (req.query.get("path") or "").strip()
-    full = _ez_inside(os.path.join(base, rel), [_ez_real(base)]) or base
-    if os.path.isfile(full):
-        full = os.path.dirname(full)
-    try:
-        folders = []
-        for entry in sorted(os.listdir(full)):
-            if os.path.isdir(os.path.join(full, entry)):
-                folders.append(entry)
-        rel_abs = os.path.relpath(full, base)
-        if rel_abs == ".":
-            rel_abs = ""
-        return _web.json_response({"base": base, "path": rel_abs, "folders": folders})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _preview_any_open(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        path = str(data.get("path") or "").strip()
-        base = PreviewAnyNode._output_dir()
-        if os.path.isabs(path):
-            full = os.path.normpath(path)
-        else:
-            full = os.path.normpath(os.path.join(base, path))
-        import subprocess
-        if os.path.exists(full):
-            if os.name == "nt":
-                subprocess.Popen(["explorer", "/select," + full])
-            else:
-                subprocess.Popen(["xdg-open", full if os.path.isfile(full) else os.path.dirname(full)])
-        return _web.json_response({"ok": True})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-def _pv_save_roots_file():
-    return _ezflex_user_file('ezflex_save_roots.json')
-
-
-def _pv_save_roots():
-    """PreviewAny 存档允许的根外目录：只记本机「选择文件夹」对话框选过的目录（服务端状态，不是请求参数）。"""
-    fn = _pv_save_roots_file()
-    out = []
-    if fn and os.path.isfile(fn):
-        try:
-            with open(fn, 'r', encoding='utf-8') as fh:
-                data = json.load(fh)
-            if isinstance(data, list):
-                for x in data:
-                    r = _ez_real(x)
-                    if r and os.path.isdir(r):
-                        out.append(r)
-        except Exception:
-            out = []
-    return out
-
-
-def _pv_remember_save_root(path):
-    r = _ez_real(path)
-    if not r or not os.path.isdir(r):
-        return
-    cur = _pv_save_roots()
-    if r in cur:
-        return
-    fn = _pv_save_roots_file()
-    if not fn:
-        return
-    cur.append(r)
-    try:
-        os.makedirs(os.path.dirname(fn), exist_ok=True)
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump(cur, fh, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-async def _preview_any_pick_folder(req):
-    """弹 Windows 原生“选择文件夹”对话框，默认 ComfyUI 输出目录。仅本机客户端。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    base = PreviewAnyNode._output_dir()
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        path = filedialog.askdirectory(initialdir=base, title="Select save location")
-        root.destroy()
-        if path:
-            _pv_remember_save_root(path)
-            return _web.json_response({"ok": True, "path": os.path.normpath(path), "base": base})
-        return _web.json_response({"ok": False})
-    except Exception as e:
-        return _web.json_response({"ok": False, "error": str(e)}, status=500)
-
-
-# 允许这条「媒体/模型直链」服务的扩展名：根内文件以前**任何**后缀都能读（含 .json/.txt），
-# 收紧到媒体/模型相关后缀，避免把允许目录里的其它文件顺出去。
-_MEDIA_SERVE_EXT = {
-    ".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v",
-    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff",
-    ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus", ".aac", ".wma",
-    ".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".3ds", ".dae", ".blend",
-    ".splat", ".spz", ".ksplat", ".bin", ".mtl", ".ktx2", ".hdr", ".exr",
-}
-
-
-async def _preview_any_serve_video(req):
-    """流式返回媒体文件（Range 支持）。只服务「允许目录」内的文件；根外文件仅「本机预览」才复制进临时目录
-    再服务 —— 否则远端能借这条路由把任意文件当视频读走。"""
-    path = req.query.get("path", "").strip()
-    src = _ez_inside(path)
-    if not src:
-        if not _ez_local(req):
-            return _web.json_response({"error": "out of allowed roots"}, status=403)
-        src = _ez_adopt_to_temp(path)
-    if not src or not os.path.isfile(src):
-        return _web.json_response({"error": "not found"}, status=404)
-    if os.path.splitext(src)[1].lower() not in _MEDIA_SERVE_EXT:
-        return _web.json_response({"error": "unsupported file type"}, status=415)
-    return _web.FileResponse(src)
-
-
-async def _preview_any_static(req):
-    """serve 插件 web/ 目录（供前端本地导入 three.js 与加载器），仅白名单相对路径。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    rel = req.match_info.get("path", "")
-    root = _ez_real(os.path.join(os.path.dirname(__file__), "web"))
-    full = _ez_inside(os.path.join(root, rel), [root])
-    if not full or not os.path.isfile(full):
-        return _web.json_response({"error": "not found"}, status=404)
-    return _web.FileResponse(full)
-
-
-async def _preview_any_fs(req):
-    """按绝对路径 serve 文件（用于 3D 模型及其外部贴图/缓冲，使相对路径能正确解析）。仅本地路径。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    from urllib.parse import unquote
-    full = _ez_inside(unquote(req.match_info.get("path", "")))
-    if full and os.path.isfile(full):
-        return _web.FileResponse(full)
-    # 兜底：贴图/缓冲常在模型同目录的子文件夹（Textures/Materials），在该目录里按 basename 找（仍在允许目录内）
-    if full:
-        try:
-            base = os.path.basename(full)
-            base_dir = os.path.dirname(full)
-            if base and base_dir and os.path.isdir(base_dir):
-                for root, _dirs, files in os.walk(base_dir):
-                    if base in files:
-                        hit = _ez_inside(os.path.join(root, base))
-                        if hit:
-                            return _web.FileResponse(hit)
-        except Exception:
-            pass
-    return _web.json_response({"error": "not found"}, status=404)
-
-
-async def _preview_any_outputs(req):
-    """前端在 PreviewAny 连接数变化后 POST，把类 RETURN_TYPES/RETURN_NAMES 同步成当前输出数（校验用）。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        count = int(data.get("count", 0))
-        count = max(0, min(count, _PREVIEW_MAX))
-        PreviewAnyNode.RETURN_TYPES = _DynamicOutputTypes("*" for _ in range(count))
-        PreviewAnyNode.RETURN_NAMES = tuple(f"output_{i}" for i in range(1, count + 1))
-        return _web.json_response({"ok": True, "types": list(PreviewAnyNode.RETURN_TYPES), "names": list(PreviewAnyNode.RETURN_NAMES)})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-try:
-    PromptServer.instance.routes.get("/preview_any/folders")(_preview_any_folders)
-    PromptServer.instance.routes.post("/preview_any/open")(_preview_any_open)
-    PromptServer.instance.routes.post("/preview_any/pick_folder")(_preview_any_pick_folder)
-    PromptServer.instance.routes.get("/preview_any/serve_video")(_preview_any_serve_video)
-    PromptServer.instance.routes.get("/preview_any/serve_3d")(_preview_any_serve_video)
-    PromptServer.instance.routes.get("/preview_any/fs/{path:.*}")(_preview_any_fs)
-    PromptServer.instance.routes.get("/preview_any/3d/{path:.*}")(_preview_any_static)
-    PromptServer.instance.routes.post("/preview_any/outputs")(_preview_any_outputs)
-except Exception:
-    pass
-
-
-# ===== EzFlex-PromptHelper：提示词卡片合并节点 =====
-# 输入：固定 clip(单 CLIP) + 动态「综合媒体」端口(red ANY，可接图像/视频/音频/3D 模型等，前端连接后自动补一个空槽)
-#   + 动态「提示词文本」输入 = 卡片数 1:1（card_in_1..N，按顺序链接到提示词卡片）；
-# 输出：固定「合并提示词」STRING（按卡片顺序拼接）+ 动态输出 = 卡片数 1:1（每卡一段 STRING）。
-# 复用 ModelsCombo/ParamPreset/PreviewAny 的动态端口经验：前端按卡片数增删/reuse socket、
-# 更新 origin_slot/target_slot，并 POST /prompt_helper/outputs 同步类 RETURN_TYPES/RETURN_NAMES。
-_PH_MAX_CARDS = 32
-_PH_MAX_MEDIA = 16
-_PH_MAX_VISION_IMAGES = 8   # 一次优化最多随请求发几张图（防止批次/视频帧把请求撑爆）
-_PH_REF_WORDS = {"image": "图片", "video": "视频", "audio": "音频", "model": "模型"}   # 引用标记词回落（前端随卡片带 labels，自定义类型走它自己）
-# 优化调用的系统提示（api / Anthropic / llama 三处共用）：**必须要求保留引用媒体标记** ——
-# 送去优化的正文是未编译的原文（带 @图片1 这类标记），模型若把它翻译/改写/解释掉，规范编译就没得可编了。
-_PH_OPT_SYSTEM = (
-    "You are a helpful assistant that rewrites and enhances the user's prompt for a text/image/video model. "
-    "Output only the enhanced prompt. "
-    "Keep every reference token such as @图片1 / @视频1 / @音频1 exactly as written: do not translate, rename, "
-    "renumber, wrap in parentheses or explain them."
-)
-_PH_VIDEO_MAX_FRAMES = 48   # 视频解码上限（按 ~1fps 抽，覆盖约 48 秒）
-_PH_VIDEO_MAX_EDGE = 512    # 视频帧最长边缩到这个尺寸，控制显存/内存
-
-
-
 def parse_prompt_cards(config):
     """把 PromptHelper 的 config JSON 解析成提示词卡片列表（与前端面板数据同构）。"""
     if isinstance(config, str):
@@ -4720,46 +1630,12 @@ def parse_prompt_cards(config):
             "ruleId": item.get("ruleId") or "",
             "mergeOff": bool(item.get("mergeOff")),          # 「合」关掉 = 不进合并输出
             "liveIn": bool(item.get("liveIn")),              # 实时接收卡：card_in 不覆盖，卡片正文为准（可在卡片里编辑）
+            "loop": bool(item.get("loop")),                  # 循环卡：每一轮都放进合并输出（顺序不变）
+            # 可选「只在这些轮次出现」：缺省必须是 None（= 每轮都放），不能写成 []，否则会变成一轮都不放。
+            "loopIndices": item.get("loopIndices") if isinstance(item.get("loopIndices"), list) else None,
             "rule": item.get("rule") if isinstance(item.get("rule"), dict) else {},   # 前端 syncToConfig 解析好的规范
         })
     return cards
-
-
-def parse_prompt_optimize(config):
-    """把 PromptHelper 的 config JSON 里的「设置」(optimize) 对象解析出来（API/TextGenerate/llama）。"""
-    if isinstance(config, str):
-        if not config.strip():
-            return {"provider": "", "model": "", "apiUrl": "", "apiKey": "", "proxy": "", "textgen": {}, "llama": {}}
-        try:
-            data = json.loads(config)
-        except json.JSONDecodeError:
-            data = {}
-    else:
-        data = config or {}
-    if not isinstance(data, dict):
-        data = {}
-    o = data.get("optimize")
-    if not isinstance(o, dict):
-        o = {}
-    tg = o.get("textgen")
-    ll = o.get("llama")
-    ap = o.get("apiParams")
-    return {
-        "provider": o.get("provider") or "",
-        "model": o.get("model") or "",
-        "apiUrl": o.get("apiUrl") or "",
-        "apiKey": o.get("apiKey") or "",
-        "proxy": o.get("proxy") or "",
-        "autoTextgen": bool(o.get("autoTextgen")),
-        "autoApi": bool(o.get("autoApi")),
-        "autoLlama": bool(o.get("autoLlama")),
-        "clearCache": bool(o.get("clearCache")),
-        "textgen": tg if isinstance(tg, dict) else {},
-        "llama": ll if isinstance(ll, dict) else {},
-        "apiParams": ap if isinstance(ap, dict) else {},
-    }
-
-
 def parse_prompt_rules(config):
     """把 PromptHelper 的 config JSON 里的「规则设置」(rules) 解析出来。
     目前只有「卡片合并规则」：卡片之间插什么分隔符（输入框里写 \\n / \\t / \\r 表示换行/制表，默认换行）。
@@ -4780,8 +1656,6 @@ def parse_prompt_rules(config):
         r = {}
     sep = str(r.get("mergeSep") or "").replace("\\r", "\r").replace("\\n", "\n").replace("\\t", "\t")
     return {"mergeSep": sep or "\n", "ruleId": str(r.get("ruleId") or "none"), "custom": r.get("custom") if isinstance(r.get("custom"), list) else []}
-
-
 def parse_prompt_overall(config):
     """「总体编辑」里那份整体优化内容（所有卡片合并后优化一次的结果），以及是否用它输出。
     与卡片级的 contentOptimized / useOptimized 对应，但作用在节点整体上。"""
@@ -4797,258 +1671,6 @@ def parse_prompt_overall(config):
     if not isinstance(data, dict):
         data = {}
     return {"text": str(data.get("overallOptimized") or ""), "useOptimized": bool(data.get("overallUseOptimized"))}
-
-
-def _ph_compile_card(text, card):
-    """自动编译只做一件事：按节点级规范的 ref 模板替换引用媒体标记
-    （@图片N/@视频N/@音频N/@模型N → 该规范的写法；留空/缺键 = 原样保留）。
-    时间戳与镜头号**不在自动输出里生成** —— 在「提示」气泡里按输入生成，由用户手动复制。"""
-    if not text:
-        return text
-    rule = card.get("rule") if isinstance(card, dict) else None
-    if not isinstance(rule, dict):
-        return text
-    ref = rule.get("ref") if isinstance(rule.get("ref"), dict) else {}
-    labels = rule.get("labels") if isinstance(rule.get("labels"), dict) else {}
-    for kind, tpl in ref.items():
-        tpl = str(tpl or "")
-        if not tpl.strip():   # 留空 = 不编译，标记原样保留
-            continue
-        word = str(labels.get(kind) or _PH_REF_WORDS.get(kind) or kind)
-        text = re.sub("@" + re.escape(word) + r"\s*(\d+)", lambda m, t=tpl: t.replace("{n}", m.group(1)), text)
-    return re.sub(r"[ \t]{2,}", " ", text).strip()
-
-
-def _ph_strip_thinking(generated, prompt):
-    """对齐官方 TextGenerate：开 thinking 时结果里带 <think>…</think> 推理段，插件输出的是提示词，
-    要把推理段去掉只留最终文本（与官方第二输出 thinking 的拆分规则一致）。"""
-    reasoning, sep, text = str(generated or "").partition("</think>")
-    if sep and (reasoning.lstrip().startswith("<think>") or str(prompt or "").rstrip().endswith("<think>")):
-        return text
-    return generated
-
-
-def _ph_clip_generate(clip, prompt, tg, media=None):
-    """用已连接的 text-gen CLIP 按 TextGenerate 同款参数生成文本（供 run 期内自动优化）。
-    参数与官方 comfy_extras/nodes_textgen.py 的 TextGenerate 对齐：system_prompt / mtp / thinking。
-    若连接的 CLIP 不支持文本生成（无 generate / tokenize 签名不兼容），抛清晰错误，便于排查。
-    media 字典可带 image/video/audio（来自综合媒体输入），随 prompt 一起喂给 text-gen CLIP（如 Qwen-VL/Gemma 可看图反推/扩写）。"""
-    if not hasattr(clip, "generate"):
-        raise ValueError(
-            "this CLIP does not support text generation: TextGenerate only works with text-gen encoders such as Gemma/Qwen3-VL/flux2; "
-            "a regular stable_diffusion CLIP has no generate method. Use a text-gen CLIP instead, or switch to the API/llama prompt optimizer."
-        )
-    media = media or {}
-    img = _ph_concat_images(media.get("images") or ([] if media.get("image") is None else [media.get("image")]))
-    vinfo = media.get("video")
-    if isinstance(vinfo, dict):
-        vid, vfps = vinfo.get("frames"), vinfo.get("fps")
-    else:
-        vid, vfps = vinfo, None
-    aud = media.get("audio")
-    use_tpl = bool(tg.get("use_default_template", True))
-    thinking = bool(tg.get("thinking", False))
-    system_prompt = str(tg.get("system_prompt") or "").strip() if use_tpl else ""
-    vkw = {"fps": vfps} if (vid is not None and vfps) else {}   # 帧率告诉编码器（Gemma4 按 fps 抽 1fps）
-    tok_kwargs = {"skip_template": not use_tpl, "min_length": 1, "thinking": thinking, "image": img, "video": vid, "audio": aud, **vkw}
-    if system_prompt:
-        tok_kwargs["system_prompt"] = system_prompt   # 官方新增：替换模型内置 system turn（仅在用默认模板时）
-    try:
-        tokens = clip.tokenize(prompt, **tok_kwargs)
-    except TypeError:
-        try:
-            tokens = clip.tokenize(prompt, skip_template=not use_tpl, min_length=1, thinking=thinking)
-        except TypeError:
-            tokens = clip.tokenize(prompt)
-    do_sample = str(tg.get("sampling_mode", "on")) == "on"
-    # comfy 的 generate 在 do_sample 时要求 seed 是整数（None 会让 torch manual_seed 报错）；0/空 = 每次随机。
-    seed = int(_ph_num(tg.get("seed"), 0))
-    if do_sample and seed == 0:
-        seed = random.randint(0, 0xffffffffffffffff)
-    # 官方 TextGenerate 的 mtp：off=False / auto=True / 2-5 固定草稿深度（无 MTP 权重时无副作用）。
-    mtp_raw = str(tg.get("mtp") or "auto").strip().lower()
-    mtp = False if mtp_raw == "off" else (int(mtp_raw) if mtp_raw in ("2", "3", "4", "5") else True)
-    gen_kwargs = dict(
-        do_sample=do_sample,
-        max_length=int(_ph_num(tg.get("max_length"), 512)),
-        temperature=_ph_num(tg.get("temperature"), 0.7),
-        top_k=int(_ph_num(tg.get("top_k"), 64)),
-        top_p=_ph_num(tg.get("top_p"), 0.95),
-        min_p=_ph_num(tg.get("min_p"), 0.05),
-        repetition_penalty=_ph_num(tg.get("repetition_penalty"), 1.05),
-        presence_penalty=_ph_num(tg.get("presence_penalty"), 0.0),
-        seed=seed,
-    )
-    try:
-        if "mtp" in inspect.signature(clip.generate).parameters:
-            gen_kwargs["mtp"] = mtp   # 旧版 ComfyUI 没这个参数：有才发，避免 TypeError
-    except (TypeError, ValueError):
-        pass
-    gen = clip.generate(tokens, **gen_kwargs)
-    return _ph_strip_thinking(clip.decode(gen), prompt)
-
-
-# ===== 按「设置」里的 CLIP 路径+类型 自行加载 text-gen CLIP（点击即用，像 llama 一样）=====
-# 模型缓存有上限：装不下就淘汰最旧一个（llama 先 close()，不等 GC）。没上限时远端能靠反复换模型把内存/显存吃满。
-_LLAMA_CACHE_MAX = 2
-_PH_CLIP_CACHE_MAX = 4
-
-
-def _ph_cache_put(cache, key, val, maxn, closer=None):
-    cache[key] = val
-    while len(cache) > maxn:
-        oldest = next(iter(cache))
-        if oldest == key:
-            break
-        old = cache.pop(oldest, None)
-        if old is not None and closer is not None:
-            try:
-                closer(old)
-            except Exception:
-                pass
-
-
-_PH_CLIP_CACHE = {}
-
-
-def _ph_model_roots():
-    """已登记的模型根：ComfyUI 各 models 注册目录 + 用户在「路径设置」里保存过的扫描目录。
-    远端请求只允许在这些根内解析模型路径（防拿任意本地文件当模型读）。"""
-    roots = []
-    try:
-        roots.extend(_ph_md_roots())
-    except Exception:
-        pass
-    try:
-        sp = _ph_scan_paths_load()
-        for k in ("clip_root", "model_root", "mmproj_root"):
-            v = str((sp.get(k) if isinstance(sp, dict) else "") or "").strip()
-            if v:
-                roots.append(v)
-    except Exception:
-        pass
-    return roots
-
-
-def ph_resolve_model(p, extra_roots=None, strict=False):
-    """把用户填的模型路径解析为真实绝对路径（safetensors/gguf/ckpt/pt/bin），支持绝对路径、相对 models 的子路径、仅文件名。
-    extra_roots 为路径设置里用户自定义的扫描目录（可多级）。
-    strict=True（远端请求）时只认「已登记的模型根」：绝对路径必须落在根内，也不接受调用方另给的 extra_roots。"""
-    if not p:
-        return ""
-    p = p.strip().strip('"').strip("'")
-    if strict and extra_roots:
-        extra_roots = None
-    if os.path.isfile(p):
-        ap = os.path.abspath(p)
-        if strict and not (_ez_inside(ap, _ph_model_roots()) or _ez_inside(ap)):
-            return ""
-        return ap
-    if not extra_roots:
-        gr = _ph_global_scan_path('clip_root')
-        extra_roots = [gr] if gr else None
-    if strict:
-        extra_roots = None
-    base = os.path.basename(p)
-    for root in _ph_roots_for(extra_roots):
-        cand = os.path.join(root, p)
-        if os.path.isfile(cand):
-            return os.path.abspath(cand)
-        hit = _ph_root_index(root).get(base)   # 缓存索引：不再每次查询都 os.walk 整个模型根
-        if hit:
-            return hit
-    return ""
-
-
-def _ph_clip_instance(clip_path, clip_type):
-    key = (clip_path, clip_type)
-    if key in _PH_CLIP_CACHE:
-        return _PH_CLIP_CACHE[key]
-    import comfy.sd
-    ct = getattr(comfy.sd.CLIPType, str(clip_type or "stable_diffusion").upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-    try:
-        clip = comfy.sd.load_clip(ckpt_paths=[clip_path],
-                                  embedding_directory=folder_paths.get_folder_paths("embeddings"),
-                                  clip_type=ct, model_options={})
-    except Exception as e:
-        raise ValueError(f"failed to load CLIP: {e} (make sure this is a text-gen text encoder and the CLIP type is correct)") from e
-    _ph_cache_put(_PH_CLIP_CACHE, key, clip, _PH_CLIP_CACHE_MAX)
-    return clip
-
-
-def ph_clear_model_cache():
-    """清空已加载的 CLIP / llama 模型缓存，并尽量把显存真正还给系统。
-    只 clear() 字典只是"丢掉引用"，要等 GC 才回收；llama-cpp 显式 close() 更确定，
-    再补一次 gc + comfy 的 soft_empty_cache()（顺带把 ComfyUI 自己缓存的显存也还回去）。"""
-    import gc
-    for m in list(_LLAMA_CACHE.values()):
-        try:
-            m.close()          # llama-cpp-python：确定性释放模型 / 上下文
-        except Exception:
-            pass
-    try:
-        _LLAMA_CACHE.clear()
-    except Exception:
-        pass
-    try:
-        _PH_CLIP_CACHE.clear()
-    except Exception:
-        pass
-    gc.collect()
-    try:
-        import comfy.model_management
-        comfy.model_management.soft_empty_cache()
-    except Exception:
-        pass
-
-
-def ph_gen_unload_after():
-    """生图（预览图）批次全部跑完后调用：把这一批工作流加载的 checkpoint/UNet/VAE/LoRA 真卸掉，
-    并把显存还给系统。EzFlex 是绕过 ComfyUI /prompt 直接往队列里塞项，队列项 extra_data 不带
-    free_memory/unload_models flag，所以内核 main.py 那套自动卸载不会触发 —— 必须自己卸。
-
-    只在"整批跑完"后调一次（不是每张都卸），否则连续生成 N 张会反复 load/unload 反而更慢。
-    先 unload_all_models() 真卸载，再 soft_empty_cache() + gc.collect() 把显存/内存真正回收。"""
-    import gc
-    mm = None
-    try:
-        import comfy.model_management as mm
-    except Exception:
-        mm = None
-    try:
-        if mm is not None:
-            mm.unload_all_models()
-    except Exception:
-        pass
-    try:
-        if mm is not None:
-            mm.soft_empty_cache()
-    except Exception:
-        pass
-    # 顺带把我们自己的文本模型缓存也清掉（生图批次结束后本来也不再需要）
-    for m in list(_LLAMA_CACHE.values()):
-        try:
-            m.close()
-        except Exception:
-            pass
-    try:
-        _LLAMA_CACHE.clear()
-    except Exception:
-        pass
-    try:
-        _PH_CLIP_CACHE.clear()
-    except Exception:
-        pass
-    gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-    except Exception:
-        pass
-
-
 def _ph_html_to_text(html):
     """把卡片 contenteditable 的 HTML 转成纯文本（供合并提示词用）。"""
     if not html:
@@ -5057,710 +1679,6 @@ def _ph_html_to_text(html):
     txt = re.sub(r"<[^>]+>", " ", html)
     txt = re.sub(r"\s+", " ", txt).strip()
     return txt
-
-
-def _ph_video_frames(value, target_fps=1.0, max_frames=_PH_VIDEO_MAX_FRAMES):
-    """把视频解码成帧张量 [T,H,W,C] float32（按 target_fps 抽样、缩到 _PH_VIDEO_MAX_EDGE、最多 max_frames 帧）。
-    接受磁盘路径 / io.BytesIO / VideoFromFile 这类对象；取不到返回 (None, 0)。"""
-    try:
-        import av
-        from PIL import Image
-        src = value.get_stream_source() if hasattr(value, "get_stream_source") else value
-        if not src:
-            return None, 0.0
-        with av.open(src, mode="r") as container:
-            stream = next((s for s in container.streams if s.type == "video"), None)
-            if stream is None:
-                return None, 0.0
-            try:
-                native = float(stream.average_rate) if stream.average_rate else 0.0
-            except Exception:
-                native = 0.0
-            step = max(1, int(round(native / target_fps))) if native > 0 else 1
-            frames = []
-            for i, frame in enumerate(container.decode(stream)):
-                if i % step:
-                    continue
-                im = Image.fromarray(frame.to_ndarray(format="rgb24"))
-                im.thumbnail((_PH_VIDEO_MAX_EDGE, _PH_VIDEO_MAX_EDGE))
-                frames.append(torch.from_numpy(np.ascontiguousarray(np.asarray(im))).float() / 255.0)
-                if len(frames) >= max_frames:
-                    break
-        if not frames:
-            return None, 0.0
-        return torch.stack(frames, dim=0), float(target_fps)
-    except Exception:
-        return None, 0.0
-
-
-def _ph_media_bundle(images, videos, audios):
-    """统一媒体包：各类列表 + 每类第一项（旧调用点读 image/video/audio）。video 项为 {"frames","fps"}。"""
-    return {
-        "images": images, "videos": videos, "audios": audios,
-        "image": images[0] if images else None,
-        "video": videos[0] if videos else None,
-        "audio": audios[0] if audios else None,
-    }
-
-
-def _ph_vision_tensors(media):
-    """API/llama 实际要发的图：普通图片 + 视频从头到尾均匀抽帧（每个视频最多 _PH_MAX_VISION_IMAGES 帧）。"""
-    out = list(media.get("images") or [])
-    for v in (media.get("videos") or []):
-        frames = v.get("frames") if isinstance(v, dict) else v
-        if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or frames.shape[0] == 0:
-            continue
-        t = frames.shape[0]
-        n = min(_PH_MAX_VISION_IMAGES, t)
-        idx = sorted({int(round(i * (t - 1) / max(n - 1, 1))) for i in range(n)})
-        out.extend(frames[i:i + 1] for i in idx)
-    return out
-
-
-def _ph_media_files_from_request(data):
-    """点击即用的视频/音频：只拿路径，按 path 从磁盘加载（复用 MediaLoader 的加载器）。"""
-    videos, audios = [], []
-    items = (data or {}).get("media")
-    if isinstance(items, list):
-        for it in items:
-            if not isinstance(it, dict):
-                continue
-            t = str(it.get("type") or "").lower()
-            p = str(it.get("path") or "")
-            if not p or t not in ("video", "audio"):
-                continue
-            fp = _ml_resolve(p)
-            if not fp:
-                continue
-            if t == "video":
-                frames, fps = _ph_video_frames(fp)
-                if frames is not None:
-                    videos.append({"frames": frames, "fps": fps})
-            else:
-                audios.append(_ml_load_audio(fp))
-    return videos, audios
-
-
-def _ph_gather_media(kwargs):
-    """从 media_in_* 输入里按类型收集全部媒体（仅执行期有真实值）。
-    张量一律当图像（批次张量原样保留成一整批）；带 waveform/sample_rate 的 dict 当音频；
-    视频对象（Load Video / MediaLoader / VHS 流）解码成 ~1fps 帧张量。返回媒体包。"""
-    images, videos, audios = [], [], []
-    for i in range(1, _PH_MAX_MEDIA + 1):
-        v = kwargs.get(f"media_in_{i}")
-        if v is None:
-            continue
-        for x in (v if isinstance(v, (list, tuple)) else [v]):
-            if x is None:
-                continue
-            if isinstance(x, torch.Tensor):
-                images.append(x)
-            elif isinstance(x, dict) and ("waveform" in x or "sample_rate" in x):
-                audios.append(x)
-            elif hasattr(x, "get_stream_source") or hasattr(x, "get_components"):
-                frames, fps = _ph_video_frames(x)
-                if frames is not None:
-                    videos.append({"frames": frames, "fps": fps})
-    return _ph_media_bundle(images, videos, audios)
-
-
-def _ph_image_to_dataurl(tensor):
-    """把 IMAGE 张量编码成 base64 PNG data URL，供视觉模型（API/llama mmproj）看图。失败返回 ''。"""
-    try:
-        import io, base64
-        import numpy as np
-        from PIL import Image
-        t = tensor
-        if isinstance(t, torch.Tensor):
-            if t.ndim == 4:
-                t = t[0]
-            arr = t.squeeze().float().cpu().numpy()
-        else:
-            return ""
-        if arr.ndim == 3 and arr.shape[-1] in (3, 4):
-            img = Image.fromarray(np.clip(arr * 255.0, 0, 255).astype("uint8"))
-        elif arr.ndim == 2:
-            img = Image.fromarray(np.clip(arr * 255.0, 0, 255).astype("uint8"), "L")
-        else:
-            return ""
-        buf = io.BytesIO(); img.save(buf, format="PNG")
-        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-    except Exception:
-        return ""
-
-
-def _ph_images_to_dataurls(images):
-    """把若干 IMAGE 张量（含批次）编码成 data URL 列表，供视觉模型看图；单次最多 _PH_MAX_VISION_IMAGES 张。"""
-    out = []
-    for t in images or []:
-        if len(out) >= _PH_MAX_VISION_IMAGES:
-            break
-        if isinstance(t, torch.Tensor) and t.ndim == 4:
-            for i in range(t.shape[0]):
-                if len(out) >= _PH_MAX_VISION_IMAGES:
-                    break
-                u = _ph_image_to_dataurl(t[i:i + 1])
-                if u:
-                    out.append(u)
-        else:
-            u = _ph_image_to_dataurl(t)
-            if u:
-                out.append(u)
-    return out
-
-
-def _ph_dataurl_to_image(url):
-    """把 data:image/...;base64,... 解回 IMAGE 张量 [1,H,W,C]（float32 0~1）；失败返回 None。"""
-    try:
-        import io, base64
-        import numpy as np
-        from PIL import Image
-        if ";base64," not in str(url or ""):
-            return None
-        img = Image.open(io.BytesIO(base64.b64decode(str(url).split(";base64,", 1)[1])))
-        if img.mode not in ("RGB", "RGBA", "L"):
-            img = img.convert("RGB")
-        arr = np.asarray(img).astype("float32") / 255.0
-        if arr.ndim == 2:
-            arr = arr[:, :, None]
-        return torch.from_numpy(arr).unsqueeze(0)
-    except Exception:
-        return None
-
-
-def _ph_dataurls_to_images(urls):
-    """data URL 列表 → IMAGE 张量列表（解不开的直接跳过）。"""
-    out = []
-    for u in urls or []:
-        t = _ph_dataurl_to_image(u)
-        if t is not None:
-            out.append(t)
-    return out
-
-
-def _ph_concat_images(images):
-    """多张 IMAGE 张量合成一个批次喂 text-gen CLIP（形状不一致时只留第一张）。"""
-    if not images:
-        return None
-    if len(images) == 1:
-        return images[0]
-    try:
-        return torch.cat([t if t.ndim == 4 else t.unsqueeze(0) for t in images], dim=0)
-    except Exception:
-        return images[0]
-
-
-# 注：PromptHelper 的类 RETURN_TYPES/RETURN_NAMES 固定成「最大卡片数 + 1」，**运行期不再按实例收缩**。
-# 原因：execution.py 校验链接类型时按 **节点类** 取 RETURN_TYPES[槽位序号]，是全局共享的一份；
-# 同屏多个实例卡数不同时，谁最后同步谁说了算 —— 收缩后别的实例的高位槽一取就越界（IndexError，报错信息很难懂）。
-# 这份表全是 STRING、且够长，任何槽位都能取到，多个实例也不会互相干扰。
-
-
-def _ph_chat_completion(url, headers, body, proxy="", timeout=90):
-    """同步 OpenAI 兼容 chat/completions 请求（在线程池里跑，避免阻塞事件循环）。
-    proxy 非空时走该代理（http/https），空则强制直连（忽略系统代理，默认）。"""
-    import urllib.request, urllib.error, socket
-
-    class _SafeRedirect(urllib.request.HTTPRedirectHandler):
-        """重定向每一跳都重新校验允许列表：防被允许主机 302 到内网。"""
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            _ph_check_outbound(newurl)
-            return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-    _ph_check_outbound(url)   # 允许列表校验（防 SSRF）：不在列表直接报错
-    if proxy:
-        _ph_check_outbound(proxy)   # 代理主机同样要在允许列表里（否则能拿代理打内网/本机；设置里保存一次即登记）
-    data_b = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(url, data=data_b, method="POST",
-                                 headers={"Content-Type": "application/json", **headers})
-    try:
-        if proxy:
-            ph = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-        else:
-            ph = urllib.request.ProxyHandler({})   # 空 dict = 不使用系统代理，直连
-        opener = urllib.request.build_opener(ph, _SafeRedirect())
-        with opener.open(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8")[:300]
-        except Exception:
-            pass
-        raise ValueError(f"API returned error {e.code} ({e.reason}): {detail or 'no error detail'}") from e
-    except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
-        suffix = f" (if you need a proxy, set the proxy address in the API settings, e.g. http://127.0.0.1:7890)" if not proxy else ""
-        raise ValueError(f"cannot reach API host {url}: network timeout or unreachable{suffix}. Original error: {e}") from e
-
-
-# ===== 进程内 llama-cpp-python（用户 venv 已装 llama-cpp-python 时的本地推理）=====
-_LLAMA_CACHE = {}
-
-# 加载期参数白名单：Llama() 的 **kwargs 会静默吞掉不认识的键（写错名字不报错只是不生效），所以按签名逐个显式传。
-_PH_LLAMA_LOAD_FIELDS = {
-    "n_ctx": int, "n_gpu_layers": int, "n_batch": int, "n_ubatch": int,
-    "n_threads": int, "n_threads_batch": int,
-    "use_mmap": bool, "use_mlock": bool, "offload_kqv": bool,
-}
-_PH_LLAMA_FLASH = {"auto": "AUTO", "on": "ENABLED", "off": "DISABLED"}
-# KV 缓存数据类型：ggml.h 的 ggml_type 枚举值（llama-cpp-python 没把它暴露成 Python 常量）
-_PH_KV_TYPES = {"f16": 1, "q8_0": 8, "q4_0": 2}
-
-
-def _ph_bool(v):
-    if isinstance(v, str):
-        return v.strip().lower() in ("1", "true", "on", "yes")
-    return bool(v)
-
-
-def _ph_llama_load_kwargs(ll):
-    """把「设置·llama设置」里的加载期参数转成 Llama() 的 kwargs。"""
-    kw = {}
-    for k, cast in _PH_LLAMA_LOAD_FIELDS.items():
-        v = ll.get(k)
-        if v is None or v == "":
-            continue
-        if k == "n_gpu_layers" and not re.fullmatch(r"-?\d+", str(v).strip()):
-            kw[k] = str(v).strip()      # llama-cpp-python 也接受 auto / all
-            continue
-        if k in ("n_threads", "n_threads_batch"):
-            v = int(v)
-            if v <= 0:
-                continue                # 0/-1 = 交给 llama-cpp-python 自动（约物理核数一半）
-            kw[k] = v
-            continue
-        kw[k] = _ph_bool(v) if cast is bool else cast(v)
-    for k in ("type_k", "type_v"):
-        v = _PH_KV_TYPES.get(str(ll.get(k) or "").strip().lower())
-        if v is not None:
-            kw[k] = v
-    flash = _PH_LLAMA_FLASH.get(str(ll.get("flash_attn") or "auto").strip().lower())
-    if flash:
-        import llama_cpp.llama_cpp as llama_lib
-        kw["flash_attn_type"] = getattr(llama_lib.llama_flash_attn_type, "LLAMA_FLASH_ATTN_TYPE_" + flash)
-    chat_format = str(ll.get("chat_format") or "").strip()
-    if chat_format:
-        kw["chat_format"] = chat_format
-    return kw
-
-
-def _ph_llama_vision_kwargs(ll):
-    """mmproj 视觉处理器的构造参数：图片 token 上下限 / 视觉批上限 / 视觉是否上 GPU。
-    这些由 chat_handler_kwargs 传给 mmproj 处理器，名字写错它会直接报错（不像 Llama 的 **kwargs 静默吞掉）。"""
-    kw = {}
-    for k, default in (("image_min_tokens", -1), ("image_max_tokens", -1), ("batch_max_tokens", 1024)):
-        v = int(_ph_num(ll.get(k), default))
-        if v > 0:                       # ≤0 = 不限制（用 mmproj / 后端默认）
-            kw[k] = v
-    if not _ph_bool(ll.get("vision_use_gpu", True)):
-        kw["use_gpu"] = False           # 默认开（库默认 True），只有关掉时才需要显式传
-    if _ph_bool(ll.get("vision_add_vision_id")):
-        kw["extra_template_arguments"] = {"add_vision_id": True}   # Qwen-VL 模板变量：给每张图加「Picture N:」前缀
-    return kw
-
-
-def _ph_llama_instance(model_path, mmproj, ll):
-    load = _ph_llama_load_kwargs(ll)
-    vision = _ph_llama_vision_kwargs(ll) if mmproj else {}
-    # vision 里有 dict（extra_template_arguments），用 JSON 文本进缓存 key 保持可哈希
-    key = (model_path, mmproj, tuple(sorted(load.items())), json.dumps(vision, sort_keys=True))
-    if key in _LLAMA_CACHE:
-        return _LLAMA_CACHE[key]
-    import llama_cpp
-    kw = dict(model_path=model_path, verbose=False, **load)
-    if mmproj:
-        kw["mmproj_path"] = mmproj
-        if vision:
-            kw["chat_handler_kwargs"] = vision
-    llm = llama_cpp.Llama(**kw)
-    _ph_cache_put(_LLAMA_CACHE, key, llm, _LLAMA_CACHE_MAX, lambda m: m.close())
-    return llm
-
-
-def _ph_num(v, default):
-    """设置项里的数字（前端可能给数字 / 字符串 / 空值）：取不到或不是数字就用默认值。"""
-    try:
-        return float(str(v).strip())
-    except (TypeError, ValueError):
-        return float(default)
-
-
-def _ph_llama_sampling(ll):
-    """采样参数的规范形式（llama.cpp 命名）；进程内与 llama.cpp 服务器两种模式共用。"""
-    seed = int(_ph_num(ll.get("seed"), 0))
-    stop = [s.strip() for s in str(ll.get("stop") or "").split(",") if s.strip()]
-    return {
-        "max_tokens": int(_ph_num(ll.get("max_tokens"), 256)),
-        "temperature": _ph_num(ll.get("temperature"), 0.7),
-        "top_p": _ph_num(ll.get("top_p"), 0.95),
-        "top_k": int(_ph_num(ll.get("top_k"), 40)),
-        "min_p": _ph_num(ll.get("min_p"), 0.05),
-        "typical_p": _ph_num(ll.get("typical_p"), 1.0),
-        "repeat_penalty": _ph_num(ll.get("repeat_penalty"), 1.1),
-        "repeat_last_n": int(_ph_num(ll.get("penalty_last_n"), 64)),
-        "presence_penalty": _ph_num(ll.get("presence_penalty"), 0.0),
-        "frequency_penalty": _ph_num(ll.get("frequency_penalty"), 0.0),
-        "seed": seed,
-        "stop": stop,
-    }
-
-
-def _ph_llama_chat(llm, prompt, params, image_b64=None):
-    msgs = [{"role": "system", "content": _PH_OPT_SYSTEM}]
-    # 视觉：llama-cpp-python 的多模态聊天按 OpenAI 的 content 片段读图（mmproj 由 _ph_llama_instance 挂上）；
-    # 纯文本模型收到图像片段会抛「does not support image inputs」，比静默丢图更容易排查。
-    urls = [image_b64] if isinstance(image_b64, str) else [u for u in (image_b64 or []) if u]
-    if urls:
-        content = [{"type": "image_url", "image_url": {"url": u}} for u in urls]
-        content.append({"type": "text", "text": prompt})
-        msgs.append({"role": "user", "content": content})
-    else:
-        msgs.append({"role": "user", "content": prompt})
-    smp = _ph_llama_sampling(params)
-    kw = dict(messages=msgs)
-    kw.update(smp)
-    kw["stop"] = smp["stop"] or None
-    kw["penalty_last_n"] = smp["repeat_last_n"]
-    # 同一套设置要同时喂给两种模式的命名：进程内用 present_penalty、服务器（HTTP 分支）用 presence_penalty，
-    # 按 create_chat_completion 的真实签名过滤，只保留本构建认识的那个。
-    kw["present_penalty"] = smp["presence_penalty"]
-    kw["seed"] = smp["seed"] if smp["seed"] > 0 else None   # ≤0 = 每次随机（交给 llama-cpp-python 默认种子）
-    sig = inspect.signature(llm.create_chat_completion).parameters
-    resp = llm.create_chat_completion(**{k: v for k, v in kw.items() if k in sig})
-    return resp["choices"][0]["message"]["content"]
-
-
-_PH_REASON_BUDGET = {"low": 1024, "medium": 4096, "high": 8192}
-
-
-def _ph_apply_api_params(provider, model, body, ap, is_anthropic):
-    """把「设置·API设置·调用参数」按厂商映射进请求体。字段缺省/留空 = 不发送（用各家默认）。"""
-    if not ap:
-        return
-    for key in ("temperature", "top_p"):
-        if key in ap:
-            v = ap.get(key)
-            if v is None or str(v).strip() == "":
-                body.pop(key, None)            # 显式留空 = 不发送
-            else:
-                body[key] = _ph_num(v, body.get(key, 0.7))
-    v = ap.get("max_tokens")
-    if v is not None and str(v).strip() != "":
-        n = int(_ph_num(v, 0))
-        if n > 0:
-            body["max_tokens" if provider != "OpenAI" else "max_completion_tokens"] = n
-    if not is_anthropic:
-        v = ap.get("seed")
-        if v is not None and str(v).strip() != "":
-            body["seed"] = int(_ph_num(v, 0))
-    stop = [s.strip() for s in str(ap.get("stop") or "").split(",") if s.strip()]
-    if stop:
-        body["stop_sequences" if is_anthropic else "stop"] = stop
-    # 思考 / 思维链：统一档位，各厂商落到自己的字段（OpenRouter 用 reasoning，Anthropic 用 thinking …）
-    level = str(ap.get("reasoning") or "off").strip().lower()
-    if level in _PH_REASON_BUDGET:
-        if is_anthropic:
-            body["thinking"] = {"type": "enabled", "budget_tokens": _PH_REASON_BUDGET[level]}
-            body["max_tokens"] = max(int(body.get("max_tokens") or 1024), _PH_REASON_BUDGET[level] + 1024)
-            body.pop("temperature", None); body.pop("top_p", None)   # 开 thinking 时 Claude 只接受 temperature=1
-        elif provider == "OpenRouter":
-            body["reasoning"] = {"effort": level}
-        elif provider == "Alibaba Qwen":
-            body["enable_thinking"] = True
-            body["thinking_budget"] = _PH_REASON_BUDGET[level]
-        elif provider == "Ollama":
-            body["reasoning_effort"] = level
-        else:
-            body["reasoning_effort"] = level
-    # OpenAI o 系列 / GPT-5 推理模型不接受自定义 temperature / top_p
-    if provider == "OpenAI" and re.match(r"^(o\d|gpt-5|gpt-6)", str(model or "").lower()):
-        body.pop("temperature", None); body.pop("top_p", None)
-    # 联网搜索
-    if ap.get("webSearch"):
-        if is_anthropic:
-            body["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
-        elif provider == "OpenRouter":
-            body.setdefault("plugins", []).append({"id": "web"})
-        elif provider == "Alibaba Qwen":
-            body["enable_search"] = True
-        elif provider == "xAI Grok":
-            body["search_parameters"] = {"mode": "on", "return_citations": True}
-        elif provider == "OpenAI":
-            body["web_search_options"] = {}
-        else:
-            raise ValueError("web search only supports OpenAI / Anthropic / OpenRouter / xAI / Qwen; provider " + repr(str(provider or "custom")) + " has no generic web parameters, turn it off.")
-    # 自定义参数（JSON 键值对）：最后合并，同名直接覆盖上面的映射，方便厂商字段变动时自行改/加
-    extra = ap.get("custom")
-    if isinstance(extra, dict) and extra:
-        body.update(extra)
-
-
-def _ph_anthropic_text(result):
-    """Anthropic 响应取最终答案：开了 thinking 后 content[0] 是 thinking 块，必须挑 type==text。"""
-    for blk in (result.get("content") or []):
-        if isinstance(blk, dict) and blk.get("type") == "text":
-            return str(blk.get("text") or "")
-    return ""
-
-
-def _ph_optimize_impl(data, strict=False):
-    """同步优化核心：route 与 run 期共用。strict=True（远端请求）时模型路径只认已登记的根。data 含 method/prompt/provider/model/apiUrl/apiKey/images + llama/textgen 配置。
-    返回优化后的文本；出错抛 ValueError（带可读信息）。images 为 base64 data URL 列表（旧字段 image 仍兼容），供视觉模型看图。"""
-    method = str((data or {}).get("method") or "api")
-    prompt = str((data or {}).get("prompt") or "")
-    if not prompt.strip():
-        raise ValueError("prompt is empty")
-    raw_imgs = (data or {}).get("images")
-    img_urls = [str(u).strip() for u in raw_imgs if str(u or "").strip()] if isinstance(raw_imgs, list) else []
-    if not img_urls:
-        single = str((data or {}).get("image") or "").strip()   # 旧字段：单个 base64 data URL / http url
-        if single:
-            img_urls = [single]
-    videos, audios = _ph_media_files_from_request(data)
-    if method == "textgen":
-        # 从设置里配置的 CLIP 路径 + 类型自行加载 text-gen CLIP（点击即用，同 llama）。
-        tgcfg = (data or {}).get("textgen") or {}
-        clip_path = ph_resolve_model(str(tgcfg.get("clip_path") or _ph_global_model_path("clip_path") or "").strip(), [str(tgcfg.get("clip_root") or "").strip()], strict=strict)
-        if not clip_path:
-            raise ValueError("TextGenerate needs a clip model + type in the TextGenerate settings to run as a one-click button; or switch back to runtime auto-optimize (TextGenerate) to use the connected CLIP during workflow execution.")
-        clip = _ph_clip_instance(clip_path, str(tgcfg.get("clip_type") or "stable_diffusion"))
-        # 点击即用也带媒体：CLIP 必须吃张量，图片 data URL 解回张量；视频/音频按路径加载
-        return _ph_clip_generate(clip, prompt, tgcfg, _ph_media_bundle(_ph_dataurls_to_images(img_urls), videos, audios))
-
-    provider = str((data or {}).get("provider") or "")
-    model = str((data or {}).get("model") or "")
-    # API/llama：图片直接用浏览器给的原始 data URL（不重编码、不拉伸）；视频抽帧编码后补在后面，整体 ≤8 张
-    video_urls = _ph_images_to_dataurls(_ph_vision_tensors(_ph_media_bundle([], videos, [])))
-    img_urls = (img_urls + video_urls)[:_PH_MAX_VISION_IMAGES]
-    llama = (data or {}).get("llama") or {}
-    ap = (data or {}).get("apiParams") or {}
-    if not isinstance(ap, dict):
-        ap = {}
-
-    HOST = {
-        "OpenAI": "https://api.openai.com/v1",
-        "DeepSeek": "https://api.deepseek.com/v1",
-        "Google Gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
-        "Anthropic Claude": "https://api.anthropic.com/v1",
-        "SiliconFlow": "https://api.siliconflow.cn/v1",
-        "OpenRouter": "https://openrouter.ai/api/v1",
-        "Alibaba Qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "Moonshot Kimi": "https://api.moonshot.ai/v1",
-        "xAI Grok": "https://api.x.ai/v1",
-        "Mistral": "https://api.mistral.ai/v1",
-        "Groq": "https://api.groq.com/openai/v1",
-        "Zhipu GLM": "https://open.bigmodel.cn/api/paas/v4",
-        "Volcengine Doubao": "https://ark.cn-beijing.volces.com/api/v3",
-        "MiniMax": "https://api.minimax.chat/v1",
-        "Perplexity": "https://api.perplexity.ai",
-        "Cohere": "https://api.cohere.ai/compatibility/v1",
-        "Ollama": "http://localhost:11434/v1",
-    }
-    is_anthropic = "Claude" in provider
-
-    # ---- llama：进程内 llama-cpp-python，否则走 llama.cpp 服务器 ----
-    llama_server = False
-    if method == "llama":
-        llama_mode = str(llama.get("mode") or "local")
-        model_path = _ph_resolve_gguf(str(llama.get("model") or _ph_global_model_path("model") or "").strip(), [str(llama.get("model_root") or _ph_global_scan_path("model_root") or "").strip()], strict=strict)
-        if llama_mode == "local":
-            if not model_path:
-                raise ValueError("the llama mode is set to in-process llama-cpp-python, but no LLM model file was resolved: set the LLM text encoder model in the llama settings, or switch to the llama.cpp server (HTTP) mode.")
-            mmproj = _ph_resolve_gguf(str(llama.get("mmproj") or _ph_global_model_path("mmproj") or "").strip(), [str(llama.get("mmproj_root") or _ph_global_scan_path("mmproj_root") or "").strip()], strict=strict)
-            llm = _ph_llama_instance(model_path, mmproj, llama)
-            return _ph_llama_chat(llm, prompt, llama, image_b64=img_urls or None)
-        server = str(llama.get("server") or "").strip() or "http://127.0.0.1:8080"
-        url = server.rstrip("/") + "/v1/chat/completions"
-        headers, api_key = {}, ""
-        llama_server = True
-
-    # ---- api：OpenAI 兼容 或 Anthropic messages ----
-    else:
-        api_url = str((data or {}).get("apiUrl") or "").strip()
-        api_key = str((data or {}).get("apiKey") or "").strip()
-        if not api_url:
-            api_url = HOST.get(provider, "")
-        if not api_url:
-            raise ValueError("enter the API host URL (for example https://api.deepseek.com/v1)")
-        base = api_url.rstrip("/")
-        if is_anthropic:
-            url = base + "/messages" if not base.endswith("/messages") else base
-            headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"} if api_key else {"anthropic-version": "2023-06-01"}
-        else:
-            url = base + "/chat/completions" if not base.endswith("/chat/completions") else base
-            headers = {"Authorization": "Bearer " + api_key} if api_key else {}
-
-    system = _PH_OPT_SYSTEM
-    if is_anthropic:
-        content = []
-        for u in img_urls:
-            media_type, b64 = _ph_split_data_url(u)
-            content.append({"type": "image", "source": {"type": "base64", "media_type": media_type or "image/png", "data": b64}})
-        content.append({"type": "text", "text": prompt})
-        # Anthropic Messages API 的 system 是顶层字段（原来算了却没带上 → Claude 一直收不到系统提示）
-        body = {"model": model or "claude-sonnet-4", "max_tokens": 1024, "system": system,
-                "messages": [{"role": "user", "content": content}]}
-    else:
-        user_content = [{"type": "image_url", "image_url": {"url": u}} for u in img_urls]
-        user_content.append({"type": "text", "text": prompt})
-        body = {
-            "model": model or "gpt-4o-mini",
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_content}],
-            "temperature": 0.7,
-        }
-        if llama_server:
-            # llama.cpp 服务器（OpenAI 兼容端点）：把「llama设置」里的采样参数一并发过去，否则服务器只能用自身启动参数。
-            smp = _ph_llama_sampling(llama)
-            seed = smp.pop("seed")
-            stop = smp.pop("stop")
-            body["model"] = model or "local"
-            body.update(smp)
-            body["seed"] = seed if seed > 0 else -1   # -1 = 服务器每次随机
-            if stop:
-                body["stop"] = stop
-
-    if method != "llama":
-        _ph_apply_api_params(provider, model, body, ap, is_anthropic)
-
-    _proxy = str((data or {}).get("proxy") or "").strip()   # 可选代理（http/socks5）
-    result = _ph_chat_completion(url, headers, body, proxy=_proxy)
-    if is_anthropic:
-        return _ph_anthropic_text(result)
-    return str(result["choices"][0]["message"]["content"])
-
-
-def _ph_split_data_url(url):
-    """把 data:<mime>;base64,<data> 拆成 (media_type, base64)；非 data: 返回 ('', url)。"""
-    if url.startswith("data:") and ";base64," in url:
-        head, b64 = url.split(";base64,", 1)
-        return head.replace("data:", ""), b64
-    return "", url
-
-
-def _ph_ensure_progress_attrs():
-    """点击即用的优化不在节点执行上下文里跑，但 textgen 的 generate 会用 comfy.utils.ProgressBar，
-    它的 hook（main.py hijack_progress）会读 PromptServer.last_prompt_id / last_node_id —— 这两个属性
-    main.py 只在真正跑工作流时才写，没跑过工作流时不存在 → AttributeError。
-    这里先把缺的属性补成 None，让 hook 能正常走完（进度事件发到前端，prompt_id 为 null 无所谓）。"""
-    try:
-        srv = PromptServer.instance
-        for a in ("last_prompt_id", "last_node_id"):
-            if not hasattr(srv, a):
-                setattr(srv, a, None)
-    except Exception:
-        pass
-
-
-async def _ph_optimize(req):
-    """按 method 优化提示词：api / llama 走 OpenAI 兼容 HTTP；textgen 需在执行期用已连接 CLIP。"""
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    _ph_ensure_progress_attrs()
-    try:
-        import asyncio
-        # 远端调用：模型路径只认已登记的根（防拿任意本地文件当模型读）；本机点击即用保持原样
-        text = await asyncio.to_thread(_ph_optimize_impl, data or {}, not _ez_local(req))
-    except ValueError as e:
-        # 优化失败（空提示词 / 模型没配 / 出站主机被拒…）统一按上游错误提示
-        return _web.json_response({"error": str(e)}, status=502)
-    except Exception as e:
-        return _web.json_response({"error": f"request failed: {e}"}, status=502)
-    if (data or {}).get("clearCache"):
-        ph_clear_model_cache()
-    return _web.json_response({"ok": True, "text": text})
-
-
-try:
-    PromptServer.instance.routes.post("/prompt_helper/optimize")(_ph_optimize)
-except Exception:
-    pass
-
-
-# ===== skill 文件：models 根目录下的 skills 文件夹（md 文件，自动创建）作为「插入 skill」的默认目录 =====
-_SKILLS_ROOT_CACHE = None
-
-
-def ph_skills_dirs():
-    global _SKILLS_ROOT_CACHE
-    if _SKILLS_ROOT_CACHE is not None:
-        return _SKILLS_ROOT_CACHE
-    bases = []
-    seen = set()
-    # 实例 models 根
-    try:
-        for r in (folder_paths.get_folder_paths("models") or []):
-            if r and os.path.normpath(r) not in seen:
-                seen.add(os.path.normpath(r)); bases.append(r)
-    except Exception:
-        pass
-    # 共享 models 派生：LLM 等注册目录的父级就是共享 models 基目录（如 ...\ComfyUI-Shared\models）
-    try:
-        for r in (folder_paths.get_folder_paths("LLM") or []):
-            par = os.path.dirname(r)
-            if par and os.path.normpath(par) not in seen:
-                seen.add(os.path.normpath(par)); bases.append(par)
-    except Exception:
-        pass
-    if not bases:
-        try:
-            if folder_paths.models_dir:
-                bases = [folder_paths.models_dir]
-        except Exception:
-            pass
-    if not bases:
-        bases = [os.path.abspath("models")]
-    dirs = [os.path.join(b, "skills") for b in bases if b]
-    if not dirs:
-        dirs = [os.path.join(bases[0], "skills")]
-    _SKILLS_ROOT_CACHE = dirs
-    return dirs
-
-
-def ph_ensure_skills_dir():
-    dirs = ph_skills_dirs()
-    for d in dirs:
-        try:
-            os.makedirs(d, exist_ok=True)
-        except Exception:
-            pass
-    return dirs[0] if dirs else None
-
-
-async def _ph_pick_skill(req):
-    """弹 Windows 原生「打开文件」对话框（默认定位 models/skills），返回所选 md 的文本供插入卡片。仅本机客户端。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    initial = ph_ensure_skills_dir() or ""
-
-    def _pick():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True); root.lift()
-            p = filedialog.askopenfilename(title="Select skill file", initialdir=initial or None,
-                                           filetypes=[("Markdown", "*.md"), ("All files", "*.*")])
-            root.destroy()
-            return p
-        except Exception:
-            return ""
-
-    try:
-        import asyncio
-        p = await asyncio.to_thread(_pick)
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-    if not p:
-        return _web.json_response({"ok": False})
-    try:
-        with open(p, "r", encoding="utf-8") as fh:
-            text = fh.read()
-    except Exception as e:
-        return _web.json_response({"error": f"failed to read {os.path.basename(p)}: {e}"}, status=500)
-    return _web.json_response({"ok": True, "name": os.path.basename(p), "text": text})
-
-
 def _ph_media_input_dirs():
     from urllib.parse import quote as _q
     roots, seen = [], set()
@@ -5779,1263 +1697,20 @@ def _ph_media_input_dirs():
         except Exception:
             pass
     return roots
-
-
-# ===== 出站主机允许列表（评审要求：/prompt_helper/optimize 不能拿请求里的 apiUrl 去打任意地址）=====
-# 允许列表 = 内置厂商域名 + 本机保存的自定义厂商域名 + userdata 里登记的额外主机（仅本机可写）。
-# 本机 llama.cpp / Ollama 也走「保存设置时登记一次」这条路，不默认放开 loopback（避免拿它扫本机/内网服务）。
-_PH_BUILTIN_HOSTS = (
-    "api.openai.com", "api.deepseek.com", "generativelanguage.googleapis.com", "api.anthropic.com",
-    "api.siliconflow.cn", "openrouter.ai", "dashscope.aliyuncs.com", "api.moonshot.ai",
-    "api.x.ai", "api.mistral.ai", "api.groq.com",
-    "open.bigmodel.cn", "ark.cn-beijing.volces.com", "api.minimax.chat", "api.perplexity.ai", "api.cohere.ai",
-)
-
-
-def _ph_api_hosts_file():
-    try:
-        return _ezflex_user_file("ezflex_api_hosts.json")
-    except Exception:
-        return ""
-
-
-def _ph_api_hosts_load():
-    fn = _ph_api_hosts_file()
-    if not fn or not os.path.isfile(fn):
-        return []
-    try:
-        with open(fn, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        return [str(x).strip().lower() for x in data if str(x).strip()] if isinstance(data, list) else []
-    except Exception:
-        return []
-
-
-def _ph_allowed_hosts():
-    from urllib.parse import urlsplit as _us
-    hosts = set(_PH_BUILTIN_HOSTS)
-    try:
-        fn = _ph_userdata_file()
-        if fn and os.path.isfile(fn):
-            with open(fn, "r", encoding="utf-8") as fh:
-                recs = json.load(fh)
-            for rec in (recs if isinstance(recs, list) else []):
-                h = _us(str((rec or {}).get("apiUrl") or "")).hostname
-                if h:
-                    hosts.add(h.lower())
-    except Exception:
-        pass
-    hosts.update(_ph_api_hosts_load())
-    return hosts
-
-
-def _ph_check_outbound(url):
-    """出站前校验主机在允许列表里；不在就报清晰错误（不静默、不改小写匹配）。
-    没有 scheme 的地址（代理常写成 127.0.0.1:7890）先补 http:// 再取 host。"""
-    from urllib.parse import urlsplit as _us
-    u = str(url or "").strip()
-    if u and "://" not in u:
-        u = "http://" + u
-    try:
-        parts = _us(u)
-        host = (parts.hostname or "").lower()
-    except Exception:
-        parts, host = None, ""
-    if parts is None or parts.scheme not in ("http", "https"):
-        raise ValueError("only http/https outbound URLs are allowed (got " + repr(str(url))[:80] + ")")
-    if not host or host not in _ph_allowed_hosts():
-        raise ValueError(
-            "API host " + (host or "?") + " is not in the allow-list (security restriction). "
-            "Enter and save the address once in the API settings to register that host; built-in providers need no registration."
-        )
-    return url
-
-
-def _ph_userdata_file():
-    try:
-        return _ezflex_user_file('ezflex_custom_providers.json')
-    except Exception:
-        return ''
-
-
-async def _ph_custom_load(req):
-    fn = _ph_userdata_file(); arr = []
-    if fn and os.path.isfile(fn):
-        try:
-            with open(fn, 'r', encoding='utf-8') as fh:
-                arr = json.loads(fh.read())
-        except Exception:
-            arr = []
-    if not isinstance(arr, list): arr = []
-    # 远端不下发 apiKey（写入本来就只限本机）：本地行为不变，避免明文密钥经端口外泄
-    if not _ez_local(req):
-        arr = [({k: v for k, v in rec.items() if k != "apiKey"} if isinstance(rec, dict) else rec) for rec in arr]
-        return _web.json_response({"providers": arr, "local_only": True})
-    return _web.json_response({"providers": arr})
-
-
-async def _ph_custom_save(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    fn = _ph_userdata_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    name = (data.get("name") or "").strip()
-    rec = { "name": name, "provider": (data.get("provider") or "").strip() or name,
-            "model": (data.get("model") or "").strip(),
-            "apiUrl": (data.get("apiUrl") or "").strip(), "apiKey": (data.get("apiKey") or "").strip(),
-            "proxy": (data.get("proxy") or "").strip(), "custom": bool(data.get("custom")) }
-    if not rec["name"]:
-        return _web.json_response({"error": "enter the provider name"}, status=400)
-    try:
-        arr = []
-        if os.path.isfile(fn):
-            try:
-                with open(fn, 'r', encoding='utf-8') as fh: arr = json.loads(fh.read())
-            except Exception: arr = []
-        if not isinstance(arr, list): arr = []
-        idx = next((i for i, x in enumerate(arr) if (x.get("name") or "") == rec["name"]), -1)
-        if idx >= 0: arr[idx] = rec
-        else: arr.append(rec)
-        with open(fn, 'w', encoding='utf-8') as fh: json.dump(arr, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True, "providers": arr})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ph_custom_delete(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    fn = _ph_userdata_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    name = (req.query.get("name") or "").strip()
-    if not name:
-        return _web.json_response({"error": "bad name"}, status=400)
-    try:
-        arr = []
-        if os.path.isfile(fn):
-            with open(fn, 'r', encoding='utf-8') as fh:
-                arr = json.loads(fh.read())
-        if not isinstance(arr, list): arr = []
-        arr = [x for x in arr if (x.get("name") or "") != name]
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump(arr, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True, "providers": arr})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-def _ph_scan_roots(root_q):
-    """路径设置：若用户给了自定义扫描目录则只用它；否则回退到 models 根目录枚举。"""
-    root_q = (root_q or "").strip()
-    if root_q:
-        root_q = os.path.abspath(os.path.expanduser(root_q))
-        if os.path.isdir(root_q):
-            return [root_q]
-    return _ph_md_roots()
-
-
-def _ph_roots_for(extra=None):
-    """合并默认 models 根 + 自定义扫描根（用户路径设置），去重。"""
-    roots = list(_ph_md_roots())
-    seen = {os.path.normpath(r) for r in roots if r}
-    for r in (extra or []):
-        r = (r or "").strip()
-        if not r:
-            continue
-        r = os.path.abspath(os.path.expanduser(r))
-        if os.path.isdir(r) and os.path.normpath(r) not in seen:
-            seen.add(os.path.normpath(r)); roots.append(r)
-    return roots
-
-
-async def _ph_pick_folder(req):
-    """弹 Windows 原生「选择文件夹」对话框（线程里跑，避免阻塞事件循环并保证置顶）。仅本机客户端。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-
-    def _pick():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True); root.lift()
-            p = filedialog.askdirectory(title="Select model scan folder")
-            root.destroy()
-            return p
-        except Exception:
-            return ""
-    try:
-        import asyncio
-        p = await asyncio.to_thread(_pick)
-        return _web.json_response({"ok": bool(p), "path": os.path.normpath(p) if p else ""})
-    except Exception as e:
-        return _web.json_response({"ok": False, "error": str(e)}, status=500)
-
-
-async def _ph_scan_roots_info(req):
-    """返回当前默认扫描根目录（未设自定义路径时使用），供路径设置输入框动态显示。只对本机返回。"""
-    if not _ez_local(req):
-        return _web.json_response({"clip": [], "model": [], "mmproj": [], "local_only": True})
-    roots = _ph_md_roots()
-    return _web.json_response({"clip": roots, "model": roots, "mmproj": roots})
-
-
 def _ph_scan_paths_file():
     return _ezflex_user_file('ezflex_scan_paths.json')
-
-
-def _ph_scan_paths_load():
-    fn = _ph_scan_paths_file()
-    if not fn or not os.path.isfile(fn):
-        return {}
-    try:
-        with open(fn, 'r', encoding='utf-8') as fh:
-            d = json.loads(fh.read())
-        return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
-
-
-def _ph_global_scan_path(key):
-    return (_ph_scan_paths_load().get(key) or "").strip()
-
-
-async def _ph_scan_paths_get(req):
-    # 只对本机返回：这些是服务端的绝对路径配置
-    if not _ez_local(req):
-        return _web.json_response({})
-    return _web.json_response(_ph_scan_paths_load())
-
-
-async def _ph_scan_paths_save(req):
-    if not _ez_local(req):   # 扫描目录会成为可读根目录，只允许本机改（否则远端能自己扩大根）
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    fn = _ph_scan_paths_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    rec = {"clip_root": (data.get("clip_root") or "").strip(),
-           "model_root": (data.get("model_root") or "").strip(),
-           "mmproj_root": (data.get("mmproj_root") or "").strip()}
-    try:
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump(rec, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True, "paths": rec})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-def _ph_model_paths_file():
-    return _ezflex_user_file('ezflex_model_paths.json')
-
-
-def _ph_model_paths_load():
-    fn = _ph_model_paths_file()
-    if not fn or not os.path.isfile(fn):
-        return {}
-    try:
-        with open(fn, 'r', encoding='utf-8') as fh:
-            d = json.loads(fh.read())
-        return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
-
-
-def _ph_global_model_path(key):
-    return (_ph_model_paths_load().get(key) or "").strip()
-
-
-async def _ph_model_paths_get(req):
-    # 只对本机返回：模型绝对路径配置
-    if not _ez_local(req):
-        return _web.json_response({})
-    return _web.json_response(_ph_model_paths_load())
-
-
-async def _ph_model_paths_save(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    fn = _ph_model_paths_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    rec = {"clip_path": (data.get("clip_path") or "").strip(),
-           "model": (data.get("model") or "").strip(),
-           "mmproj": (data.get("mmproj") or "").strip()}
-    try:
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump(rec, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True, "paths": rec})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-def _ph_media_target_file():
-    return _ezflex_user_file('ezflex_media_target.json')
-
-
-def _ph_media_target_load():
-    fn = _ph_media_target_file()
-    if not fn or not os.path.isfile(fn):
-        return {}
-    try:
-        with open(fn, 'r', encoding='utf-8') as fh:
-            d = json.loads(fh.read())
-        m = d.get("mediaTarget") if isinstance(d, dict) else None
-        return m if isinstance(m, dict) else {}
-    except Exception:
-        return {}
-
-
-async def _ph_media_target_get(req):
-    """引用识别设置：全局用户设置（换节点/删节点不丢）。没有敏感路径，所以不限本机读。"""
-    return _web.json_response({"mediaTarget": _ph_media_target_load()})
-
-
-async def _ph_media_target_save(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    m = data.get("mediaTarget")
-    if not isinstance(m, dict):
-        return _web.json_response({"error": "mediaTarget must be an object"}, status=400)
-    fn = _ph_media_target_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    try:
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump({"mediaTarget": m}, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-def _ph_rules_file():
-    return _ezflex_user_file('ezflex_prompt_rules.json')
-
-
-def _ph_rules_load():
-    fn = _ph_rules_file()
-    if not fn or not os.path.isfile(fn):
-        return {}
-    try:
-        with open(fn, 'r', encoding='utf-8') as fh:
-            d = json.loads(fh.read())
-        r = d.get("rules") if isinstance(d, dict) else None
-        return r if isinstance(r, dict) else {}
-    except Exception:
-        return {}
-
-
-async def _ph_rules_get(req):
-    """引用规则设置：全局用户设置（合并分隔符 / 选中的规范 / 自定义规范 / 内置覆盖）。没有敏感路径，不限本机读。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    return _web.json_response({"rules": _ph_rules_load()})
-
-
-async def _ph_rules_save(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    r = data.get("rules")
-    if not isinstance(r, dict):
-        return _web.json_response({"error": "rules must be an object"}, status=400)
-    fn = _ph_rules_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    try:
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump({"rules": r}, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-def _ph_prompt_categories_file():
-    return _ezflex_user_file('ezflex_prompt_categories.json')
-
-
-def _ph_cat_clean(items, depth=0):
-    """分类树清洗：只留 {id,name,children}，名字截断、限深限宽（防止坏文件把前端撑爆）。"""
-    out = []
-    if depth > 6 or not isinstance(items, list):
-        return out
-    for it in items[:200]:
-        if not isinstance(it, dict):
-            continue
-        name = str(it.get("name") or "").strip()[:64]
-        if not name:
-            continue
-        cid = str(it.get("id") or "").strip()[:64] or ("c" + str(len(out) + 1))
-        out.append({"id": cid, "name": name, "children": _ph_cat_clean(it.get("children"), depth + 1)})
-    return out
-
-
-def _ph_categories_load():
-    fn = _ph_prompt_categories_file()
-    if not fn or not os.path.isfile(fn):
-        return []
-    try:
-        with open(fn, 'r', encoding='utf-8') as fh:
-            d = json.loads(fh.read())
-        return _ph_cat_clean(d.get("categories") if isinstance(d, dict) else None)
-    except Exception:
-        return []
-
-
-async def _ph_categories_get(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    return _web.json_response({"categories": _ph_categories_load()})
-
-
-async def _ph_categories_save(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    cats = _ph_cat_clean(data.get("categories"))
-    fn = _ph_prompt_categories_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    try:
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump({"categories": cats}, fh, ensure_ascii=False, indent=2)
-        return _web.json_response({"ok": True, "categories": cats})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
 def _ph_tags_file():
     return _ezflex_user_file('ezflex_prompt_tags.json')
-
-
-def _ph_libs_clean(libs):
-    # 每个库的用户偏好：显示名 / 隐藏掉的默认标签 / 停用。CSV 文件永远不动。
-    out = {}
-    if not isinstance(libs, dict):
-        return out
-    for key, val in list(libs.items())[:200]:
-        if not isinstance(val, dict):
-            continue
-        rec = {}
-        name = str(val.get("name") or "").strip()[:64]
-        if name:
-            rec["name"] = name
-        if val.get("disabled"):
-            rec["disabled"] = True
-        hid = val.get("hidden")
-        if isinstance(hid, list):
-            rec["hidden"] = [str(x)[:96] for x in hid[:5000] if str(x).strip()]
-        grp = _ph_cat_clean(val.get("groups"))   # 库自己的分组树（用户可改，必须原样存回去）
-        if grp:
-            rec["groups"] = grp
-        pl = val.get("place")                    # 库内那份的归类：标签名 -> 分类 id
-        if isinstance(pl, dict):
-            mp = {}
-            for k2, v2 in list(pl.items())[:20000]:
-                kk = str(k2).strip()[:96]
-                vv = str(v2).strip()[:64]
-                if kk and vv:
-                    mp[kk] = vv
-            if mp:
-                rec["place"] = mp
-        fav = val.get("fav")                     # 库侧的收藏（标签名数组），和我的副本分开
-        if isinstance(fav, list):
-            rec["fav"] = [str(x)[:96] for x in fav[:20000] if str(x).strip()]
-        mt = val.get("meta")                     # 库侧那份的显示覆盖：标签名 -> {zh,color,weight}
-        if isinstance(mt, dict):
-            mm = {}
-            for k2, v2 in list(mt.items())[:20000]:
-                kk = str(k2).strip()[:96]
-                if not kk or not isinstance(v2, dict):
-                    continue
-                e = {}
-                z = str(v2.get("zh") or "").strip()[:64]
-                if z:
-                    e["zh"] = z
-                c = str(v2.get("color") or "").strip()[:32]
-                if c:
-                    e["color"] = c
-                w = v2.get("weight")
-                if isinstance(w, (int, float)) and w:
-                    e["weight"] = w
-                elif isinstance(w, str) and w.strip():
-                    e["weight"] = w.strip()[:32]
-                if e:
-                    mm[kk] = e
-            if mm:
-                rec["meta"] = mm
-        if rec:
-            out[str(key)[:64]] = rec
-    return out
-
-
-# 预览图（base64 data URL）落盘上限。卡片侧 _ph_pcards_save 用的是同一个数；
-# 标签侧原来单独写 400000，两边不一致，且超限会**静默丢弃**（表现就是"预览图偶尔没了"）。
-# ⚠️ 2026-10-04 起预览图改为「独立文件」存储，JSON 里只留哈希短名；
-#    该上限仅用于「把进来的 data URL 转存成文件」时的**单张**准入判断（见 _pv_store_dataurl）。
-_PH_PREVIEW_MAX = 1200000
-
-
-# ===== 预览图独立文件存储（user/EzFlex/{tag_preview,card_preview}/<sha1>.webp）=====
-# 背景：以前预览图以 base64 内嵌在 JSON 里，图一多就「全量传输 + 全量 stringify」，
-#      且单条超 _PH_PREVIEW_MAX 会被静默丢弃。改为独立文件后：
-#      JSON 只存哈希短名，img.src 走专用路由 + 长缓存 → 加载/保存都随图数线性变好的方向反转。
-# 身份模型：文件按「标签名 / 卡片名」派生哈希命名（**不能用 id**：库侧记录的 id 是随机补的，
-#          重新加载会变；name 才是稳定且贯穿 CSV 库/元数据/我的副本的唯一键）。
-# ★ 2026-10-04：标签与卡片**分目录**存储（同名标签与卡片哈希会撞车 → 必须分开）：
-#     kind='tag'  → user/EzFlex/tag_preview/
-#     kind='card' → user/EzFlex/card_preview/
-#   旧的共用目录 tag_preview 里若混着卡片文件，读取时会**惰性搬迁**到 card_preview（见 _pv_dir/_pv_get_or_migrate_card）。
-_PV_DIRNAME = 'tag_preview'                 # 标签预览目录（保留旧名，兼容外部引用）
-_PV_CARD_DIRNAME = 'card_preview'           # 卡片预览目录
-_PV_KINDS = ('tag', 'card')
-
-
-def _pv_dir_of(kind):
-    """预览子目录名：kind='card' → card_preview；其它（含 'tag'/None）→ tag_preview。"""
-    return _PV_CARD_DIRNAME if str(kind) == 'card' else _PV_DIRNAME
-
-
-def _pv_legacy_dir():
-    """旧版「标签卡片共用」目录（tag_preview）；用于把历史卡片预览惰性搬迁出来。"""
-    return _ezflex_user_dir(_PV_DIRNAME)
-
-
-def _pv_dir(kind='tag'):
-    """预览图目录 user/EzFlex/<子目录>/（与 prompts 同级，随 user 数据一起迁移/保留）。"""
-    d = _ezflex_user_dir(_pv_dir_of(kind))
-    if d:
-        try:
-            os.makedirs(d, exist_ok=True)
-        except Exception:
-            pass
-    return d
-
-
-def _pv_hash(name):
-    """标签名/卡片名 → 稳定哈希短名（sha1 前 32 hex）。归一化规则必须与前端判等一致（strip）。"""
-    import hashlib
-    nm = str(name or '').strip()
-    return hashlib.sha1(nm.encode('utf-8')).hexdigest()[:32]
-
-
-def _pv_ext_of(data_url):
-    """从 data URL 的 mime 推断扩展名；默认 webp（体积优先）。"""
-    m = re.match(r'data:image/([a-z0-9.+-]+)', str(data_url or ''), re.I)
-    kind = (m.group(1).lower() if m else 'webp')
-    kind = 'jpg' if kind in ('jpeg', 'jpg') else kind
-    if kind not in ('webp', 'png', 'jpg', 'gif', 'bmp'):
-        kind = 'webp'
-    return kind
-
-
-def _pv_store_dataurl(name, data_url, kind='tag'):
-    """把 data:image/... 写进独立文件，返回哈希短名（如 'ab12...ef.webp'）；失败返回 ''。
-    覆盖写：同一 name 重存 = 覆盖同一文件（旧的其它扩展名文件会被顺手删掉）。
-    kind：'tag' → tag_preview/；'card' → card_preview/。"""
-    s = str(data_url or '')
-    if not s.startswith('data:image/') or ',' not in s or len(s) > _PH_PREVIEW_MAX:
-        return ''
-    d = _pv_dir(kind)
-    if not d:
-        return ''
-    ext = _pv_ext_of(s)
-    b64 = s.split(',', 1)[1]
-    try:
-        raw = base64.b64decode(b64, validate=False)
-    except Exception:
-        return ''
-    if not raw:
-        return ''
-    base = _pv_hash(name)
-    fname = base + '.' + ext
-    dst = os.path.join(d, fname)
-    try:
-        tmp = dst + '.tmp'
-        with open(tmp, 'wb') as fh:
-            fh.write(raw)
-        os.replace(tmp, dst)
-    except Exception:
-        return ''
-    # 同一 name 若换过扩展名（如先 png 后 webp），删掉同名其它扩展，避免残留
-    for other in ('webp', 'png', 'jpg', 'gif', 'bmp'):
-        if other == ext:
-            continue
-        op = os.path.join(d, base + '.' + other)
-        try:
-            if os.path.isfile(op):
-                os.remove(op)
-        except Exception:
-            pass
-    return fname
-
-
-def _pv_file_path(fname, kind='tag'):
-    """短名 → 绝对路径；拒绝任何路径分隔/穿越，只接受 <32hex>.<ext> 形态。"""
-    s = str(fname or '').strip()
-    if not s or os.path.sep in s or '/' in s or '..' in s:
-        return ''
-    if not re.fullmatch(r'[0-9a-fA-F]{4,64}\.[A-Za-z0-9]{2,5}', s):
-        return ''
-    d = _pv_dir(kind)
-    if not d:
-        return ''
-    p = os.path.join(d, s)
-    if os.path.realpath(os.path.dirname(p)) != os.path.realpath(d):
-        return ''
-    return p
-
-
-def _pv_relocate_legacy(fname, kind):
-    """历史遗留搬迁：老版本标签/卡片共用 tag_preview/。
-    卡片预览读到时若卡目录里没有、但老共用目录里有 → 搬过来（一次，之后正常）。
-    只在 kind='card' 时用；tag 本就在 tag_preview，无需迁。返回是否发生了搬迁。"""
-    if str(kind) != 'card':
-        return False
-    s = str(fname or '').strip()
-    if not re.fullmatch(r'[0-9a-fA-F]{4,64}\.[A-Za-z0-9]{2,5}', s):
-        return False
-    dst_dir = _pv_dir('card')
-    if not dst_dir:
-        return False
-    dst = os.path.join(dst_dir, s)
-    if os.path.isfile(dst):
-        return False
-    legacy = _pv_legacy_dir()
-    if not legacy:
-        return False
-    src = os.path.join(legacy, s)
-    if not os.path.isfile(src):
-        return False
-    try:
-        os.replace(src, dst)     # 同盘移动（同一 user 目录下）
-    except Exception:
-        try:
-            import shutil
-            shutil.move(src, dst)
-        except Exception:
-            return False
-    return True
-
-
-def _pv_delete(name, kind='tag'):
-    """删除某 name 对应的预览文件（尽力，任何扩展名）；同时清掉老共用目录里的同名残留。"""
-    base = _pv_hash(name)
-    dirs = [_pv_dir(kind)]
-    if str(kind) == 'card':
-        dirs.append(_pv_legacy_dir())   # 历史遗留位置也清一下
-    for d in dirs:
-        if not d:
-            continue
-        for ext in ('webp', 'png', 'jpg', 'gif', 'bmp'):
-            try:
-                p = os.path.join(d, base + '.' + ext)
-                if os.path.isfile(p):
-                    os.remove(p)
-            except Exception:
-                pass
-
-
-def _pv_is_dataurl(v):
-    return isinstance(v, str) and v.startswith('data:image/') and len(v) <= _PH_PREVIEW_MAX
-
-
-def _pv_is_fname(v):
-    """JSON 里 preview 字段是否为「新格式哈希短名」。"""
-    if not isinstance(v, str):
-        return False
-    return bool(re.fullmatch(r'[0-9a-fA-F]{4,64}\.[A-Za-z0-9]{2,5}', v.strip()))
-
-
-def _pv_migrate_value(name, val, kind='tag'):
-    """惰性迁移：值是旧 base64 → 落盘成文件并返回哈希短名；值已是新格式 → 原样返回；其它 → ''。
-    kind 决定落到 tag_preview/ 还是 card_preview/。"""
-    if _pv_is_dataurl(val):
-        return _pv_store_dataurl(name, val, kind)
-    if _pv_is_fname(val):
-        return str(val).strip()
-    return ''
-
-
-def _pv_clean_dir(valid_names, kind='tag'):
-    """孤儿回收：目录里存在、但不在 valid_names 里的文件删掉。
-    ★ valid_names 必须是「**当前真正被引用的哈希短名集合**」（不是「所有 name 的哈希」）——
-      否则「把某条预览移除了、但记录还在」时，它的哈希仍被算作有效 → 文件永远删不掉（用户报过：
-      「移除后对应图片没删掉」）。
-    valid_names 为 None 时不清理（避免误删）。只清指定 kind 的目录。"""
-    if valid_names is None:
-        return 0
-    d = _pv_dir(kind)
-    if not d or not os.path.isdir(d):
-        return 0
-    keep = set()
-    for v in valid_names:
-        s = str(v or "").strip()
-        if _pv_is_fname(s):
-            keep.add(s)
-    n = 0
-    try:
-        for fn in os.listdir(d):
-            if fn.endswith('.tmp'):
-                try:
-                    os.remove(os.path.join(d, fn))
-                except Exception:
-                    pass
-                continue
-            if fn not in keep:
-                try:
-                    os.remove(os.path.join(d, fn))
-                    n += 1
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return n
-
-
-def _pv_all_valid_names():
-    """两个目录合并回收用：当前**真正被引用**的预览短名集合（标签 ∪ 卡片，含卡片组顶层 + 组内单卡）。
-    读取失败时返回 None（= 不清理，宁可留着也别误删）。
-    ⚠️ 与 _pv_clean_dir 同口径：只收 preview 非空的短名，不收没有预览的 name。"""
-    names = set()
-    ok = False
-    try:
-        fn = _ph_tags_file()
-        if fn and os.path.isfile(fn):
-            with open(fn, 'r', encoding='utf-8') as fh:
-                d = json.loads(fh.read())
-            for t in (d.get("tags") or []):
-                if isinstance(t, dict):
-                    pv = str(t.get("preview") or "").strip()
-                    if _pv_is_fname(pv):
-                        names.add(pv)
-            ok = True
-    except Exception:
-        pass
-    try:
-        pd = _ph_prompts_dir()
-        if pd and os.path.isdir(pd):
-            for fn in os.listdir(pd):
-                if not fn.endswith(".json") or fn.endswith(".bak"):
-                    continue
-                try:
-                    with open(os.path.join(pd, fn), 'r', encoding='utf-8') as fh:
-                        d = json.loads(fh.read())
-                except Exception:
-                    continue
-                if isinstance(d, dict):
-                    pv = str(d.get("preview") or "").strip()
-                    if _pv_is_fname(pv):
-                        names.add(pv)
-                    for c in (d.get("cards") or []):
-                        if isinstance(c, dict):
-                            cpv = str(c.get("preview") or "").strip()
-                            if _pv_is_fname(cpv):
-                                names.add(cpv)
-            ok = True
-    except Exception:
-        pass
-    return names if ok else None
-
-
-def _pv_tag_valid_names():
-    """标签目录回收用：**当前真正引用了预览图的标签**的哈希短名集合（读取失败 → None，不清理）。
-    ⚠️ 必须只收「preview 非空」的条目 —— 收了没有预览的 name 会让它对应的孤儿文件永远删不掉。"""
-    try:
-        fn = _ph_tags_file()
-        if not fn or not os.path.isfile(fn):
-            return None
-        with open(fn, 'r', encoding='utf-8') as fh:
-            d = json.loads(fh.read())
-        out = set()
-        for t in (d.get("tags") or []):
-            if isinstance(t, dict):
-                pv = str(t.get("preview") or "").strip()
-                if _pv_is_fname(pv):
-                    out.add(pv)
-        return out
-    except Exception:
-        return None
-
-
-def _pv_card_valid_names():
-    """卡片目录回收用：prompts/*.json 里**真正引用了预览图**的短名集合（读取失败 → None，不清理）。
-    收「卡片组顶层 preview」+「组内每张卡的 preview」两类。"""
-    try:
-        pd = _ph_prompts_dir()
-        if not pd or not os.path.isdir(pd):
-            return None
-        out = set()
-        for fn in os.listdir(pd):
-            if not fn.endswith(".json") or fn.endswith(".bak"):
-                continue
-            try:
-                with open(os.path.join(pd, fn), 'r', encoding='utf-8') as fh:
-                    d = json.loads(fh.read())
-            except Exception:
-                continue
-            if not isinstance(d, dict):
-                continue
-            pv = str(d.get("preview") or "").strip()
-            if _pv_is_fname(pv):
-                out.add(pv)
-            for c in (d.get("cards") or []):
-                if isinstance(c, dict):
-                    cpv = str(c.get("preview") or "").strip()
-                    if _pv_is_fname(cpv):
-                        out.add(cpv)
-        return out
-    except Exception:
-        return None
-
-
-def _ph_tags_clean(items):
-    out = []
-    if not isinstance(items, list):
-        return out
-    seen = set()
-    for it in items[:10000]:
-        if not isinstance(it, dict):
-            continue
-        name = str(it.get("name") or "").strip()[:64]
-        if not name:
-            continue
-        tid = str(it.get("id") or "").strip()[:64]
-        if not tid or tid in seen:
-            # 补的 id 必须确定（以前用 hash()，进程不同就变，存两次 id 就漂了）
-            base = "t" + str(len(out) + 1)
-            tid, n = base, 1
-            while tid in seen:
-                n += 1
-                tid = base + "_" + str(n)
-        seen.add(tid)
-        rec = {"id": tid, "name": name, "category": str(it.get("category") or "").strip()[:64]}
-        # 预览图：改为独立文件存储，JSON 只留哈希短名。
-        #   - 旧数据（data:image base64）在这里**惰性迁移**：落盘成文件、字段换成短名（用户无感）。
-        #   - 新格式（<hash>.ext）原样保留；其它值一律丢弃。
-        pv = _pv_migrate_value(name, it.get("preview"), 'tag')
-        if pv:
-            rec["preview"] = pv
-        # 布尔字段单独处理：以前和字符串字段一起 str(v)[:8]，
-        #   mine=True  → "True"（truthy 字符串，能用但类型脏）；mine=False → "False"（**truthy**！前端 !t.mine 判不出）
-        for key in ("mine", "fav"):
-            if it.get(key) is True:
-                rec[key] = True
-        for key, cap in (("from", 64), ("collectedFrom", 64), ("rec", 64), ("zh", 64), ("color", 32)):
-            val = str(it.get(key) or "").strip()[:cap]
-            if val:
-                rec[key] = val
-        weight = it.get("weight")
-        if isinstance(weight, (int, float)) and 0 < float(weight) <= 5:
-            rec["weight"] = round(float(weight), 2)
-        out.append(rec)
-    return out
-
-
-def _ph_tags_load():
-    fn = _ph_tags_file()
-    if not fn or not os.path.isfile(fn):
-        return {"categories": [], "tags": []}
-    try:
-        with open(fn, 'r', encoding='utf-8') as fh:
-            d = json.loads(fh.read())
-    except Exception:
-        return {"categories": [], "tags": []}
-    if not isinstance(d, dict):
-        d = {}
-    return {"categories": _ph_cat_clean(d.get("categories")), "tags": _ph_tags_clean(d.get("tags")), "libs": _ph_libs_clean(d.get("libs"))}
-
-
-async def _ph_tags_get(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    return _web.json_response(_ph_tags_load())
-
-
-async def _ph_preview_delete(req):
-    """删掉某个标签/卡片对应的预览图片文件（+ 顺手回收目录里的孤儿）。
-    POST {name, kind}。标签侧前端「移除预览图」不落 JSON 字段时也能立即清文件，
-    否则该文件会一直留在 tag_preview/ 里（用户报过：「移除后对应图片没删掉」）。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    name = str(data.get("name") or "").strip()[:96]
-    kind = str(data.get("kind") or "tag").strip().lower()
-    if kind not in _PV_KINDS:
-        kind = "tag"
-    if not name:
-        return _web.json_response({"error": "no name"}, status=400)
-    _pv_delete(name, kind)
-    try:
-        if kind == 'card':
-            _pv_clean_dir(_pv_card_valid_names(), 'card')
-        else:
-            _pv_clean_dir(_pv_tag_valid_names(), 'tag')
-    except Exception:
-        pass
-    return _web.json_response({"ok": True, "name": name, "kind": kind})
-
-
-async def _ph_thumb_get(req):
-    """预览图独立文件服务：GET /prompt_helper/thumb/<kind>/<hash>.webp
-    kind = 'tag' | 'card'（缺省/未知当 'tag'，兼容旧 URL）。
-    只读对应目录下的合法短名（拒绝路径穿越）。
-    卡片图若还在历史共用的 tag_preview/ 里，顺手搬迁到 card_preview/ 再返回。
-
-    ★ 缓存策略：文件名是「名字哈希」而非「内容哈希」→ 重新生成预览图后 URL 不变。
-      若给 immutable + 1 年，浏览器永远拿旧图（用户报过：「生成预览图没有覆盖掉原来的图片」）。
-      所以这里改为 **no-cache + ETag(内容哈希) + Last-Modified**：浏览器每次带 If-None-Match
-      回源校验，没变 → 304 省流量；变了（重新生成过）→ 200 拿新图。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    kind = (req.match_info.get("kind") or "tag").strip().lower()
-    if kind not in _PV_KINDS:
-        kind = "tag"
-    fname = (req.match_info.get("fname") or "").strip()
-    p = _pv_file_path(fname, kind)
-    if p and not os.path.isfile(p) and kind == "card":
-        # 历史遗留：卡片图可能在旧的共用 tag_preview/ 里 → 搬迁后再取
-        try:
-            if _pv_relocate_legacy(fname, kind):
-                p = _pv_file_path(fname, kind)
-        except Exception:
-            pass
-    if not p or not os.path.isfile(p):
-        return _web.json_response({"error": "not found"}, status=404)
-    try:
-        with open(p, 'rb') as fh:
-            raw = fh.read()
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-    import hashlib as _hashlib
-    etag = '"' + _hashlib.sha1(raw).hexdigest()[:32] + '"'
-    inm = req.headers.get("If-None-Match")
-    if inm and etag in [x.strip() for x in inm.split(",")]:
-        return _web.Response(status=304, headers={"ETag": etag, "Cache-Control": "no-cache"})
-    ext = fname.rsplit('.', 1)[-1].lower()
-    mime = {"webp": "image/webp", "png": "image/png", "jpg": "image/jpeg",
-            "jpeg": "image/jpeg", "gif": "image/gif", "bmp": "image/bmp"}.get(ext, "application/octet-stream")
-    try:
-        import email.utils as _eu
-        lm = _eu.formatdate(os.path.getmtime(p), usegmt=True)
-    except Exception:
-        lm = None
-    hdrs = {"Cache-Control": "no-cache", "ETag": etag}
-    if lm:
-        hdrs["Last-Modified"] = lm
-    return _web.Response(body=raw, content_type=mime, headers=hdrs)
-
-
 def _ph_backup_before_write(fn):
     """写前把旧文件留一份 .bak（只留最近一份）。
     标签数据（ezflex_prompt_tags.json）和卡片（user/EzFlex/prompts/*.json）都走这里。
-    ⚠️ 2026-10-04 起预览图已独立成文件（tag_preview/），不再内嵌，所以 .bak 主要保的是元数据。"""
+    预览图已独立成文件（tag_preview/），不再内嵌，所以 .bak 主要保的是元数据。"""
     try:
         if fn and os.path.isfile(fn):
             import shutil
             shutil.copy2(fn, fn + ".bak")
     except Exception:
         pass
-
-
-async def _ph_tags_save(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    rec = {"categories": _ph_cat_clean(data.get("categories")), "tags": _ph_tags_clean(data.get("tags")), "libs": _ph_libs_clean(data.get("libs"))}
-    fn = _ph_tags_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    # ⚠️ 空表护栏：整份覆盖写最怕前端拿了个「还没加载完/加载失败」的空状态回来保存 —— 一写就把
-    #    磁盘上几百 KB 的标签连同内嵌预览图全抹了（实测发生过：live 文件被写成 tags:[]）。
-    #    真要清空，前端得显式带 allowEmpty:true，避免误清。
-    if not rec["tags"] and not data.get("allowEmpty"):
-        try:
-            cur = _ph_tags_load()
-        except Exception:
-            cur = {"tags": []}
-        if cur.get("tags"):
-            # 磁盘上有数据、这次却要写空 → 判定为坏请求，不写盘，把现状回给前端让它自愈（顺手留 .bak）。
-            try:
-                _ph_backup_before_write(fn)
-            except Exception:
-                pass
-            return _web.json_response({
-                "ok": False, "rejected": "empty_overwrite",
-                "categories": cur["categories"], "tags": cur["tags"], "libs": cur.get("libs") or {},
-            })
-    try:
-        _ph_backup_before_write(fn)
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump(rec, fh, ensure_ascii=False, indent=2)
-        # 孤儿回收：标签目录已与卡片目录分开 → 只按「标签名」清 tag_preview/ 即可，不会误伤卡片图。
-        try:
-            _pv_clean_dir(_pv_tag_valid_names(), 'tag')
-        except Exception:
-            pass
-        return _web.json_response({"ok": True, "categories": rec["categories"], "tags": rec["tags"], "libs": rec["libs"]})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-# ===== 标签库（user_data/PromptHelperLib/*.csv：tagcomplete 格式 tag,category,count,aliases）=====
-# 下划线开头或 zh* 的 CSV 是中文词典/辅助文件，不算标签库。
-_PH_LIB_DIR = os.path.join(_USER_DIR, "PromptHelperLib")
-_PH_LIB_ROWS = {}
-
-
-def _ph_lib_files():
-    try:
-        os.makedirs(_PH_LIB_DIR, exist_ok=True)
-    except Exception:
-        pass
-    out = []
-    try:
-        names = sorted(os.listdir(_PH_LIB_DIR))
-    except OSError:
-        return out
-    for name in names:
-        if not name.lower().endswith('.csv'):
-            continue
-        stem = name[:-4]
-        if stem.startswith('_') or stem.lower().startswith('zh'):
-            continue
-        fp = os.path.join(_PH_LIB_DIR, name)
-        if os.path.isfile(fp):
-            out.append((stem, fp))
-    return out
-
-
-def _ph_lib_stat(fp):
-    """(行数, 字节数)；按 mtime 缓存，免得每次开面板都重读几 MB。"""
-    try:
-        mt = os.path.getmtime(fp)
-        size = os.path.getsize(fp)
-    except OSError:
-        return 0, 0
-    hit = _PH_LIB_ROWS.get(fp)
-    if hit and hit[0] == mt:
-        return hit[1], size
-    try:
-        with open(fp, 'rb') as fh:
-            rows = sum(chunk.count(b'\n') for chunk in iter(lambda: fh.read(1 << 20), b''))
-    except OSError:
-        return 0, size
-    _PH_LIB_ROWS[fp] = (mt, rows)
-    return rows, size
-
-
-async def _ph_libs_get(req):
-    libs = []
-    for sid, fp in _ph_lib_files():
-        rows, size = _ph_lib_stat(fp)
-        libs.append({"id": sid, "rows": rows, "size": size})
-    return _web.json_response({"libs": libs})
-
-
-async def _ph_tag_lib_get(req):
-    lib_id = (req.query.get('id') or '').strip()
-    for sid, fp in _ph_lib_files():
-        if sid == lib_id:
-            return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
-    return _web.json_response({"error": "unknown tag library"}, status=404)
-
-
-async def _ph_tag_zh_get(req):
-    fp = os.path.join(_PH_LIB_DIR, '_zh_CN.csv')
-    if not os.path.isfile(fp):
-        return _web.json_response({"error": "no zh dictionary"}, status=404)
-    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
-
-
-async def _ph_tag_kind_get(req):
-    """细分分类词表 _tag_kind.csv（tag,kind：person/clothing/expression/sex/scene/camera/object/style）。"""
-    fp = os.path.join(_PH_LIB_DIR, '_tag_kind.csv')
-    if not os.path.isfile(fp):
-        return _web.json_response({"error": "no tag kind table"}, status=404)
-    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
-
-
-async def _ph_tag_related_get(req):
-    """相关标签表 _related.csv（tag,相关1,相关2,…），卡片右键菜单与悬停提示用。"""
-    fp = os.path.join(_PH_LIB_DIR, '_related.csv')
-    if not os.path.isfile(fp):
-        return _web.json_response({"error": "no related tags table"}, status=404)
-    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
-
-
-async def _ph_tag_nsfw_get(req):
-    """NSFW 标签表 _nsfw.csv（一行一个），面板「隐藏 NSFW」筛选用。"""
-    fp = os.path.join(_PH_LIB_DIR, '_nsfw.csv')
-    if not os.path.isfile(fp):
-        return _web.json_response({"error": "no nsfw table"}, status=404)
-    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
-
-
-async def _ph_tag_desc_get(req):
-    """标签中文短描述 _tag_desc.csv（tag,desc），卡片悬停显示。"""
-    fp = os.path.join(_PH_LIB_DIR, '_tag_desc.csv')
-    if not os.path.isfile(fp):
-        return _web.json_response({"error": "no tag descriptions"}, status=404)
-    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
-
-
-async def _ph_tag_series_get(req):
-    """角色→系列表 _char_series.csv（character,copyright,score），供标签面板「系列」分组筛选。"""
-    fp = os.path.join(_PH_LIB_DIR, '_char_series.csv')
-    if not os.path.isfile(fp):
-        return _web.json_response({"error": "no character-series table"}, status=404)
-    return _web.FileResponse(fp, headers={"Cache-Control": "no-store"})
-
-
-async def _ph_tag_furry_get(req):
-    """兽类/物种词表：_e621_species.csv（e621 分类 5 的物种，去掉 Danbooru 已有的）+ _furry_extra.csv（可自己加）。"""
-    names = []
-    for name in ('_e621_species.csv', '_furry_extra.csv'):
-        fp = os.path.join(_PH_LIB_DIR, name)
-        if not os.path.isfile(fp):
-            continue
-        try:
-            with open(fp, 'r', encoding='utf-8-sig') as fh:
-                names.extend(ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith('#'))
-        except OSError:
-            continue
-    return _web.Response(text='\n'.join(names), content_type='text/plain', headers={"Cache-Control": "no-store"})
-
-
-def _ph_import_rows(text, name):
-    """把导入文件解析成 [(name, second)]：csV/tsv/txt 按列、json 按字段、sql 抽 VALUES。"""
-    ext = os.path.splitext(name.lower())[1]
-    text = text.replace('\r\n', '\n').replace('\r', '\n')
-    rows = []
-    if ext == '.sql':
-        for m in re.finditer(r"VALUES\s*\(([^)]*)\)", text, re.I):
-            cells = next(csv.reader([m.group(1)]), [])
-            nm = (cells[0] if cells else '').strip()
-            if nm:
-                rows.append((nm, (cells[2] if len(cells) > 2 else '').strip()))
-        return rows
-    if ext == '.json':
-        try:
-            d = json.loads(text)
-        except Exception:
-            return []
-        items = d.get('tags') if isinstance(d, dict) else d
-        if not isinstance(items, list):
-            return []
-        for it in items:
-            if isinstance(it, str):
-                rows.append((it.strip(), ''))
-            elif isinstance(it, dict):
-                nm = str(it.get('name') or it.get('tag') or it.get('text') or '').strip()
-                if nm:
-                    rows.append((nm, str(it.get('translate') or it.get('zh') or it.get('category') or it.get('cat') or '')))
-        return rows
-    first = text.split('\n')[0] if text else ''
-    sep = '\t' if (ext == '.tsv' or ('\t' in first and ',' not in first)) else ','
-    for ln in text.split('\n'):
-        if not ln.strip() or ln.lstrip().startswith('#'):
-            continue
-        cells = next(csv.reader([ln], delimiter=sep), [])
-        nm = (cells[0] if cells else '').strip()
-        if nm:
-            rows.append((nm, (cells[1] if len(cells) > 1 else '').strip()))
-    return rows
-
-
-def _ph_import_is_zh(rows):
-    """第 2 列大面积是汉字 → 当成中英对照表（并进 _zh_CN.csv），否则当标签库。"""
-    if len(rows) < 5:
-        return False
-    cjk = re.compile(u'[\u4e00-\u9fff]')
-    sample = rows[:200]
-    return sum(1 for r in sample if cjk.search(r[1] or '')) >= len(sample) * 0.6
-
-
-def _ph_import_zh(rows):
-    fp = os.path.join(_PH_LIB_DIR, '_zh_CN.csv')
-    cur = {}
-    if os.path.isfile(fp):
-        try:
-            with open(fp, 'r', encoding='utf-8-sig') as fh:
-                for r in csv.reader(fh):
-                    if len(r) >= 2 and r[0].strip() and not r[0].lstrip().startswith('#'):
-                        cur[r[0].strip()] = r[1].strip()
-        except OSError:
-            pass
-    for r in rows:
-        nm = r[0].strip()
-        if nm and r[1].strip():
-            cur[nm] = r[1].strip()
-    os.makedirs(_PH_LIB_DIR, exist_ok=True)
-    with open(fp, 'w', encoding='utf-8-sig', newline='') as fh:
-        w = csv.writer(fh)
-        w.writerow(['tag', 'zh'])
-        for nm in sorted(cur):
-            w.writerow([nm, cur[nm]])
-    return len(cur)
-
-
-async def _ph_tag_import(req):
-    """导入标签库：csv / tsv / txt / json / sql 自动识别；中英对照表并进 _zh_CN.csv。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    name = str(data.get("name") or "import").strip()[:120]
-    text = str(data.get("text") or "")
-    if len(text) > 64 * 1024 * 1024:
-        return _web.json_response({"error": "file too large"}, status=413)
-    rows = _ph_import_rows(text, name)
-    if not rows:
-        return _web.json_response({"error": "no tags found (csv / tsv / txt / json / sql)"}, status=400)
-    if _ph_import_is_zh(rows):
-        total = _ph_import_zh(rows)
-        return _web.json_response({"ok": True, "kind": "zh", "rows": total})
-    lib_id = re.sub(r'[^\w\u4e00-\u9fff.-]+', '_', os.path.splitext(name)[0]).strip('_')[:60] or "import"
-    if lib_id.startswith('_') or lib_id.lower().startswith('zh'):
-        lib_id = "lib_" + lib_id.lstrip('_')
-    fp = os.path.join(_PH_LIB_DIR, lib_id + '.csv')
-    os.makedirs(_PH_LIB_DIR, exist_ok=True)
-    with open(fp, 'w', encoding='utf-8-sig', newline='') as fh:
-        w = csv.writer(fh)
-        for nm, second in rows:
-            cat = second if re.fullmatch(r'-?\d+', second) else '0'
-            w.writerow([nm, cat, '0', ''])
-    _PH_LIB_ROWS.pop(fp, None)
-    return _web.json_response({"ok": True, "kind": "lib", "id": lib_id, "rows": len(rows)})
-
-
 def _ph_prompts_dir():
     """「卡片管理」保存的提示词卡片目录：user/EzFlex/prompts（旧的 user/prompts 首次访问自动搬进来）。"""
     d = _ezflex_user_dir('prompts')
@@ -7057,755 +1732,7 @@ def _ph_prompts_dir():
         except Exception:
             pass
     return d
-
-
-def _ph_prompt_card_file(name):
-    """名称 → user/EzFlex/prompts/<名称>.json；含路径分隔符/通配符/隐藏名一律拒绝，并确认仍落在该目录内。"""
-    d = _ph_prompts_dir()
-    name = str(name or "").strip()
-    if not d or not name or len(name) > 64 or name.startswith('.') or any(c in name for c in '\\/:*?"<>|'):
-        return ''
-    fn = os.path.join(d, name + '.json')
-    if os.path.realpath(os.path.dirname(fn)) != os.path.realpath(d):
-        return ''
-    return fn
-
-
-async def _ph_pcards_get(req):
-    """带 name = 读取一份保存的提示词卡片/卡片组；不带 name = 已保存清单（含分类与类型）。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    name = (req.query.get("name") or "").strip()
-    d = _ph_prompts_dir()
-    if name:
-        fn = _ph_prompt_card_file(name)
-        if not fn or not os.path.isfile(fn):
-            return _web.json_response({"error": "no card named " + name}, status=404)
-        try:
-            with open(fn, 'r', encoding='utf-8') as fh:
-                rec = json.loads(fh.read())
-        except Exception as e:
-            return _web.json_response({"error": str(e)}, status=500)
-        if not isinstance(rec, dict):
-            rec = {}
-        cards = rec.get("cards")
-        # 旧卡片文件里 preview 还是 base64 → GET 时惰性迁移成短名（写回文件，用户无感）
-        pv = _pv_get_or_migrate_card(name, fn, rec)
-        return _web.json_response({"name": name, "cards": cards if isinstance(cards, list) else [],
-                                   "kind": str(rec.get("kind") or "card"), "category": str(rec.get("category") or ""),
-                                   "preview": pv})
-    out = []
-    if d and os.path.isdir(d):
-        for fn in sorted(os.listdir(d)):
-            if not fn.endswith(".json"):
-                continue
-            try:
-                with open(os.path.join(d, fn), 'r', encoding='utf-8') as fh:
-                    rec = json.loads(fh.read())
-            except Exception:
-                continue
-            if not isinstance(rec, dict):
-                rec = {}
-            cards = rec.get("cards")
-            nm = fn[:-5]
-            pv = _pv_get_or_migrate_card(nm, os.path.join(d, fn), rec)
-            out.append({"name": nm, "count": len(cards) if isinstance(cards, list) else 0,
-                        "kind": str(rec.get("kind") or "card"), "category": str(rec.get("category") or ""),
-                        "preview": pv})
-    return _web.json_response({"cards": out})
-
-
-def _pv_get_or_migrate_card(name, fn, rec):
-    """读卡片 preview：旧 base64 → 落盘成文件 + 写回文件 + 返回短名；新短名 → 原样返回。"""
-    raw = rec.get("preview") if isinstance(rec, dict) else None
-    if not raw:
-        return ""
-    short = _pv_migrate_value(name, raw, 'card')
-    if short and short != raw:
-        # 发生过迁移（base64 → 短名）：把文件写回，避免每次都重转
-        try:
-            rec["preview"] = short
-            _ph_backup_before_write(fn)
-            with open(fn, 'w', encoding='utf-8') as fh:
-                json.dump(rec, fh, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-    else:
-        # 历史遗留：短名对应的文件还躺在旧的共用 tag_preview/ 里 → 惰性搬到 card_preview/
-        try:
-            if short and not os.path.isfile(_pv_file_path(short, 'card') or ''):
-                _pv_relocate_legacy(short, 'card')
-        except Exception:
-            pass
-    return short
-
-
-async def _ph_pcards_save(req):
-    """把选中的提示词卡片存进 userdata/prompts/<名称>.json（同名覆盖）。仅本机客户端。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    name = (data.get("name") or "").strip()
-    cards = data.get("cards")
-    category = data.get("category")
-    category = (str(category).strip()[:200] if category is not None else None)   # 缺省 = 不改分类（只改预览图时别把分类冲掉）
-    kind_in = str(data.get("kind") or "").strip()
-    fn = _ph_prompt_card_file(name)
-    if not fn:
-        return _web.json_response({"error": 'invalid name: must not contain \\ / : * ? " < > | , must not start with a dot, max 64 characters'}, status=400)
-    # 预览图：传入可能是「data:image base64（新加的图）」或「已存在的哈希短名（只改别的字段时带回）」。
-    # 统一走 _pv_migrate_value：base64 → 落盘成文件并换短名；短名 → 原样；其它 → 空。
-    preview_in = _pv_migrate_value(name, data.get("preview"), 'card')
-    remove_preview = bool(data.get("removePreview"))
-    if isinstance(cards, list) and cards:
-        rec = {"name": name, "cards": cards, "kind": kind_in if kind_in in ("card", "group") else "card", "category": category or ""}
-        # 只改卡片内容时这里会重建 rec：把原文件里已有的预览图带回来（前端保存卡片不传 preview，不然一存就没图）
-        if not preview_in and os.path.isfile(fn):
-            try:
-                with open(fn, 'r', encoding='utf-8') as fh:
-                    prev = json.loads(fh.read())
-                if isinstance(prev, dict):
-                    preview_in = _pv_migrate_value(name, prev.get("preview"), 'card')
-            except Exception:
-                pass
-        if preview_in:
-            rec["preview"] = preview_in
-    else:
-        # 没带卡片 = 只改分类/类型（移动已保存的卡片/卡片组）：原文件必须在
-        if not os.path.isfile(fn):
-            return _web.json_response({"error": "no card selected to save"}, status=400)
-        try:
-            with open(fn, 'r', encoding='utf-8') as fh:
-                rec = json.loads(fh.read())
-        except Exception:
-            rec = {}
-        if not isinstance(rec, dict):
-            rec = {}
-        rec["name"] = name
-        if category is not None:
-            rec["category"] = category
-        if preview_in:
-            rec["preview"] = preview_in
-        elif isinstance(rec.get("preview"), str):
-            # 旧文件里还是 base64 → 顺手迁移成短名
-            rec["preview"] = _pv_migrate_value(name, rec.get("preview"), 'card') or rec.pop("preview", None)
-        if kind_in in ("card", "group"):
-            rec["kind"] = kind_in
-        else:
-            rec["kind"] = str(rec.get("kind") or "card")
-    if remove_preview:
-        rec.pop("preview", None)
-        _pv_delete(name, 'card')
-    try:
-        _ph_backup_before_write(fn)
-        with open(fn, 'w', encoding='utf-8') as fh:
-            json.dump(rec, fh, ensure_ascii=False, indent=2)
-        # 孤儿回收：卡片目录里没被任何卡片引用的图删掉（移除预览后旧图不会残留）
-        if remove_preview:
-            try:
-                _pv_clean_dir(_pv_card_valid_names(), 'card')
-            except Exception:
-                pass
-        return _web.json_response({"ok": True, "name": name, "count": len(rec.get("cards") or [])})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ph_pcards_delete(req):
-    """删除一份保存的提示词卡片。仅本机客户端。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    name = (req.query.get("name") or "").strip()
-    fn = _ph_prompt_card_file(name)
-    if not fn or not os.path.isfile(fn):
-        return _web.json_response({"error": "no card named " + name}, status=404)
-    try:
-        os.remove(fn)
-        _pv_delete(name, 'card')          # 顺手删掉该卡片的预览文件
-        return _web.json_response({"ok": True})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ph_api_hosts_get(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    return _web.json_response({"hosts": sorted(_ph_allowed_hosts()), "registered": _ph_api_hosts_load()})
-
-
-async def _ph_api_hosts_post(req):
-    """登记出站主机（本机保存 API/llama 设置时调用，或用户手动加）。只允许本机客户端。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    from urllib.parse import urlsplit as _us
-    try:
-        data = await req.json()
-    except Exception:
-        data = {}
-    hosts = _ph_api_hosts_load()
-    for u in (data.get("urls") or []):
-        h = _us(str(u or "")).hostname
-        if h and h.lower() not in hosts:
-            hosts.append(h.lower())
-    for h in (data.get("hosts") or []):
-        h = str(h or "").strip().lower()
-        if h and h not in hosts:
-            hosts.append(h)
-    try:
-        fn = _ph_api_hosts_file()
-        os.makedirs(os.path.dirname(fn), exist_ok=True)
-        with open(fn, "w", encoding="utf-8") as fh:
-            json.dump(hosts, fh, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-    return _web.json_response({"ok": True, "hosts": sorted(_ph_allowed_hosts())})
-
-
-# ===== 生图（预览图）：按导入的 api.json 注入参数跑一次工作流，产物只回前端（不落 ComfyUI output） =====
-_GEN_CACHE = {}
-_PGEN_DEFAULT = {
-    "api": "",          # 工作流 api.json 的文本（前端导入）
-    "ckpt": "", "unet": "", "clip": "", "vae": "", "lora": "", "builtinMode": "ckpt",
-    "width": 512, "height": 512, "steps": 20, "cfg": 6,
-    "sampler": "euler", "scheduler": "simple", "batch": 1,
-    "seedMode": "random", "seed": 0,
-    "positive": "masterpiece, best quality, vibrant, very aesthetic, high contrast, highly detailed, absurdres,", "negative": "lowres, worst quality, low quality, bad anatomy, bad proportions, signature, watermark, patreon, artist name, twitter username, simple background, borders",
-    "format": "webp", "quality": 80, "size": 384,
-    "unloadAfter": True,   # 生成预览图整批结束后卸载模型、还显存（默认开，防止连生几张后爆显存/变卡）
-}
-
-
-def _ph_gen_file():
-    d = os.path.join(_USER_DIR, "PromptHelperGen")
-    return os.path.join(d, "settings.json")
-
-
-def _ph_gen_clean(data):
-    out = dict(_PGEN_DEFAULT)
-    if isinstance(data, dict):
-        for k in _PGEN_DEFAULT:
-            if k not in data:
-                continue
-            v = data[k]
-            if k in ("width", "height", "steps", "batch", "seed", "quality", "size"):
-                try:
-                    out[k] = int(v)
-                except (TypeError, ValueError):
-                    pass
-            elif k == "cfg":
-                try:
-                    out[k] = float(v)
-                except (TypeError, ValueError):
-                    pass
-            elif k in ("seedMode", "format"):
-                out[k] = str(v)[:16]
-            elif k == "unloadAfter":
-                out[k] = bool(v) if not isinstance(v, str) else (v.strip().lower() not in ("0", "false", "no", "off", ""))
-            elif k == "api":
-                out[k] = str(v)[:2 * 1024 * 1024]
-            else:
-                out[k] = str(v)[:4096]
-    return out
-
-
-def _ph_gen_load():
-    fn = _ph_gen_file()
-    try:
-        with open(fn, "r", encoding="utf-8-sig") as fh:
-            return _ph_gen_clean(json.load(fh))
-    except Exception:
-        return dict(_PGEN_DEFAULT)
-
-
-async def _ph_gen_get(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    return _web.json_response({"ok": True, "settings": _ph_gen_load()})
-
-
-async def _ph_gen_save(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    rec = _ph_gen_clean(data.get("settings") if isinstance(data, dict) else None)
-    fn = _ph_gen_file()
-    os.makedirs(os.path.dirname(fn), exist_ok=True)
-    with open(fn, "w", encoding="utf-8") as fh:
-        json.dump(rec, fh, ensure_ascii=False, indent=2)
-    return _web.json_response({"ok": True, "settings": rec})
-
-
-def _ph_gen_patch(prompt, cfg, pos_text, neg_text, seed):
-    """按输入名通用注入：工作流里叫 width/height/steps/cfg/... 的输入一律改写。
-    正负提示词通过 KSampler 的 positive/negative 连线找到对应的 CLIPTextEncode。"""
-    repl = {
-        "width": cfg["width"], "height": cfg["height"], "batch_size": cfg["batch"],
-        "steps": cfg["steps"], "cfg": cfg["cfg"],
-        "sampler_name": cfg["sampler"], "scheduler": cfg["scheduler"],
-        "seed": seed, "noise_seed": seed,
-    }
-    if cfg.get("ckpt"):
-        repl["ckpt_name"] = cfg["ckpt"]
-    if cfg.get("clip"):
-        repl["clip_name"] = cfg["clip"]
-    if cfg.get("vae"):
-        repl["vae_name"] = cfg["vae"]
-    if cfg.get("unet"):                      # 分离式加载：UNETLoader
-        repl["unet_name"] = cfg["unet"]
-    if cfg.get("lora"):                      # LoraLoader
-        repl["lora_name"] = cfg["lora"]
-    pos_ids, neg_ids = set(), set()
-    for node in prompt.values():
-        ct = str(node.get("class_type") or "")
-        if "KSampler" not in ct:
-            continue
-        for key, sink in (("positive", pos_ids), ("negative", neg_ids)):
-            ref = node.get("inputs", {}).get(key)
-            if isinstance(ref, list) and ref and str(ref[0]) in prompt:
-                sink.add(str(ref[0]))
-    for nid, node in prompt.items():
-        ct = str(node.get("class_type") or "")
-        ins = node.get("inputs")
-        if not isinstance(ins, dict):
-            continue
-        for k in list(ins.keys()):
-            if k in repl:
-                ins[k] = repl[k]
-        if "text" in ins and isinstance(ins["text"], str):
-            if str(nid) in neg_ids:
-                ins["text"] = neg_text
-            elif str(nid) in pos_ids:
-                ins["text"] = pos_text
-        if ct == "CLIPTextEncode" and "text" in ins and isinstance(ins["text"], str):
-            low = ins["text"].lower()
-            if ("worst quality" in low or "low quality" in low) and str(nid) not in pos_ids:
-                ins["text"] = neg_text
-    return prompt
-
-
-def _ph_gen_run_one(name, cfg):
-    """跑一张：返回 (data_url, None) 或 (None, 错误信息)"""
-    try:
-        prompt = json.loads(cfg.get("api") or "")
-    except Exception:
-        return None, "api.json 不是合法 JSON（先在生图设置里导入工作流）"
-    if not isinstance(prompt, dict) or not prompt:
-        return None, "没有工作流：先在生图设置里导入 api.json"
-    if not all(isinstance(v, dict) and v.get("class_type") for v in prompt.values()):
-        return None, "不是 API 格式的工作流：要用 ComfyUI「导出(API格式)」的那份 json"
-    try:
-        import folder_paths
-        import server as _srv
-        import uuid as _uuid
-    except Exception as e:
-        return None, f"无法加载 ComfyUI 服务模块: {e}"
-    seed = cfg["seed"]
-    if cfg.get("seedMode") == "random" or not seed:
-        seed = random.randint(0, 2 ** 31 - 1)
-    pos = (cfg.get("positive") or "").strip()
-    neg = (cfg.get("negative") or "").strip()
-    pos = (pos + " " + name).strip() if pos else name
-    prompt = _ph_gen_patch(prompt, cfg, pos, neg, int(seed))
-    pid = str(_uuid.uuid4())
-    srv = _srv.PromptServer.instance
-    try:
-        # 必须和 ComfyUI /prompt 的队列项同形：(number, prompt_id, prompt, extra_data, outputs, sensitive)
-        # 少一个元素会在 prompt_worker 的 item[5] 处 IndexError，把执行线程整个弄死（之后所有任务都不再执行）
-        srv.prompt_queue.put((-1, pid, prompt, {"client_id": getattr(srv, "client_id", "")}, list(prompt.keys()), {}))
-    except Exception as e:
-        return None, f"排队失败: {e}"
-    import time as _time
-    deadline = _time.time() + 180
-    hist = None
-    while _time.time() < deadline:
-        _time.sleep(0.4)
-        try:
-            h = srv.prompt_queue.get_history(pid)
-        except Exception:
-            h = None
-        if h and pid in h:
-            hist = h[pid]
-            break
-    if not hist:
-        return None, "生成超时（180s）或工作流报错"
-    img = None
-    for out in (hist.get("outputs") or {}).values():
-        for it in (out.get("images") or []):
-            if str(it.get("filename", "")).lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                img = it
-                break
-        if img:
-            break
-    if not img:
-        return None, "工作流没有输出图片"
-    kind = img.get("type") or "output"
-    base = folder_paths.get_temp_directory() if kind == "temp" else folder_paths.get_output_directory()
-    path = os.path.join(base, img.get("subfolder") or "", img.get("filename") or "")
-    try:
-        from PIL import Image
-        im = Image.open(path).convert("RGB")
-        side = max(64, min(1024, int(cfg.get("size") or 384)))
-        im.thumbnail((side, side))
-        import io as _io
-        buf = _io.BytesIO()
-        fmt = "WEBP" if str(cfg.get("format") or "webp").lower() == "webp" else "PNG"
-        if fmt == "WEBP":
-            im.save(buf, format="WEBP", quality=max(40, min(95, int(cfg.get("quality") or 85))), method=4)
-            mime = "image/webp"
-        else:
-            im.save(buf, format="PNG")
-            mime = "image/png"
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-        return f"data:{mime};base64,{b64}", None
-    except Exception as e:
-        return None, f"读取/压缩生成图失败: {e}"
-
-
-def _ph_card_prompt(rec):
-    """已保存的卡片/卡片组 → 一段用于生图的提示词（合=灰的卡不并，和运行期合并同口径）。"""
-    cards = rec.get("cards") if isinstance(rec, dict) else None
-    parts = []
-    for c in (cards or []):
-        if not isinstance(c, dict) or c.get("mergeOff"):
-            continue
-        t = str(c.get("content") or "").strip() or _ph_html_to_text(c.get("contentHTML") or "").strip()
-        if t:
-            parts.append(_ph_compile_card(t, c))
-    return ", ".join(parts)
-
-
-async def _ph_gen_card_preview(req):
-    """给已保存的卡片/卡片组生成预览图：用同一套生图设置，按卡片正文拼提示词，成功后直接写回卡片文件。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    names = [str(x)[:64] for x in (data.get("names") or []) if str(x).strip()][:32]
-    if not names:
-        return _web.json_response({"error": "no cards"}, status=400)
-    cfg = _ph_gen_load()
-    if isinstance(data.get("settings"), dict):
-        cfg = _ph_gen_clean({**cfg, **data["settings"]})
-    out = {}
-    err = None
-    import asyncio
-    try:
-        for nm in names:
-            fn = _ph_prompt_card_file(nm)
-            if not fn or not os.path.isfile(fn):
-                err = "no saved card named " + nm
-                break
-            try:
-                with open(fn, 'r', encoding='utf-8') as fh:
-                    rec = json.loads(fh.read())
-            except Exception as e:
-                err = str(e)
-                break
-            if not isinstance(rec, dict):
-                rec = {}
-            text = _ph_card_prompt(rec)
-            if not text.strip():
-                err = "card has no prompt content: " + nm
-                break
-            url, e = await asyncio.to_thread(_ph_gen_run_one, text, cfg)
-            if not url:
-                err = e
-                break
-            # 生图返回 base64 → 立刻落盘成独立文件（card_preview/），卡片里只存短名（不再内嵌）
-            short = _pv_store_dataurl(nm, url, 'card') or _pv_migrate_value(nm, url, 'card')
-            if not short:
-                err = "preview write failed"
-                break
-            rec["preview"] = short
-            try:
-                with open(fn, 'w', encoding='utf-8') as fh:
-                    json.dump(rec, fh, ensure_ascii=False, indent=2)
-            except Exception as e:
-                err = str(e)
-                break
-            out[nm] = short
-    finally:
-        # 整批跑完（含出错/超时提前 break）后统一卸模型、还显存：否则连续生成几张会累积占用显存直到卡死
-        if cfg.get("unloadAfter", True):
-            try:
-                await asyncio.to_thread(ph_gen_unload_after)
-            except Exception:
-                pass
-    return _web.json_response({"ok": bool(out), "previews": out, "error": err})
-
-
-async def _ph_gen_preview(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        return _web.json_response({"error": "bad json"}, status=400)
-    names = [str(x)[:96] for x in (data.get("names") or []) if str(x).strip()][:32]
-    if not names:
-        return _web.json_response({"error": "no tags"}, status=400)
-    cfg = _ph_gen_load()
-    if isinstance(data.get("settings"), dict):
-        cfg = _ph_gen_clean({**cfg, **data["settings"]})
-    out = {}
-    err = None
-    import asyncio
-    try:
-        for nm in names:
-            url, e = await asyncio.to_thread(_ph_gen_run_one, nm, cfg)
-            if url:
-                # 生图返回 base64 → 落盘成独立文件（tag_preview/），只回短名给前端（前端把它塞进 tag.preview 再保存）
-                short = _pv_store_dataurl(nm, url, 'tag') or _pv_migrate_value(nm, url, 'tag')
-                if short:
-                    out[nm] = short
-                else:
-                    err = "preview write failed: " + nm
-                    break
-            else:
-                err = e
-                break
-    finally:
-        # 标签系统预览：整批结束后同样卸模型、还显存
-        if cfg.get("unloadAfter", True):
-            try:
-                await asyncio.to_thread(ph_gen_unload_after)
-            except Exception:
-                pass
-    return _web.json_response({"ok": bool(out), "previews": out, "error": err})
-
-try:
-    PromptServer.instance.routes.get("/prompt_helper/custom_providers")(_ph_custom_load)
-    PromptServer.instance.routes.get("/prompt_helper/api_hosts")(_ph_api_hosts_get)
-    PromptServer.instance.routes.post("/prompt_helper/api_hosts")(_ph_api_hosts_post)
-    PromptServer.instance.routes.post("/prompt_helper/custom_providers")(_ph_custom_save)
-    PromptServer.instance.routes.delete("/prompt_helper/custom_providers")(_ph_custom_delete)
-    PromptServer.instance.routes.post("/prompt_helper/pick_folder")(_ph_pick_folder)
-    PromptServer.instance.routes.post("/prompt_helper/pick_skill")(_ph_pick_skill)
-    PromptServer.instance.routes.get("/prompt_helper/scan_roots")(_ph_scan_roots_info)
-    PromptServer.instance.routes.get("/prompt_helper/scan_paths")(_ph_scan_paths_get)
-    PromptServer.instance.routes.post("/prompt_helper/scan_paths")(_ph_scan_paths_save)
-    PromptServer.instance.routes.get("/prompt_helper/model_paths")(_ph_model_paths_get)
-    PromptServer.instance.routes.post("/prompt_helper/model_paths")(_ph_model_paths_save)
-    PromptServer.instance.routes.get("/prompt_helper/media_target")(_ph_media_target_get)
-    PromptServer.instance.routes.post("/prompt_helper/media_target")(_ph_media_target_save)
-    PromptServer.instance.routes.get("/prompt_helper/rules")(_ph_rules_get)
-    PromptServer.instance.routes.post("/prompt_helper/rules")(_ph_rules_save)
-    PromptServer.instance.routes.get("/prompt_helper/prompt_cards")(_ph_pcards_get)
-    PromptServer.instance.routes.post("/prompt_helper/prompt_cards")(_ph_pcards_save)
-    PromptServer.instance.routes.delete("/prompt_helper/prompt_cards")(_ph_pcards_delete)
-    PromptServer.instance.routes.get("/prompt_helper/prompt_categories")(_ph_categories_get)
-    PromptServer.instance.routes.post("/prompt_helper/prompt_categories")(_ph_categories_save)
-
-
-    PromptServer.instance.routes.get("/prompt_helper/prompt_tags")(_ph_tags_get)
-    PromptServer.instance.routes.post("/prompt_helper/prompt_tags")(_ph_tags_save)
-    PromptServer.instance.routes.get("/prompt_helper/gen_settings")(_ph_gen_get)
-    PromptServer.instance.routes.post("/prompt_helper/gen_settings")(_ph_gen_save)
-    PromptServer.instance.routes.post("/prompt_helper/gen_preview")(_ph_gen_preview)
-    PromptServer.instance.routes.post("/prompt_helper/gen_card_preview")(_ph_gen_card_preview)
-    PromptServer.instance.routes.get("/prompt_helper/tag_libs")(_ph_libs_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_lib")(_ph_tag_lib_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_zh")(_ph_tag_zh_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_furry")(_ph_tag_furry_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_kind")(_ph_tag_kind_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_series")(_ph_tag_series_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_nsfw")(_ph_tag_nsfw_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_related")(_ph_tag_related_get)
-    PromptServer.instance.routes.get("/prompt_helper/tag_desc")(_ph_tag_desc_get)
-    PromptServer.instance.routes.post("/prompt_helper/tag_import")(_ph_tag_import)
-    PromptServer.instance.routes.get("/prompt_helper/thumb/{kind}/{fname}")(_ph_thumb_get)
-    PromptServer.instance.routes.get("/prompt_helper/thumb/{fname}")(_ph_thumb_get)   # 兼容旧 URL（默认 tag）
-    PromptServer.instance.routes.post("/prompt_helper/preview_delete")(_ph_preview_delete)
-except Exception:
-    pass
-
-
-# ===== GGUF 模型：扫描「实例 models」+「共享 models」(extra_model_paths 注册的 LLM 等) 供 llama 选取/解析 =====
-def _ph_md_roots():
-    roots = []
-    seen = set()
-    cand = ("models", "LLM", "llm", "gguf", "diffusion_models", "text_encoders", "clip", "clip_vision", "unet")
-    for name in cand:
-        try:
-            for r in (folder_paths.get_folder_paths(name) or []):
-                if r and os.path.normpath(r) not in seen:
-                    seen.add(os.path.normpath(r)); roots.append(r)
-        except Exception:
-            continue
-    # 兜底：把 folder_names_and_paths 里名称含 llm/gguf 的注册目录也纳入
-    try:
-        for name in folder_paths.folder_names_and_paths:
-            if ("llm" in name.lower() or "gguf" in name.lower()) and name not in cand:
-                try:
-                    for r in (folder_paths.get_folder_paths(name) or []):
-                        if r and os.path.normpath(r) not in seen:
-                            seen.add(os.path.normpath(r)); roots.append(r)
-                except Exception:
-                    continue
-    except Exception:
-        pass
-    if not roots:
-        try:
-            if folder_paths.models_dir:
-                roots = [folder_paths.models_dir]
-        except Exception:
-            pass
-    if not roots:
-        roots = [os.path.abspath("models")]
-    return [r for r in roots if r]
-
-
-def _ph_resolve_gguf(p, extra_roots=None, strict=False):
-    """把用户填的 GGUF 路径解析为真实绝对路径：支持绝对路径、相对任一 models/LLM 根的子路径、仅文件名。找不到返回 ''。
-    extra_roots 为路径设置里用户自定义的扫描目录（可多级）。
-    strict=True（远端请求）时只认「已登记的模型根」（同 ph_resolve_model）。"""
-    if not p:
-        return ""
-    p = p.strip().strip('"').strip("'")
-    if strict and extra_roots:
-        extra_roots = None
-    if os.path.isfile(p):
-        ap = os.path.abspath(p)
-        if strict and not (_ez_inside(ap, _ph_model_roots()) or _ez_inside(ap)):
-            return ""
-        return ap
-    if strict:
-        extra_roots = None
-    base = os.path.basename(p)
-    for root in _ph_roots_for(extra_roots):
-        cand = os.path.join(root, p)
-        if os.path.isfile(cand):
-            return os.path.abspath(cand)
-        hit = _ph_root_index(root).get(base)   # 缓存索引：不再每次查询都 os.walk 整个模型根
-        if hit:
-            return hit
-    return ""
-
-
-async def _ph_llama_models(req):
-    """列出共享 models 文件夹下所有 .gguf（相对每个根目录的路径），供前端像选模型一样选取。
-    ?root= 为路径设置里自定义的扫描目录（优先，替换默认）。"""
-    root_q = (req.query.get("root") or "").strip()
-    if root_q and not _ez_local(req):
-        root_q = ""   # 远端不能指定扫描根（否则能拿它递归遍历任意目录）；回落默认 models 根
-    roots = [r for r in _ph_scan_roots(root_q) if os.path.isdir(r)]
-
-    def _build():
-        seen = set()
-        out = []
-        for root in roots:
-            for dirpath, _dirs, files in os.walk(root):
-                for fn in files:
-                    if not fn.lower().endswith(".gguf"):
-                        continue
-                    full = os.path.abspath(os.path.join(dirpath, fn))
-                    if full in seen:
-                        continue
-                    seen.add(full)
-                    rel = os.path.relpath(full, os.path.abspath(root))
-                    out.append({"path": rel.replace("\\", "/"), "name": fn})
-        out.sort(key=lambda x: (x["name"] or "").lower())
-        return out
-
-    return _web.json_response({"models": _scan_cached(("ph_llama", root_q), roots, _build)})
-
-
-async def _ph_clip_models(req):
-    """列出共享/实例 models 下的 .safetensors/.ckpt/.pt 等文本编码器文件，供 TextGenerate 选 CLIP 模型。
-    ?root= 为路径设置里自定义的扫描目录（优先，替换默认）。"""
-    root_q = (req.query.get("root") or "").strip()
-    if root_q and not _ez_local(req):
-        root_q = ""   # 远端不能指定扫描根（否则能拿它递归遍历任意目录）；回落默认 models 根
-    roots = [r for r in _ph_scan_roots(root_q) if os.path.isdir(r)]
-
-    def _build():
-        seen = set()
-        out = []
-        for root in roots:
-            for dirpath, _dirs, files in os.walk(root):
-                for fn in files:
-                    lf = fn.lower()
-                    if not lf.endswith((".safetensors", ".ckpt", ".pt", ".pth", ".bin")):
-                        continue
-                    full = os.path.abspath(os.path.join(dirpath, fn))
-                    if full in seen:
-                        continue
-                    seen.add(full)
-                    rel = os.path.relpath(full, os.path.abspath(root)).replace("\\", "/")
-                    out.append({"path": rel, "name": fn})
-        out.sort(key=lambda x: (x["name"] or "").lower())
-        return out
-
-    return _web.json_response({"models": _scan_cached(("ph_clip", root_q), roots, _build)})
-
-
-try:
-    PromptServer.instance.routes.get("/prompt_helper/llama_models")(_ph_llama_models)
-    PromptServer.instance.routes.get("/prompt_helper/clip_models")(_ph_clip_models)
-except Exception:
-    pass
-
-
-# ===== EzFlex-MediaLoader / EzFlex-MediaOut：媒体素材加载与拆分 =====
-# 数据模型（MediaLoader config widget）：
-#   { groups:[{id,name,cards:[{id,name,items:[{id,files:[{id,name,path,subfolder,dir,type}]}]}]}],
-#     currentGroupId, currentPreset }
-#   - 「素材卡片」= 一行卡片，对应 MediaLoader 的一个深红输出端口（标签 = 分组名_卡片名）。
-#   - 卡片内 items 是网格里的媒体卡；每张媒体卡可含 1..N 个文件（批量堆叠）。
-#   - MediaLoader 运行期按「分组顺序→卡片顺序」加载每张卡片内全部文件，
-#     输出为一个带 _kind=ezflex_media_card 的卡片对象（files 为已加载值列表）。
-#   - MediaOut 接收该卡片对象，按文件逐个拆出真实类型的输出端口。
-
-_MEDIA_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
-_MEDIA_VID_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp", ".ts", ".m2ts", ".vob"}
-_MEDIA_AUD_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".aac", ".m4a", ".opus", ".wma", ".aiff", ".aif", ".mka", ".ac3", ".amr"}
-_MEDIA_3D_EXTS = {".obj", ".glb", ".gltf", ".fbx", ".stl", ".ply", ".spz", ".splat", ".ksplat", ".3ds", ".dae", ".blend", ".vrm", ".usdz", ".x3d", ".lwo", ".abc"}
-_MEDIA_TXT_EXTS = {".txt", ".md", ".json", ".csv", ".log", ".xml", ".yaml", ".yml"}
-# PreviewAny 存档允许的扩展名：只写媒体/文本文档，未知后缀（.bat/.desktop/.sh 等）一律不落盘。
-_SAVE_ALLOWED_EXTS = _MEDIA_IMG_EXTS | _MEDIA_VID_EXTS | _MEDIA_AUD_EXTS | {".txt", ".md", ".json", ".csv", ".log", ".html"} | {".safetensors", ".gguf", ".onnx", ".ckpt", ".pt", ".bin", ".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply"}
-
-
-def _media_kind(name):
-    """按文件后缀推断媒体类型：image / video / audio / model_3d，无则返回 'other'。"""
-    ext = os.path.splitext(name or "")[1].lower()
-    if ext in _MEDIA_IMG_EXTS:
-        return "image"
-    if ext in _MEDIA_VID_EXTS:
-        return "video"
-    if ext in _MEDIA_AUD_EXTS:
-        return "audio"
-    if ext in _MEDIA_3D_EXTS:
-        return "model_3d"
-    return "other"
-
-
-def _file_kind(f):
-    """媒体文件的真实类型：以扩展名为准（卡片里存的 type 可能是旧值/猜错的，会让端口类型不对、连不上目标输入）。"""
-    if not isinstance(f, dict):
-        return "other"
-    by_name = _media_kind(f.get("name") or f.get("path") or "")
-    if by_name != "other":
-        return by_name
-    return str(f.get("type") or "other").lower()
-
-
-MEDIA_TO_COMFY = {
-    "image": "IMAGE", "video": "VIDEO", "audio": "AUDIO",
-    "model_3d": "FILE_3D", "model": "FILE_3D", "3d": "FILE_3D",
-    "other": "STRING", "text": "STRING", "*": "*",
-}
-# 端口类型与内置加载节点保持一致：Load Image→IMAGE、Load Video→VIDEO、Load Audio→AUDIO、Load3D→FILE_3D。
-# 视频给的是内置同款 VideoFromFile 对象（懒加载、自带帧率/音轨），要帧就用内置 Get Video Components 取。
-
-
+# ===== §7 媒体节点与媒体工具 =====
 def _ml_resolve(path):
     """把媒体路径解析成绝对路径：相对路径按 input 目录解析，绝对路径必须是「允许目录」内的；
     根外 / 找不到一律返回 ''（评审要求：不接受调用方给的任意路径）。"""
@@ -7822,8 +1749,6 @@ def _ml_resolve(path):
     except Exception:
         pass
     return ""
-
-
 def _ml_load_image(path):
     """与内置 Load Image 同款：逐帧归一化到 [N,H,W,3]（0..1，RGB）——静态图 N=1，动图（GIF/WebP/APNG）整段出批；
     尺寸不一致的帧按内置做法跳过。设备/精度走 intermediate_device()/intermediate_dtype()
@@ -7843,15 +1768,11 @@ def _ml_load_image(path):
         raise ValueError(f"[EzFlex-MediaLoader] image has no decodable frames: {os.path.basename(path)}")
     out = torch.cat(frames, dim=0)
     return out.to(device=comfy.model_management.intermediate_device(), dtype=comfy.model_management.intermediate_dtype())
-
-
 def _ml_load_video(path):
     """与内置 Load Video 同款：返回 VideoFromFile 对象（懒加载，不解码）。
     自带真实帧率/音轨，能直接接 Video 类输入；要帧就接内置 Get Video Components，
     它的 images 输出正是 MiniMax H3 的 ref_video 需要的帧序列。"""
     return InputImpl.VideoFromFile(path)
-
-
 def _pcm_to_float(wav):
     """与内置 Load Audio 的 f32_pcm 一致：整数 PCM 归一，已经是浮点的原样返回。"""
     if wav.dtype.is_floating_point:
@@ -7861,25 +1782,35 @@ def _pcm_to_float(wav):
     if wav.dtype == torch.int32:
         return wav.float() / (2 ** 31)
     return wav.float() / 32768.0
-
-
-def _ml_load_audio(path):
+def _ml_load_audio(path, start=0.0, dur=0.0):
     """与内置 Load Audio 同款：{"waveform": [1,C,T] float32, "sample_rate": int}（batch 维必须有）。
-    额外带一个 "path"（原始文件绝对路径，非标准键、内置节点不读）：这样预览节点可以直接播放原文件，
-    不用把波形重新编码一遍（mp3/flac/ogg 都能原样播）。"""
+    start/dur 可只解码一段（SplitVideo 的 audio 输出用）；额外带 "path" 便于预览原文件。"""
     empty = {"waveform": torch.zeros((1, 1, 0), dtype=torch.float32), "sample_rate": 44100, "path": os.path.abspath(path)}
     try:
         import av
         rate = 44100
         chunks = []
+        start = max(0.0, float(start or 0.0))
+        dur = max(0.0, float(dur or 0.0))
+        end = (start + dur) if dur > 0 else None
         with av.open(path, mode="r") as container:
             s = next((x for x in container.streams if x.type == "audio"), None)
             if s is None:
                 return empty
+            rate = int(s.rate or rate) or 44100
             n_ch = int(s.channels or 0)
-            if s.rate:
-                rate = int(s.rate)
+            if start > 0:
+                try:
+                    container.seek(int(start * 1000000), backward=True)
+                except Exception:
+                    pass
             for frame in container.decode(s):
+                ft = frame.time
+                if ft is None:
+                    try:
+                        ft = float(frame.pts or 0) * float(s.time_base or 0)
+                    except Exception:
+                        ft = 0.0
                 arr = frame.to_ndarray()
                 buf = torch.from_numpy(np.ascontiguousarray(arr))
                 if buf.ndim == 1:
@@ -7887,24 +1818,32 @@ def _ml_load_audio(path):
                 # 打包格式会解成 [1, samples*channels]，按内置同法还原成 [channels, samples]
                 if n_ch and buf.shape[0] != n_ch:
                     buf = buf.reshape(-1, n_ch).t()
-                chunks.append(buf)
+                seg_end = float(ft) + (buf.shape[1] / float(rate) if rate else 0.0)
+                if end is not None and ft >= end:
+                    break
+                if ft < start:
+                    drop = int(round((start - ft) * rate))
+                    if drop >= buf.shape[1]:
+                        continue
+                    buf = buf[:, drop:]
+                if end is not None and seg_end > end:
+                    keep = int(round((end - max(ft, start)) * rate))
+                    if keep <= 0:
+                        continue
+                    buf = buf[:, :keep]
+                if buf.shape[1] > 0:
+                    chunks.append(buf)
         if not chunks:
             return {"waveform": torch.zeros((1, 1, 0), dtype=torch.float32), "sample_rate": rate, "path": os.path.abspath(path)}
         wav = _pcm_to_float(torch.cat(chunks, dim=1))
         return {"waveform": wav.unsqueeze(0), "sample_rate": rate, "path": os.path.abspath(path)}
     except Exception:
         return empty
-
-
 def _ml_load_3d(path):
     """与内置 Load3D 的 model_3d 输出同款：FILE_3D 类型 + File3D 对象。"""
     return Types.File3D(os.path.abspath(path))
-
-
 _TEXT_EXTS = {".txt", ".md", ".json", ".csv", ".log", ".py", ".js", ".html", ".css", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".sh", ".bat", ".ts", ".tsx", ".jsx", ".toml", ".srt", ".ass", ".vtt"}
 _TEXT_CAP = 1024 * 1024
-
-
 def _ml_read_text(path):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -7912,8 +1851,6 @@ def _ml_read_text(path):
         return data
     except Exception:
         return path
-
-
 def _ml_load_media(path, ftype):
     ftype = (ftype or _media_kind(path) or "").lower()
     if ftype == "image":
@@ -7927,8 +1864,6 @@ def _ml_load_media(path, ftype):
     if os.path.splitext(path)[1].lower() in _TEXT_EXTS:
         return _ml_read_text(path)
     return path
-
-
 def parse_media_cards(config):
     """把 MediaLoader config 解析成按「分组→卡片」顺序排序的卡片列表（带 label）。"""
     if isinstance(config, str):
@@ -7936,7 +1871,14 @@ def parse_media_cards(config):
             return []
         try:
             data = json.loads(config)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            # 坏 config 会变成「0 张卡」，下游只会报 list index out of range 这类无关错误
+            try:
+                _ez_log.warning(
+                    "[EzFlex-MediaLoader] config is not valid JSON (%s) -> treated as 0 cards: %s",
+                    e, (config or "")[:80].replace("\n", " "))
+            except Exception:
+                pass
             return []
     else:
         data = config
@@ -7969,7 +1911,11 @@ def parse_media_cards(config):
                         "dir": f.get("dir") or "input",
                         "type": f.get("type") or _media_kind(nm) or "other",
                     })
-                items.append({"id": it.get("id"), "files": files})
+                try:
+                    _sp = int(it.get("slotPos"))
+                except (TypeError, ValueError):
+                    _sp = 0
+                items.append({"id": it.get("id"), "slotPos": _sp if _sp > 0 else 0, "files": files})
             cname = (c.get("name") or "").strip() or "Card"
             cards_out.append({
                 "id": c.get("id"),
@@ -7977,75 +1923,12 @@ def parse_media_cards(config):
                 "group": gname,
                 "label": gname + "_" + cname,
                 "items": items,
+                "loop": bool(c.get("loop")),
+                "loopIndices": c.get("loopIndices") if isinstance(c.get("loopIndices"), list) else None,
+                "loopAll": bool(c.get("loopAll")),
+                "slotPositions": c.get("slotPositions") if isinstance(c.get("slotPositions"), list) else [],
             })
     return cards_out
-
-
-async def _ml_files(req):
-    """列出 input 目录下的媒体文件（含子目录），供 MediaLoader 浏览弹窗选取。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    from urllib.parse import quote as _q
-    roots = [r for r in _ph_media_input_dirs() if os.path.isdir(r)]
-
-    def _build():
-        out = []
-        for root in roots:
-            for dirpath, _dirs, files in os.walk(root):
-                rel = os.path.relpath(dirpath, root).replace("\\", "/")
-                for fn in sorted(files):
-                    typ = _media_kind(fn)
-                    if typ == "other":
-                        continue
-                    sub = "" if rel == "." else rel
-                    path = (rel + "/" + fn) if rel != "." else fn
-                    full = os.path.join(dirpath, fn)
-                    try:
-                        size = os.path.getsize(full)
-                        mtime = _fmt_mtime(os.path.getmtime(full))
-                    except Exception:
-                        size, mtime = 0, ""
-                    url = "/view?type=input&filename=" + _q(fn) + ("&subfolder=" + _q(sub) if sub else "")
-                    out.append({
-                        "name": fn, "path": path, "subfolder": sub, "dir": "input",
-                        "type": typ, "url": url, "size": size, "mtime": mtime,
-                    })
-        return out
-
-    return _web.json_response({"files": _scan_cached(("ml_files",), roots, _build)})
-
-
-async def _ml_outputs(req):
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        labels = data.get("labels") or []
-        labels = [str(x)[:128] for x in labels][:_EZ_OUTPUT_CAP] if isinstance(labels, list) else []
-        MediaLoaderNode.RETURN_TYPES = _DynamicOutputTypes("*" for _ in labels)   # 全 ANY：换模式/重排不做类型校验，避免 Return type mismatch
-        MediaLoaderNode.RETURN_NAMES = tuple(labels)
-        return _web.json_response({"ok": True, "names": labels})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _mo_outputs(req):
-    """MediaOut 的端口清单同步：一个 list 项一个输出口，口名/类型都来自 MediaLoader 的项。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        files = data.get("files") or []
-        files = files[:_EZ_OUTPUT_CAP] if isinstance(files, list) else []
-        types = [MEDIA_TO_COMFY.get(_file_kind(f), "STRING") for f in files]
-        names = [str(f.get("name") or f"File {i + 1}")[:128] for i, f in enumerate(files)]
-        MediaOutNode.RETURN_TYPES = _DynamicOutputTypes("*" for _ in types)   # 全 ANY：拆分口不做类型校验
-        MediaOutNode.RETURN_NAMES = tuple(names)
-        return _web.json_response({"ok": True, "types": types, "names": names})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
 def _mout_fit(config):
     """多文件合并（批量）设置：size = 'first'（以第一张为准，默认）或 'WxH'；fit = crop/pad/stretch；
     cap = 每个端口最多取几个文件（0=不限）；start = 从第几个文件开始取（0 起）。
@@ -8077,8 +1960,6 @@ def _mout_fit(config):
     except Exception:
         pass
     return fit
-
-
 def _mo_edge_color(arr):
     """取图片四条边的中位色（补边用，同 KJNodes 的 get_edge_color 思路）。"""
     try:
@@ -8088,8 +1969,6 @@ def _mo_edge_color(arr):
         return np.median(e, axis=0)
     except Exception:
         return np.zeros(arr.shape[-1], dtype=arr.dtype)
-
-
 def _mo_fit_image(t, width, height, mode):
     """把单张图 [H,W,C] float 对齐到目标尺寸：crop=等比缩放+居中裁剪，pad=等比缩放+边缘色补边，stretch=直接拉伸。"""
     import comfy.utils as _cu
@@ -8104,7 +1983,8 @@ def _mo_fit_image(t, width, height, mode):
     nw, nh = max(1, int(round(w0 * scale))), max(1, int(round(h0 * scale)))
     fitted = _cu.common_upscale(v, nw, nh, "bilinear", "disabled").squeeze(0).movedim(0, -1)
     from PIL import Image as _Im
-    arr = (np.clip(fitted.numpy(), 0.0, 1.0) * 255).astype(np.uint8)
+    _dev, _dtype = fitted.device, fitted.dtype
+    arr = (np.clip(fitted.detach().cpu().numpy(), 0.0, 1.0) * 255).astype(np.uint8)
     color = tuple(int(c) for c in _mo_edge_color(arr))
     if len(color) == 3:
         canvas = _Im.new("RGB", (width, height), color)
@@ -8112,9 +1992,7 @@ def _mo_fit_image(t, width, height, mode):
         canvas = _Im.new("RGBA", (width, height), color)
     canvas.paste(_Im.fromarray(arr), ((width - nw) // 2, (height - nh) // 2))
     out = np.asarray(canvas).astype(np.float32) / 255.0
-    return torch.from_numpy(out)
-
-
+    return torch.from_numpy(out).to(device=_dev, dtype=_dtype)
 def _mo_batch_images(vals, label, fit=None):
     """多张图合并成 IMAGE 批量张量。规则与内置 Batch Images / KJNodes Load Images From Folder 一致：
     尺寸不一致时按 fit 设置对齐（默认以「第一张」为准 + 等比裁剪 center crop），通道数不一致按最大值补齐（补 alpha=1.0）。"""
@@ -8143,7 +2021,8 @@ def _mo_batch_images(vals, label, fit=None):
         out = []
         for v in padded:
             if tuple(v.shape[1:]) != (bh, bw, max_c):
-                v = _mo_fit_image(v[0], bw, bh, mode).unsqueeze(0)
+                # 保留整个批次：逐帧对齐，不能只取 v[0]（多帧视频批次会丢帧）
+                v = torch.stack([_mo_fit_image(f, bw, bh, mode) for f in v], dim=0)
             out.append(v)
         size_txt = "first image" if want == "first" else want
         mode_txt = {"crop": "crop", "pad": "pad", "stretch": "stretch"}.get(mode, mode)
@@ -8154,8 +2033,6 @@ def _mo_batch_images(vals, label, fit=None):
             f'EzFlex-MediaOut: (port "{label}") this group has {len(vals)} images and cannot be merged into a batched tensor ({e}). '
             f"Switch to split mode and connect the files one by one."
         ) from e
-
-
 def _mo_merge_values(values, label, kind="", fit=None):
     """把一个分组里的多个值合并成「下游能读的合法值」：
       - 单文件：原值
@@ -8199,17 +2076,11 @@ def _mo_merge_values(values, label, kind="", fit=None):
         f"EzFlex-MediaOut: {hint}this group has {len(vals)} files of mixed types ({kinds_txt}) and cannot be merged into a single batched value; "
         f"switch MediaOut to split mode and connect the files one by one."
     )
-
-
-
-# ===== MediaLoader 输出：按模式分组 + 可选拼接（拼接对象不得大于输出模式）=====
 _ML_RANK = {"card": 0, "row": 1, "group": 2}
-
-
-def _ml_load_rows(config):
-    """加载 MediaLoader 卡片结构，返回 [{group, cardId, label, items:[{id, files:[{id,name,type,value,path}]}]}]。"""
+def _ml_load_cards(cards):
+    """只加载给定卡片（固定模式只解码当前卡片组，避免整库读盘）。"""
     rows = []
-    for card in parse_media_cards(config):
+    for card in (cards or []):
         items = []
         for item in (card.get("items") or []):
             loaded = []
@@ -8220,22 +2091,25 @@ def _ml_load_rows(config):
                 ftype = (f.get("type") or _media_kind(f.get("name") or f.get("path")) or "other").lower()
                 loaded.append({"id": f.get("id"), "name": f.get("name") or os.path.basename(path),
                                "type": ftype, "value": _ml_load_media(path, ftype), "path": f.get("path") or ""})
-            items.append({"id": item.get("id"), "files": loaded})
-        rows.append({"group": card.get("group"), "cardId": card.get("id"), "label": card.get("label"), "items": items})
+            try:
+                _sp = int(item.get("slotPos"))
+            except (TypeError, ValueError):
+                _sp = 0
+            items.append({"id": item.get("id"), "slotPos": _sp if _sp > 0 else 0, "files": loaded})
+        rows.append({"group": card.get("group"), "cardId": card.get("id"), "label": card.get("label"),
+                     "loop": bool(card.get("loop")),
+                     "loopIndices": card.get("loopIndices") if isinstance(card.get("loopIndices"), list) else None,
+                     "loopAll": bool(card.get("loopAll")),
+                     "slotPositions": card.get("slotPositions") if isinstance(card.get("slotPositions"), list) else [],
+                     "items": items})
     return rows
-
-
 def _ml_merge_types(cfg):
     mt = cfg.get("mergeTypes") if isinstance(cfg.get("mergeTypes"), dict) else {}
     txt = mt.get("other", mt.get("text", True))
     return {"image": mt.get("image", True), "audio": mt.get("audio", True), "other": txt, "text": txt}
-
-
 def _ml_fit_cfg(cfg):
     f = cfg.get("mergeFit") if isinstance(cfg.get("mergeFit"), dict) else {}
     return _mout_fit({"fit": f})
-
-
 def _ml_merge_items(files, scope, types, fit):
     """把一个输出口内的 (文件, row, item) 按 scope 再分组：同类型且该类型开着拼接 → 合成 1 项；否则逐项。
     同一个拼接组里混用媒体类型 → 直接抛错（前端也给提示）。"""
@@ -8265,8 +2139,6 @@ def _ml_merge_items(files, scope, types, fit):
             for f in fs:
                 out.append(f.get("value"))
     return out
-
-
 def _ml_buckets(rows, mode, groups=None):
     """按粒度分桶：card=每个卡片项一口 / row=每张素材卡片一口 / group=每个分组一口，顺序 = 图上顺序。
     返回 (buckets, order, mode)；bucket = {"row","item","files":[(f,row,item)]}，空卡片组也占位。"""
@@ -8302,19 +2174,42 @@ def _ml_buckets(rows, mode, groups=None):
                 bucket = add(("i", row.get("cardId"), item.get("id")), row, item)
                 bucket["files"].extend((f, row, item) for f in (item.get("files") or []))
     return buckets, order, mode
-
-
-def _ml_fixed_segment(rows, index, slots, groups=None):
+def _ml_fixed_segment(rows, index, slots, groups=None, cycle=False, loop_cards=None):
     """固定模式：**只出一个口**，按 index 走「分组 → 卡片组」的扁平顺序取第 index 个卡片组，
-    输出它的槽位序列（越界 = 全 None）。循环里 MediaOut 读的永远是同一个口、同一组槽位。"""
-    buckets, order, _mode = _ml_buckets(rows, "row", groups)
+    输出它的槽位序列（越界 = 全 None）。循环里 MediaOut 读的永远是同一个口、同一组槽位。
+
+    `loop_cards` 里的卡片组是「循环卡片组」：每个 index 都参与，但不占用编号，不进入 order。"""
+    loop_set = set(str(x) for x in (loop_cards or []) if x)
+    normal_rows = []
+    for r in (rows or []):
+        if str(r.get("cardId") or "") not in loop_set:
+            normal_rows.append(r)
+    buckets, order, _mode = _ml_buckets(normal_rows, "row", groups)
     total = sum(max(0, int((s or {}).get("n") or 0)) for s in (slots or []) if isinstance(s, dict))
     i = int(index or 0)
-    if i < 0 or i >= len(order):
-        return [{"name": "Segment", "items": [None] * total}]
-    return [{"name": "Segment", "items": _ml_fixed_items(buckets[order[i]]["files"], slots)}]
-
-
+    if not order:
+        ordered = []
+        for r in (rows or []):
+            for it in (r.get("items") or []):
+                ordered.extend((f, r, it) for f in (it.get("files") or []))
+        return [{"name": "Segment", "items": _ml_fixed_items(ordered, slots) if ordered else [None] * total}]
+    # 固定/循环模式：index 按分组数**循环**（1 组时每段都用同一组，不再越界变 None）
+    if i < 0:
+        i = 0
+    if i >= len(order):
+        if not cycle:
+            return [{"name": "Segment", "items": [None] * total}]
+        i = i % len(order)
+    # 槽位数量不变；按原始卡片组顺序把「当前普通卡片组 + 所有循环卡片组」的素材排进同一组槽位。
+    selected_card = str((buckets[order[i]].get("row") or {}).get("cardId") or "")
+    ordered = []
+    for r in (rows or []):
+        cid = str(r.get("cardId") or "")
+        if cid != selected_card and cid not in loop_set:
+            continue
+        for it in (r.get("items") or []):
+            ordered.extend((f, r, it) for f in (it.get("files") or []))
+    return [{"name": "Segment", "items": _ml_fixed_items(ordered, slots)}]
 def _ml_ports(rows, mode, merge, scope, types, fit, groups=None, fixed=None):
     """按 mode 分组输出口：card=每个卡片一项一口 / row=每张素材卡片一口 / group=每个分组一口。
     **空卡片组/空分组也留口**（输出空 list）。拼接对象 scope 不得大于 mode（大了就夹回 mode）。
@@ -8342,465 +2237,78 @@ def _ml_ports(rows, mode, merge, scope, types, fit, groups=None, fixed=None):
             name = b["row"].get("label") or "Card"
         out.append({"name": name, "items": items})
     return out
-
-
 _FIXED_KINDS = ("image", "video", "audio", "text", "model3d", "other")   # 顺序 = 面板槽位顺序（图片/视频/音频/文本/模型/其他）
-# 面板槽位类型 → 文件类型池：3D 文件带下划线，文本与 other 共用一个池（loader 不区分 .txt 与未知类型）
 _FIXED_POOL = {"image": "image", "video": "video", "audio": "audio", "text": "other", "model3d": "model_3d", "other": "other"}
-
-
 def _ml_fixed_items(files, slots):
-    """固定模式：把一口的文件按槽位声明重排成 Σn 个值（缺槽给 None，顺序 = 预设槽位顺序）。
+    """固定模式：把一口的文件按槽位声明重排成 Σn 个值（缺槽给 None）。
 
-    slots = [{"type": "image", "n": 3}, ...]；同类槽位按出现顺序续取同一个桶。
-    固定模式与拼接互斥（槽位要的就是 N 份独立值）。"""
-    pool = {}
-    for f, _row, _item in (files or []):
-        pool.setdefault(str(f.get("type") or "other").lower(), []).append(f.get("value"))
-    out, used = [], {}
+    默认同类槽位按出现顺序续取；卡片组的 `slotPositions`（全局 1-based 槽位号）
+    可以让它把素材放到指定位置，例如普通组 1,2,3,6,7、循环组 4,5。
+    """
+    kinds = []
     for s in (slots or []):
         if not isinstance(s, dict):
             continue
         k = _FIXED_POOL.get(str(s.get("type") or "other").lower(), "other")
-        vals = pool.get(k) or []
-        i = used.get(k, 0)
-        for _ in range(max(0, int(s.get("n") or 0))):
-            out.append(vals[i] if i < len(vals) else None)
-            i += 1
-        used[k] = i
-    return out
-
-
-def _ml_media_root():
-    roots = _ph_media_input_dirs()
-    return roots[0] if roots else ""
-
-
-def _ml_roots_file():
-    try:
-        return _ezflex_user_file("ezflex_media_roots.json")
-    except Exception:
-        return ""
-
-
-_ML_SEED_CACHE = {"t": 0, "dirs": []}
-
-
-def _ml_json_paths(obj, depth=0):
-    """递归挑出 JSON 里像媒体文件的绝对路径（用于把素材所在目录收成可浏览根）。"""
-    res = []
-    if depth > 8:
-        return res
-    try:
-        if isinstance(obj, dict):
-            for v in obj.values():
-                res.extend(_ml_json_paths(v, depth + 1))
-        elif isinstance(obj, (list, tuple)):
-            for v in obj:
-                res.extend(_ml_json_paths(v, depth + 1))
-        elif isinstance(obj, str):
-            s = obj.strip()
-            if 3 < len(s) < 4096 and _media_kind(s) != "other":
-                cand = s if os.path.isabs(s) else ""
-                if not cand:
-                    for root in _ph_media_input_dirs():
-                        q = os.path.join(root, s)
-                        if os.path.isfile(q):
-                            cand = q
-                            break
-                if cand and os.path.isfile(cand):
-                    res.append(cand)
-    except Exception:
-        pass
-    return res
-
-
-def _ml_seed_roots():
-    """从用户自己的数据里补根目录：已保存预设/卡片里引用过的素材所在目录（不是请求参数）。
-    带 30 秒缓存，避免每次浏览都扫一遍 user_data。"""
-    import time as _time
-    now = _time.time()
-    if now - _ML_SEED_CACHE["t"] < 30:
-        return list(_ML_SEED_CACHE["dirs"])
-    out = []
-    dirs = []
-    try:
-        dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "user_data"))
-    except Exception:
-        pass
-    try:
-        ez_dir = _ezflex_user_dir()
-        if ez_dir:
-            dirs.append(ez_dir)
-    except Exception:
-        pass
-    for d in dirs:
+        kinds.extend([k] * max(0, int(s.get("n") or 0)))
+    total = len(kinds)
+    out = [None] * total
+    used = set()
+    # ★ 固定模式一个「素材卡片」= 一个槽位值，不按卡片里的文件数铺开。
+    #   批量卡片仍只输出第一份值（与前端 fixedCells / mlSegmentFiles 的口径一致）。
+    order = []
+    first = {}
+    for f, row, item in (files or []):
+        key = (str((row or {}).get("cardId") or ""), str((item or {}).get("id") or id(f)))
+        if key not in first:
+            first[key] = (f, row, item)
+            order.append(key)
+    entries = []
+    for key in order:
+        f, row, item = first[key]
+        pos = []
+        # 单个素材卡片拖到指定格：item.slotPos 优先；没设就退回卡片组的 slotPositions。
         try:
-            if not os.path.isdir(d):
-                continue
-            for f in os.listdir(d):
-                if not f.lower().endswith(".json"):
-                    continue
+            sp = int((item or {}).get("slotPos") or 0)
+        except (TypeError, ValueError):
+            sp = 0
+        if 1 <= sp <= total:
+            pos = [sp]
+        elif isinstance(row, dict):
+            for p in (row.get("slotPositions") or []):
                 try:
-                    with open(os.path.join(d, f), "r", encoding="utf-8") as fh:
-                        data = json.load(fh)
-                except Exception:
+                    p = int(p)
+                except (TypeError, ValueError):
                     continue
-                for p in _ml_json_paths(data):
-                    dd = os.path.dirname(p)
-                    if dd and dd not in out:
-                        out.append(dd)
-        except Exception:
+                if 1 <= p <= total:
+                    pos.append(p)
+        entries.append((f, str(f.get("type") or "other").lower(), pos))
+    # 先占显式位置，避免普通组按先后顺序先占掉循环组指定的 4、5。
+    pending = []
+    for f, kind, pos in entries:
+        pick = None
+        for p in pos:
+            if p not in used and kinds[p - 1] == kind:
+                pick = p
+                break
+        if pick is None:
+            pending.append((f, kind, bool(pos)))
             continue
-    _ML_SEED_CACHE["t"] = now
-    _ML_SEED_CACHE["dirs"] = list(out)
+        used.add(pick)
+        out[pick - 1] = f.get("value")
+    # 未指定位置（或指定位置被占用）的素材再按类型找空位。
+    for f, kind, _had_pos in pending:
+        pick = None
+        for p in range(1, total + 1):
+            if p not in used and kinds[p - 1] == kind:
+                pick = p
+                break
+        if pick is None:
+            continue
+        used.add(pick)
+        out[pick - 1] = f.get("value")
     return out
-
-
-def _ml_default_roots():
-    """素材浏览器默认只给 ComfyUI 的 input / output；temp、models 与别的目录都由用户自己登记为根。"""
-    out = []
-    for fn in ("get_input_directory", "get_output_directory"):
-        try:
-            v = getattr(folder_paths, fn, None)
-            v = v() if callable(v) else ""
-            if v:
-                out.append(_ez_real(v))
-        except Exception:
-            pass
-    return [x for x in out if x]
-
-
-def _ml_user_roots():
-    """用户自己登记的根（写进 roots 文件的），只有这些能删；内置根删不掉。"""
-    out = []
-    try:
-        fn = _ml_roots_file()
-        if fn and os.path.isfile(fn):
-            with open(fn, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-            if isinstance(data, list):
-                dropped = 0
-                for x in data:
-                    r = _ez_real(x)
-                    if not r:
-                        continue
-                    if os.path.dirname(r) == r:   # 整盘不再是根：忽略并顺手清掉（自愈）
-                        dropped += 1
-                        continue
-                    out.append(r)
-                if dropped:
-                    try:
-                        with open(fn, "w", encoding="utf-8") as fh:
-                            json.dump(out, fh, ensure_ascii=False, indent=2)
-                    except Exception:
-                        pass
-    except Exception:
-        out = []
-    return out
-
-
-def _ml_roots():
-    """MediaLoader 文件浏览器可浏览的根：input / output + 用户登记的扫描目录 + 本机添加的根。"""
-    roots = _ml_default_roots()
-    try:
-        roots.extend([_ez_real(x) for x in _ml_seed_roots() if _ez_real(x)])
-    except Exception:
-        pass
-    for r in _ml_user_roots():
-        if r not in roots:
-            roots.append(r)
-    seen, out = set(), []
-    for r in roots:
-        if r and r not in seen:
-            seen.add(r)
-            out.append(r)
-    return out
-
-
-def _media_safe(name):
-    name = os.path.basename((name or "").replace("\\", "/")).strip()
-    name = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff()（）\s]+", "_", name)
-    return name
-
-
-_ML_UPLOAD_MAX = 4 * 1024 * 1024 * 1024      # 单个上传文件上限 4 GiB（流式写盘，不整份进内存）
-
-
-def _ml_unique_name(root, name):
-    """重名不覆盖：<base>_1.<ext>、<base>_2.<ext> …"""
-    base, ext = os.path.splitext(name)
-    cand, i = name, 1
-    while os.path.exists(os.path.join(root, cand)):
-        cand = f"{base}_{i}{ext}"
-        i += 1
-    return cand
-
-
-async def _ml_upload(req):
-    """接收拖拽上传的多媒体文件，保存到 ComfyUI input 目录，返回可加入素材卡片的文件描述。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        root = _ml_media_root()
-        if not root:
-            return _web.json_response({"error": "no input dir"}, status=500)
-        from urllib.parse import quote as _q
-        results = []
-        post = await req.post()
-        for val in post.getall("files", []):
-            if not (hasattr(val, "filename") and hasattr(val, "file")):
-                continue
-            name = _media_safe(val.filename)
-            if not name:
-                continue
-            if _media_kind(name) == "other" and os.path.splitext(name)[1].lower() not in _MEDIA_TXT_EXTS:
-                continue      # 只接收媒体/文本文件，挡掉任意后缀（.bat/.desktop/.sh/.exe 等）
-            name = _ml_unique_name(root, name)
-            dest = os.path.join(root, name)
-            src = val.file if hasattr(val.file, "read") else None
-            if src is None:
-                data = bytes(val.file)
-                if len(data) > _ML_UPLOAD_MAX:
-                    continue
-                with open(dest, "wb") as fh:
-                    fh.write(data)
-            else:
-                total = 0
-                too_big = False
-                with open(dest, "wb") as fh:
-                    while True:
-                        chunk = src.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > _ML_UPLOAD_MAX:
-                            too_big = True
-                            break
-                        fh.write(chunk)
-                if too_big:
-                    try:
-                        os.remove(dest)
-                    except Exception:
-                        pass
-                    continue
-            typ = _media_kind(name)
-            try:
-                size = os.path.getsize(dest)
-                mtime = _fmt_mtime(os.path.getmtime(dest))
-            except Exception:
-                size, mtime = 0, ""
-            results.append({
-                "name": name, "path": name, "subfolder": "", "dir": "input",
-                "type": typ, "size": size, "mtime": mtime,
-                "url": "/view?type=input&filename=" + _q(name),
-            })
-        return _web.json_response({"files": results})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ml_browse(req):
-    """浏览任意目录（默认 input）：返回子目录、媒体文件、父级与可用盘符。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    from urllib.parse import quote as _q
-    roots = _ml_roots()
-    if not roots:
-        return _web.json_response({"error": "no browsable root"}, status=400)
-    want = (req.query.get("path") or "").strip() or _ml_media_root()
-    path = _ez_inside(want, roots) or roots[0]      # 越界一律回落到第一个根，不报错
-    if not os.path.isdir(path):
-        path = roots[0]
-    dirs, files = [], []
-    try:
-        for n in os.listdir(path):
-            full = os.path.join(path, n)
-            try:
-                if os.path.isdir(full):
-                    dirs.append({"name": n, "path": full})
-                else:
-                    typ = _media_kind(n)
-                    if typ == "other":
-                        continue
-                    rel = os.path.relpath(full, path).replace("\\", "/")
-                    try:
-                        size = os.path.getsize(full); mtime = _fmt_mtime(os.path.getmtime(full))
-                    except Exception:
-                        size, mtime = 0, ""
-                    files.append({"name": n, "path": full, "type": typ, "size": size, "mtime": mtime,
-                                  "url": ""})
-            except Exception:
-                continue
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-    dirs.sort(key=lambda x: (x["name"] or "").lower())
-    files.sort(key=lambda x: (x["name"] or "").lower())
-    up = os.path.dirname(path)
-    parent = up if (up and up != path and _ez_inside(up, roots)) else ""   # 到根目录就到底，不许再往上层爬
-    inside = [r for r in roots if _ez_inside(path, [r])]
-    root_of = max(inside, key=len) if inside else roots[0]   # 嵌套时用最具体的根，下拉才停在用户登记的那个
-    return _web.json_response({"path": path, "parent": parent, "root": root_of, "roots": roots,
-                               "mine": _ml_user_roots(),
-                               "name": os.path.basename(path) or path, "dirs": dirs, "files": files})
-
-
-async def _ml_serve(req):
-    """按路径流式返回本地文件（本地工具用途，仅只读须存在的文件）；相对路径按 input 目录解析。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    path = (req.query.get("path") or "").strip()
-    abs_path = _ml_resolve(path)
-    if not abs_path or not os.path.isfile(abs_path):
-        return _web.Response(status=404, text="not found")
-    try:
-        # 别用「禁止缓存」：模型/图片/视频每次打开都整份重下（3D 模型最明显，几 MB 起步）。
-        # no-cache = 允许存但每次协商，aiohttp 自带 ETag/Last-Modified → 文件没变就是 304，改了就立刻拿到新的。
-        return _web.FileResponse(abs_path, headers={"Cache-Control": "private, no-cache"})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ml_open(req):
-    """在系统文件管理器中打开素材文件所在目录。仅本机客户端（拉起系统程序属于本机动作）。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        path = (data.get("path") or "").strip()
-        abs_ = _ml_resolve(path)
-        if not abs_ or not os.path.exists(abs_):
-            return _web.json_response({"error": "file not found"}, status=404)
-        folder = os.path.dirname(os.path.abspath(abs_))
-        import subprocess
-        import sys
-        if sys.platform.startswith("win"):
-            try:
-                subprocess.Popen(["explorer", "/select,", os.path.abspath(abs_)])
-            except Exception:
-                os.startfile(folder)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", "-R", os.path.abspath(abs_)])
-        else:
-            subprocess.Popen(["xdg-open", folder])
-        return _web.json_response({"ok": True})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ml_save_as(req):
-    """把素材文件另存到用户挑选的目录（dest 由前端调 pick_folder 得到，所以同样是本机动作）。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        path = (data.get("path") or "").strip()
-        dest = (data.get("dest") or "").strip()
-        abs_ = _ml_resolve(path)          # 只允许「允许目录」内的源文件
-        if not abs_ or not os.path.isfile(abs_):
-            return _web.json_response({"error": "file not found"}, status=404)
-        if not dest or not os.path.isdir(dest):
-            return _web.json_response({"error": "bad dest"}, status=400)
-        import shutil
-        # 重名不覆盖：与 _ml_upload 同款策略（<base>_1.<ext> …）。原先直接 copy2 会把同名文件静默替换掉。
-        name = _ml_unique_name(dest, os.path.basename(abs_))
-        target = os.path.join(dest, name)
-        shutil.copy2(abs_, target)
-        return _web.json_response({"ok": True, "dest": target, "renamed": name != os.path.basename(abs_)})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-async def _ml_pick_folder(req):
-    """弹 Windows 原生「选择文件夹」对话框（在线程里跑，避免阻塞事件循环并保证置顶）。仅本机客户端。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-
-    def _pick():
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            base = folder_paths.get_input_directory() if hasattr(folder_paths, "get_input_directory") else ""
-            root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True); root.lift()
-            path = filedialog.askdirectory(initialdir=base, title="Select save folder")
-            root.destroy()
-            return path
-        except Exception:
-            return ""
-    try:
-        import asyncio
-        path = await asyncio.to_thread(_pick)
-        return _web.json_response({"ok": bool(path), "path": os.path.normpath(path) if path else ""})
-    except Exception as e:
-        return _web.json_response({"ok": False, "error": str(e)}, status=500)
-
-
-async def _ml_roots_get(req):
-    """当前可浏览的根目录（诊断用）。**只对本机返回完整列表** —— 根列表属于服务端配置，
-    对远端只回空（不然等于把用户登记过的敏感目录报给任意调用方）。"""
-    if not _ez_local(req):
-        return _web.json_response({"roots": [], "mine": [], "local_only": True})
-    return _web.json_response({"roots": _ml_roots(), "mine": _ml_user_roots()})
-
-
-async def _ml_roots_post(req):
-    """添加/移除「可浏览根目录」。只允许本机客户端 —— 否则远端能自己扩大可读范围。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-    except Exception:
-        data = {}
-    fn = _ml_roots_file()
-    if not fn:
-        return _web.json_response({"error": "no userdata"}, status=500)
-    cur = []
-    try:
-        if os.path.isfile(fn):
-            with open(fn, "r", encoding="utf-8") as fh:
-                v = json.load(fh)
-            cur = [str(x) for x in v if str(x).strip()] if isinstance(v, list) else []
-    except Exception:
-        cur = []
-    p = _ez_real((data.get("path") or "").strip())
-    if p:
-        if not os.path.isdir(p):
-            return _web.json_response({"error": "not a folder: " + p}, status=400)
-        if os.path.dirname(p) == p:
-            return _web.json_response({"error": "a drive/filesystem root cannot be a browsable root; add a subfolder instead"}, status=400)
-        if p in _ml_roots():
-            return _web.json_response({"ok": True, "note": "already a root", "roots": _ml_roots(), "mine": _ml_user_roots()})
-        if p not in cur:
-            cur.append(p)
-    rm = _ez_real((data.get("remove") or "").strip())
-    if rm:
-        cur = [x for x in cur if _ez_real(x) != rm]
-    try:
-        os.makedirs(os.path.dirname(fn), exist_ok=True)
-        with open(fn, "w", encoding="utf-8") as fh:
-            json.dump(cur, fh, ensure_ascii=False, indent=2)
-        _ML_SEED_CACHE["t"] = 0   # 根目录变了，下次重算
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-    return _web.json_response({"ok": True, "roots": _ml_roots(), "mine": _ml_user_roots()})
-
-
-try:
-    PromptServer.instance.routes.get("/media_loader/files")(_ml_files)
-    PromptServer.instance.routes.get("/media_loader/roots")(_ml_roots_get)
-    PromptServer.instance.routes.post("/media_loader/roots")(_ml_roots_post)
-    PromptServer.instance.routes.get("/media_loader/browse")(_ml_browse)
-    PromptServer.instance.routes.get("/media_loader/serve")(_ml_serve)
-    PromptServer.instance.routes.post("/media_loader/outputs")(_ml_outputs)
-    PromptServer.instance.routes.post("/media_loader/upload")(_ml_upload)
-    PromptServer.instance.routes.post("/media_loader/open")(_ml_open)
-    PromptServer.instance.routes.post("/media_loader/save_as")(_ml_save_as)
-    PromptServer.instance.routes.post("/media_loader/pick_folder")(_ml_pick_folder)
-    PromptServer.instance.routes.post("/media_out/outputs")(_mo_outputs)
-except Exception:
-    pass
-
-
+# 节点：卡片式素材装载：普通/固定槽位两种模式，一个端口可能是一份 list。
 class MediaLoaderNode:
     """EzFlex-MediaLoader：可视化组织素材（分组→素材卡片→媒体文件），每张「素材卡片」对应一个深红输出端口。
     运行期按 ComfyUI 内置加载节点同款产出值：图像→IMAGE 张量 [1,H,W,3]、视频→VideoFromFile 对象（VIDEO，懒加载）、
@@ -8842,23 +2350,44 @@ class MediaLoaderNode:
             cfg = {}
         if not isinstance(cfg, dict):
             cfg = {}
-        rows = _ml_load_rows(config)
+        cards = parse_media_cards(config)
         groups = [((g.get("name") or "").strip() or "Group") for g in (cfg.get("groups") or []) if isinstance(g, dict)]
+        loop_cards = set(str(c.get("id")) for c in cards if c.get("loop"))
         fixed = cfg.get("fixed") if isinstance(cfg.get("fixed"), dict) else {}
         slots = fixed.get("slots") if fixed.get("on") else None
         if slots:
-            ports = _ml_fixed_segment(rows, index, slots, groups)
+            try:
+                _i = max(0, int(index or 0))
+            except (TypeError, ValueError):
+                _i = 0
+            # 循环卡片组每个 index 都带上；普通卡片组才参与编号。
+            normal_cards = [c for c in cards if not c.get("loop")]
+            _loop_no = _i + 1
+            def _loop_active(c):
+                if c.get("loopAll"):
+                    return True
+                try:
+                    arr = c.get("loopIndices")
+                    if not isinstance(arr, list):
+                        return True
+                    return _loop_no in {int(x) for x in arr}
+                except (TypeError, ValueError):
+                    return False
+            loop_card_list = [c for c in cards if c.get("loop") and _loop_active(c)]
+            loop_cards = set(str(c.get("id")) for c in loop_card_list)
+            picked = normal_cards[_i % len(normal_cards)] if normal_cards else None
+            use_cards = [c for c in cards if (c.get("loop") and c in loop_card_list) or c is picked]
+            rows = _ml_load_cards(use_cards)
+            ports = _ml_fixed_segment(rows, 0, slots, groups, cycle=True, loop_cards=loop_cards)
         else:
+            rows = _ml_load_cards(cards)
             ports = _ml_ports(rows, str(cfg.get("mode") or "card"), bool(cfg.get("merge")) and not slots,
                               str(cfg.get("mergeScope") or "card"), _ml_merge_types(cfg), _ml_fit_cfg(cfg), groups, slots)
         outputs = [p["items"] for p in ports]
         labels = [p["name"] or "Card" for p in ports]
-        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in outputs)   # 全 ANY：改模式/重排不做类型校验
-        self.__class__.RETURN_NAMES = tuple(labels)
         self.OUTPUT_IS_LIST = tuple([True] * len(outputs))                      # 挂在实例上：merge_result_data 读的就是实例，UI 的 /object_info 看不到 → 端口保持圆点
-        return tuple(outputs)
-
-
+        return _ez_apply_dynamic_ports(self, labels, outputs)
+# 节点：拆 MediaLoader 的 list，一项一口；端口名由前端按素材同步。
 class MediaOutNode:
     """EzFlex-MediaOut：MediaLoader 的拆分端。收 Loader 整份 list（INPUT_IS_LIST=True），一个项一个输出口，
     值按序原样给；端口名/类型由前端 /media_out/outputs 按素材项同步（运行期全是 *）。
@@ -8899,230 +2428,16 @@ class MediaOutNode:
         except Exception:
             pass
         vals = card if isinstance(card, (list, tuple)) else ([] if card is None else [card])
-        outputs = [None if i in off else v for i, v in enumerate(vals)]
-        self.__class__.RETURN_TYPES = _DynamicOutputTypes("*" for _ in outputs)   # 全 ANY：拆分口换内容不做类型校验
-        return tuple(outputs)
-
-
-class PromptHelperNode:
-    """EzFlex-PromptHelper：可视化编辑提示词卡片（完整富文本编辑器）。
-    输入：动态「综合媒体」端口 media_in_1..16（ANY `*`，可接 图像/视频/音频/3D 模型 等任意媒体，连接后自动补空槽）+
-    动态「提示词文本」端口 card_in_1..N（STRING，按顺序链接到卡片，连接后该卡片面板内容被外部文本覆盖并置灰）。
-    没有 CLIP 输入：运行期自动优化（TextGenerate）用的 CLIP 在「设置·TextGenerate设置」里按模型路径 + 类型自行加载。
-    输出：固定「合并提示词」+ 动态卡片输出端口 = 卡片数 1:1（均为 STRING）。
-    """
-
-    @classmethod
-    def INPUT_TYPES(s):
-        inputs = {
-            "required": {
-                "config": ("STRING", {
-                    "multiline": True,
-                    "default": "{}",
-                    "tooltip": "Config JSON generated by the Prompt Cards panel (card list).",
-                }),
-            },
-            "optional": {},
-            "hidden": {"unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
-        }
-        for i in range(1, _PH_MAX_MEDIA + 1):
-            inputs["optional"][f"media_in_{i}"] = (_ANY, {
-                "forceInput": True,
-                "tooltip": f"Any media {i}: images / video / audio / 3D models are accepted (a new empty slot is added when connected).",
-            })
-        for i in range(1, _PH_MAX_CARDS + 1):
-            inputs["optional"][f"card_in_{i}"] = ("STRING", {
-                "forceInput": True,
-                "tooltip": f"Text of prompt card {i} (when connected it overrides that card panel content).",
-            })
-        # 循环输入：固定排在所有 media_in / card_in 之后（最下面）。接上后「合并提示词」只出第 index 张卡。
-        inputs["optional"]["index"] = ("INT", {
-            "default": 0, "min": 0, "forceInput": True,
-            "tooltip": "Loop index: when wired, the Merged prompt outputs only card #index's text (one prompt per loop round).",
-        })
-        return inputs
-
-    RETURN_TYPES = ("STRING",) * (_PH_MAX_CARDS + 1)
-    RETURN_NAMES = tuple(["Merged prompt"] + [f"Card {i + 1}" for i in range(_PH_MAX_CARDS)])
-    FUNCTION = "run"
-    CATEGORY = "EzFlex"
-    DESCRIPTION = "Prompt Helper"
-
-    def _ph_optimize_runner(self, opt, tg, media):
-        """运行期优化器：返回 optimize(text) —— 整体一次与单卡一次共用同一套参数/媒体。"""
-        cache = {}
-
-        def optimize(text):
-            if bool(opt.get("autoTextgen")):
-                if "clip" not in cache:
-                    clip_path = ph_resolve_model(str(tg.get("clip_path") or _ph_global_model_path("clip_path") or "").strip(), [str(tg.get("clip_root") or "").strip()])
-                    if not clip_path:
-                        raise ValueError("[EzFlex-PromptHelper] runtime auto-optimize (TextGenerate) is enabled; fill in the clip model + type in the TextGenerate settings.")
-                    cache["clip"] = _ph_clip_instance(clip_path, str(tg.get("clip_type") or "stable_diffusion"))
-                return _ph_clip_generate(cache["clip"], text, tg, media)
-            auto_method = "llama" if bool(opt.get("autoLlama")) else "api"
-            payload = {
-                "method": auto_method, "prompt": text,
-                "provider": opt.get("provider") or "", "model": opt.get("model") or "",
-                "apiUrl": opt.get("apiUrl") or "", "apiKey": opt.get("apiKey") or "",
-                "proxy": opt.get("proxy") or "",
-                "images": _ph_images_to_dataurls(_ph_vision_tensors(media)),
-                "llama": opt.get("llama") or {}, "textgen": opt.get("textgen") or {},
-                "apiParams": opt.get("apiParams") or {},
-            }
-            try:
-                return _ph_optimize_impl(payload)
-            except Exception as e:
-                # 别只 print 到控制台：优化结果就是输出，静默失败会变成"悄悄输出空提示词"（用户看不到原因）
-                print(f"[PromptHelper] runtime auto-optimize ({auto_method}) failed: {e}")
-                hint = " (llama: increase n_ctx in the llama settings, or use the API)" if auto_method == "llama" else ""
-                raise ValueError(f"[EzFlex-PromptHelper] runtime auto-optimize ({auto_method}) failed: {e}{hint}") from e
-
-        return optimize
-
-    def run(self, config="{}", unique_id=None, extra_pnginfo=None, **kwargs):
-        cards = parse_prompt_cards(config)
-        count = len(cards)
-        opt = parse_prompt_optimize(config)
-        tg = opt.get("textgen") or {}
-        sep = parse_prompt_rules(config)["mergeSep"]
-        overall = parse_prompt_overall(config)
-
-        # 三个开关前端就是互斥的（开一个自动关另外两个），配置里出现多个只可能是手改坏了 —— 直接报错，
-        # 不做静默优先级兜底。
-        auto_flags = [k for k in ("autoTextgen", "autoApi", "autoLlama") if opt.get(k)]
-        if len(auto_flags) > 1:
-            raise ValueError("[EzFlex-PromptHelper] multiple runtime auto-optimize methods are enabled (" + " / ".join(auto_flags) + "); keep only one.")
-        auto_used = bool(auto_flags)
-
-        # 每张卡的「默认」正文（外部 card_in_N 覆盖该卡）；「合=绿」卡片的默认合并 = 总体层说的那份「默认」
-        defaults = []
-        recv = []   # 「实时接收卡」本轮收到的外部文本（回传前端写进卡片，源变了就刷新）
-        for i in range(count):
-            raw = kwargs.get(f"card_in_{i + 1}")
-            has_raw = raw is not None and str(raw).strip() != ""
-            own = cards[i].get("content") or _ph_html_to_text(cards[i].get("contentHTML")) or ""
-            if has_raw and cards[i].get("liveIn"):
-                # 实时接收卡：外部文本只在卡片正文为空时兜底；正文为准（用户可在卡片里临时加词）
-                recv.append({"id": cards[i].get("id"), "text": str(raw)})
-                defaults.append(own if own.strip() else str(raw))
-            elif has_raw:
-                defaults.append(str(raw))   # 已连接的外部文本输入：覆盖该卡
-            else:
-                defaults.append(own)
-        _in_merge = [i for i in range(count) if not (isinstance(cards[i], dict) and cards[i].get("mergeOff"))]
-        # 实时接收卡：运行期绝不送优化（三个自动优化开关都不作用到它），原样并入输出
-        live_idx = set(i for i in range(count) if isinstance(cards[i], dict) and cards[i].get("liveIn"))
-        opt_merge = [i for i in _in_merge if i not in live_idx]
-        live_merged = sep.join(_ph_compile_card(defaults[i], cards[i]) for i in _in_merge if i in live_idx and defaults[i].strip())
-        default_src = sep.join(defaults[i] for i in opt_merge if defaults[i].strip())
-        default_merged = sep.join(_ph_compile_card(defaults[i], cards[i]) for i in _in_merge if defaults[i].strip())
-
-        def _join_live(base):
-            return sep.join([x for x in (base or "", live_merged or "") if str(x).strip()])
-
-        optimize = self._ph_optimize_runner(opt, tg, _ph_gather_media(kwargs)) if auto_used else None
-
-        # ── 总体层（合并提示词）──
-        # 槽里存/回传的都是**模型原文**（未编译，这样换规范还能重编）；只有真正输出时才过一遍规范编译。
-        # 编译是幂等的：模板本身就是 @图片{n} 的规范再编一次结果不变，模板是 <Picture {n}> 的第二次没东西可编。
-        rule_card = cards[0] if cards else {}
-        opt_text = ""            # 本轮新算出来的整体优化（要回传前端写进「整体优化结果」）
-        overall_used = False     # 输出用的是整体优化 → 让前端把总编辑滑块切到「优化」
-        has_opt = bool(str(overall.get("text") or "").strip())
-        if auto_used:
-            if has_opt:
-                if overall.get("useOptimized") or not default_src.strip():
-                    merged, overall_used = _join_live(_ph_compile_card(overall["text"], rule_card)), True
-                else:
-                    merged = default_merged      # 已含实时卡原文
-            elif default_src.strip():
-                opt_text = optimize(default_src)
-                merged, overall_used = _join_live(_ph_compile_card(opt_text, rule_card)), True
-            else:
-                merged = _join_live("")          # 用户自己没写；只有实时卡时也照常输出
-        else:
-            # 三个开关全关：同一套槽位规则，只是不做任何优化调用 ——
-            # 总编辑滑块=默认 → 默认合并（合=灰不并）；=优化 → 整体优化内容（空就空，不回落）
-            if overall.get("useOptimized"):
-                merged = _join_live(_ph_compile_card(overall["text"], rule_card))
-                overall_used = True
-            else:
-                merged = default_merged
-
-        # ── 各卡片端口 ──
-        # 合=绿（进合并）：运行期不单独优化，严格按该卡滑块输出（滑块指到空槽就输出空）
-        # 合=灰（不进合并）：按需单独优化一次；两个槽都空才输出空
-        ports = []
-        card_updates = []
-        for i in range(count):
-            card = cards[i]
-            raw = kwargs.get(f"card_in_{i + 1}")
-            if raw is not None and str(raw).strip() != "" and not card.get("liveIn"):
-                ports.append(str(raw)); continue
-            d = defaults[i]
-            o = str(card.get("contentOptimized") or "")
-            in_merge = not card.get("mergeOff")
-            if card.get("liveIn"):
-                ports.append(d)   # 实时接收卡：只输出默认正文，不优化、不用优化槽
-            elif auto_used and not in_merge:
-                if not d.strip() and not o.strip():
-                    ports.append("")
-                elif not d.strip():
-                    ports.append(o)
-                    card_updates.append({"id": card.get("id"), "useOptimized": True})
-                elif not o.strip():
-                    new_text = optimize(d)
-                    ports.append(new_text)
-                    card_updates.append({"id": card.get("id"), "contentOptimized": new_text, "useOptimized": True})
-                else:
-                    ports.append(o if card.get("useOptimized") else d)
-            else:
-                # 合=绿（或不走自动优化）：严格按该卡滑块输出，滑块指到空槽就输出空（空就空）
-                ports.append(o if card.get("useOptimized") else d)
-
-        # 按卡片自己的规范编译（只编引用媒体）；编译结果就是各卡片的输出端口
-        compiled = [_ph_compile_card(ports[i], cards[i]) for i in range(count)]
-
-        # 循环模式（设置·其他设置里开）：index 接上时「合并提示词」只出第 index 张卡 —— 一段一张提示词时不用改卡片
-        try:
-            _cfg = json.loads(config) if isinstance(config, str) else (config or {})
-        except Exception:
-            _cfg = {}
-        loop_mode = bool(_cfg.get("loopMode")) if isinstance(_cfg, dict) else False
-        idx_raw = kwargs.get("index")
-        if loop_mode and idx_raw is not None and str(idx_raw).strip() != "":
-            try:
-                _i = max(0, int(idx_raw))
-            except (TypeError, ValueError):
-                _i = -1
-            merged = compiled[_i] if 0 <= _i < len(compiled) else ""
-
-        if bool(opt.get("clearCache")):
-            ph_clear_model_cache()
-
-        return {
-            # ⚠️ ComfyUI 的 ui 契约：每个键的值必须是**列表** —— execution.py 会按
-            # `[y for x in uis for y in x[k]]` 把多个 ui dict 合并成列表；标量会当场炸
-            # （bool → TypeError: 'bool' object is not iterable），字符串则被拆成一个个字符。
-            # 前端 onExecuted 收到的是「值列表」，所以那边读的时候要取 [0]。
-            "ui": {
-                # 本轮新算出来的整体优化内容（前端写进「整体优化结果」；空 = 这轮没优化）
-                "optimized": [opt_text],
-                # 输出用的是整体优化 → 前端把总编辑滑块切到「优化」
-                "useOverallOptimized": [overall_used],
-                # 运行期动过的卡片：[{id, contentOptimized?, useOptimized?}]
-                "cardUpdates": [card_updates],
-                # 「实时接收卡」本轮收到的外部文本：[{id, text}]（前端据此更新卡片内容）
-                "recv": [recv],
-            },
-            "result": tuple([merged] + compiled),
-        }
-
-
+        outputs = []
+        for i, v in enumerate(vals):
+            if i in off:
+                v = None
+            elif isinstance(v, torch.Tensor) and int(v.ndim) >= 3 and int(v.shape[0]) == 0:
+                v = None       # 空 IMAGE/V VIDEO 批次：下游 H3 ref_images 会把它当有效图去 resize，直接给 None
+            outputs.append(v)
+        return _ez_apply_dynamic_ports(self, getattr(type(self), "RETURN_NAMES", ()), outputs)
 _EZ_LIST_MAX = 16
-
-
+# 节点：多输入按端口顺序拼成一份 list；整份全 None 的输入视为没接。
 class MergeListNode:
     """EzFlex-MergeList：把若干输入按顺序拼成一个列表（列表展开并入，非列表追加为一项）。
     输入口动态（前端按需增删，后端声明到 _EZ_LIST_MAX），输出固定一个 list，可直接喂 StartLoop 的 List 模式。
@@ -9145,14 +2460,10 @@ class MergeListNode:
     def merge(self, **kwargs):
         self.OUTPUT_IS_LIST = (True,)   # 实例级：UI 里出口保持圆点，执行仍是"一份 list"
         out = []
-        # ★★ 拼接顺序 = **画布上从上到下**的端口顺序，也就是 kwargs 的键顺序。
-        #   为什么不能按 input_N 的**数字**排：前端面板会回收空口、再在末尾补一个「最小空闲编号」的新口
-        #   （`syncMergeInputs`），于是**名字顺序可能和上下顺序不一致** —— 用户把线换到上面那一口，
-        #   合并顺序却没变（2026-10-05 用户「我换了顺序最后还是倒过来的」就是这个）。
-        #   而前端序列化 prompt 时是 `for (const [i, input] of node.inputs.entries()) inputs[input.name] = …`
-        #   ⇒ JSON 键顺序 = 端口数组顺序 = 视觉顺序；Python dict 保序 ⇒ kwargs 保序。
-        #   （面板同时会把名字重排成 input_1..n，两边口径一致。）
-        #   ⚠️ 只认 input_N，别的键（将来若加 hidden）跳过。
+        # ★★ 拼接顺序 = 画布上从上到下的端口顺序（kwargs 键顺序），不是 input_N 的数字顺序。
+        #   前端会回收空口、在末尾补「最小空闲编号」的新口（`syncMergeInputs`），名字顺序可能与上下顺序
+        #   不一致；序列化时按 node.inputs 数组顺序写键 ⇒ JSON 键顺序 = 视觉顺序，Python dict 保序 ⇒
+        #   kwargs 保序。面板同时把已连口重命名成 input_1..n，两边口径一致。只认 input_N，其它键跳过。
         for name, v in kwargs.items():
             if not (isinstance(name, str) and name.startswith("input_") and name[6:].isdigit()):
                 continue
@@ -9171,8 +2482,7 @@ class MergeListNode:
             else:
                 out.append(v)
         return (out,)
-
-
+# 节点：一份 list 按序拆成 16 个出口，缺的补 None。
 class SplitListNode:
     """EzFlex-SplitList：把一份 list 按顺序拆成多个输出口（一个 list 项一个口），缺的补 None。
     与 EzFlex-MergeList 互为反操作，适用于任意 ComfyUI 列表值。端口数由面板决定。"""
@@ -9195,11 +2505,8 @@ class SplitListNode:
         v = kwargs.get("list")
         vals = v if isinstance(v, (list, tuple)) else ([] if v is None else [v])
         return tuple(vals[i] if i < len(vals) else None for i in range(_EZ_LIST_MAX))
-
-
 _EZ_REROUTE_MAX = 32
-
-
+# 节点：逐口 1:1 透传（任意类型），口数与口名由前端 config 决定。
 class EzFlexRerouteNode:
     """EzFlex-Reroute：转接点。与内置 Reroute 一样做「原样转接」，但一口一卡、可自定义命名。
 
@@ -9242,52 +2549,125 @@ class EzFlexRerouteNode:
         # 逐口透传：第 i 个入口原样送到第 i 个出口。没接线的入口给 None（下游会当空值处理）。
         # ⚠️ 必须按「本实例当前口数」返回，不能固定返回 _EZ_REROUTE_MAX 个 ——
         # 类 RETURN_TYPES 是全局共享的，超过实际口数会产出一堆悬空输出。
-        n = len(getattr(self, "outputs", None) or [])
-        if not n:
-            n = int(getattr(self, "_ez_ports", 0) or 0)
-        if not n:
-            # 兜底：按前端最后一次同步的口数取，再不行就按实际收到的最大 input_N
-            for i in range(_EZ_REROUTE_MAX, 0, -1):
-                if kwargs.get("input_%d" % i) is not None:
-                    n = i
-                    break
+        # 口数只能从入参推断：内核不给节点实例挂 `outputs`（execution.py 只在自己身上用这个名字），
+        # 面板的 syncSockets 又把已连输入压到 1..conn、输出数 = conn，所以「最高已连 input_N」就是口数。
+        n = 0
+        for i in range(_EZ_REROUTE_MAX, 0, -1):
+            if kwargs.get("input_%d" % i) is not None:
+                n = i
+                break
         n = max(0, min(_EZ_REROUTE_MAX, n))
         return tuple(kwargs.get("input_%d" % (i + 1)) for i in range(n))
-
-
-async def _ez_reroute_outputs(req):
-    """EzFlex-Reroute 端口同步：面板按当前输出口数上报 labels（每口名字），
-    这里把类 RETURN_TYPES / RETURN_NAMES 同步成同样多的 ANY 口（校验与端口名用）。
-    输入口数由 INPUT_TYPES 固定声明到 _EZ_REROUTE_MAX，前端只显示接了的那几个 + 1 个空槽。
-
-    ⚠️ 走 _ez_sync_dynamic_types 的「只增不减」不变量（与 ParamPresetOutput 等一致），
-    **不要**精确覆写长度 —— 类 RETURN_TYPES 全局一份，同屏多个 Reroute 口数不同时，
-    精确收缩会把另一个实例的高位槽挤掉，校验时取越界报 `tuple index out of range`。"""
-    if not _ez_local(req):
-        return _web.json_response({"error": "forbidden: local clients only"}, status=403)
-    try:
-        data = await req.json()
-        labels = data.get("labels") or []
-        labels = [str(x)[:128] for x in labels][:_EZ_OUTPUT_CAP] if isinstance(labels, list) else []
-        if not labels:
-            labels = ["output_1"]
-        _ez_sync_dynamic_types(EzFlexRerouteNode, labels)
-        return _web.json_response({"ok": True, "names": list(labels)})
-    except Exception as e:
-        return _web.json_response({"error": str(e)}, status=500)
-
-
-try:
-    PromptServer.instance.routes.post("/ezreroute/outputs")(_ez_reroute_outputs)
-except Exception:
-    pass
-
-
 _EZ_LOOP_MAX = 20
-# 熔断上限：轮次标记丢失 / 旧工作流 rounds 离谱大时，也绝不把画布卡死（用户只能强杀进程）。
+# ===== §8 循环节点与续跑缓存 =====
+def _ez_ref_range_slice(v, typ, rng, fps=24.0):
+    """按参考卡的 `range` 裁剪「回喂过来的整段帧序列」：-N = 取最后 N 帧，N = 取前 N 帧。
+
+    ★ 只处理 **frames / image**（用户设定：帧序列按设定帧数取，落盘不足就取现有的）；
+      `video` / `audio` 一律原样透传 —— 那两种由用户自己用 SplitVideo 裁切，LoopStart 不碰。
+
+    LoopEnd 回喂的是**上一整段**（images 全部帧 / audio 全部采样），而 H3 的 ref_videos / 参考音频
+    只需要卡上写的那几帧。不裁的话整段都会变成参考 token（用户实测每步慢好几倍）。
+    只处理 IMAGE 张量与 AUDIO dict；其它类型原样返回。
+    """
+    try:
+        s = str(rng if rng is not None else "").strip()
+        if not s:
+            return v
+        neg = s.startswith("-")
+        try:
+            n = abs(int(s[1:] if neg else s))
+        except (TypeError, ValueError):
+            return v
+        if n <= 0:
+            return v
+        t = str(typ or "").lower()
+        if t in ("frames", "image") and torch.is_tensor(v) and v.ndim == 4:
+            total = int(v.shape[0])
+            out = v if total <= n else (v[-n:] if neg else v[:n])
+            # ★ H3 的参考视频只接受 17k+5 帧（5/22/39…），非网格长度会被它**向下裁**；
+            #   <5 帧直接报错。这里提前把"实际会用几帧"记下来，免得以为 22 帧生效了其实是 5 帧。
+            try:
+                got = int(out.shape[0])
+                if got < 5:
+                    print("[EzFlex-LoopStart] 参考帧只有 %d 帧（<5），H3 会报错 'need at least 5 frames'" % got)
+                else:
+                    grid = got
+                    while grid % 17 != 5:
+                        grid -= 1
+                    if grid != got:
+                        print("[EzFlex-LoopStart] 参考帧 %d 不在 17k+5 网格，H3 会按 %d 帧使用（要正好 %d 帧请保证落盘 ≥%d）"
+                              % (got, grid, got, got))
+            except Exception:
+                pass
+            return out
+    except Exception:
+        pass
+    return v
+
+
+def _ez_resume_media_meta(root, idx):
+    try:
+        with _io.open(os.path.join(root, "seg_%04d.media.json" % int(idx)), "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+def _ez_resume_images(root, idx):
+    """重跑：优先读 <base>.ref 的 PNG 序列；没有才解码成片。"""
+    import av
+    import numpy as np
+    rd = os.path.join(root, "seg_%04d.ref" % int(idx))
+    if os.path.isdir(rd):
+        try:
+            from PIL import Image
+            fs = sorted(f for f in os.listdir(rd) if f.lower().endswith(".png"))
+            if fs:
+                rows = [np.array(Image.open(os.path.join(rd, f)).convert("RGB")) for f in fs]
+                arr = np.stack(rows, axis=0).astype("float32") / 255.0
+                return torch.from_numpy(arr)
+        except Exception:
+            pass
+    p = os.path.join(root, "seg_%04d.mp4" % int(idx))
+    if not os.path.isfile(p):
+        return None
+    rows = []
+    with av.open(p) as c:
+        vs = next((s for s in c.streams if s.type == "video"), None)
+        if vs is None:
+            return None
+        for fr in c.decode(vs):
+            rows.append(fr.to_ndarray(format="rgb24"))
+    if not rows:
+        return None
+    arr = np.stack(rows, axis=0).astype("float32") / 255.0
+    return torch.from_numpy(arr)
+def _ez_resume_audio(root, idx):
+    """重跑：把上一段 WAV 侧车读成 ComfyUI AUDIO（原样注入 value4 参考）。"""
+    import wave
+    import numpy as np
+    p = os.path.join(root, "seg_%04d.wav" % int(idx))
+    if not os.path.isfile(p):
+        return None
+    with wave.open(p, "rb") as w:
+        sr = w.getframerate()
+        ch = w.getnchannels()
+        data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2").astype("float32") / 32768.0
+    if not data.size:
+        return None
+    data = data.reshape(-1, ch).T
+    return {"waveform": torch.from_numpy(data).unsqueeze(0), "sample_rate": int(sr)}
+def _ez_resume_video(root, idx):
+    """重跑：上一段成片恢复成 VideoFromFile（value3 这类视频参考用）。"""
+    p = os.path.join(root, "seg_%04d.mp4" % int(idx))
+    if not os.path.isfile(p):
+        return None
+    try:
+        return InputImpl.VideoFromFile(p)
+    except Exception as exc:
+        print("[EzFlex-LoopStart] resume video load failed: %s" % exc)
+        return None
 _EZ_LOOP_SAFE_MAX = 200
-
-
 try:
     from comfy_execution.graph_utils import GraphBuilder, is_link
     from comfy_execution.graph import ExecutionBlocker
@@ -9297,8 +2677,79 @@ except Exception:   # 旧核心没有展开器/执行图就只登记节点，运
     is_link = None
     ExecutionBlocker = None
     _comfy_nodes = None
+# 队列续跑时把「不能进 JSON 的值」（张量 / 含张量的 dict）落到 temp 再传标记：
+# 否则入队的 prompt 里带 tensor，/queue 与 /history 序列化就 500。
+# ★ 兼容：只有 json.dumps 失败时才走这条路，普通值（str/int/list/dict）原样写入，行为与以前完全一致。
+_EZ_HANDOFF_KEY = "__ezflex_handoff__"
+_EZ_HANDOFF_DIR = "EzFlex_handoff"
 
 
+def _ez_handoff_dir():
+    try:
+        import folder_paths
+        base = folder_paths.get_temp_directory()
+    except Exception:
+        return ""
+    if not base:
+        return ""
+    p = os.path.join(base, _EZ_HANDOFF_DIR)
+    try:
+        os.makedirs(p, exist_ok=True)
+    except Exception:
+        return ""
+    return p
+
+
+def _ez_json_ok(v):
+    try:
+        json.dumps(v)
+        return True
+    except Exception:
+        return False
+
+
+def _ez_handoff_save(v):
+    """不可序列化的值 → 落盘，返回标记 dict（{__ezflex_handoff__: 文件名}）；失败返回 None。"""
+    d = _ez_handoff_dir()
+    if not d:
+        return None
+    import uuid as _uuid
+    name = "h_" + _uuid.uuid4().hex + ".pt"
+    try:
+        import torch
+        torch.save(v, os.path.join(d, name))
+    except Exception as exc:
+        print("[EzFlex-Loop] handoff save failed: %s" % exc)
+        return None
+    return {_EZ_HANDOFF_KEY: name}
+
+
+def _ez_handoff_load(mark):
+    """标记 → 原值。只接受「纯文件名」且落在 handoff 目录里的文件；异常一律返回 None。"""
+    name = str((mark or {}).get(_EZ_HANDOFF_KEY) or "")
+    if not name or os.path.basename(name) != name:
+        return None
+    d = _ez_handoff_dir()
+    if not d:
+        return None
+    p = os.path.join(d, name)
+    if not os.path.isfile(p):
+        return None
+    v = None
+    try:
+        import torch
+        v = torch.load(p, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        print("[EzFlex-Loop] handoff load failed: %s" % exc)
+        v = None
+    try:
+        os.remove(p)          # 一次性：取回后立刻删
+    except OSError:
+        pass
+    return v
+
+
+# 节点：循环起点：输出 index 与上一轮 End 回喂的 valueK；首轮用 initial valueK。
 class LoopStartNode:
     """EzFlex-LoopStart：循环起点，只干一件事 —— 把上一轮 LoopEnd 收到的产物回喂给本轮。
 
@@ -9393,7 +2844,7 @@ class LoopStartNode:
         #   `[[[0,1],2],3]` 而不是平铺 `[0,1,2,3]`。声明成 True 后内核用 extend 平铺，链路上
         #   「上一轮累积的列表」始终是平的（实测 rounds=3 → out1=[0,1,2,3]）。
         #   ⚠️ 按本项目惯例写在**实例**上（同 MergeList / MediaLoader）：内核读的就是实例，
-        #      而 /object_info 看不到 → 面板端口保持原来的圆点样式，UI 无变化。
+        #      写在实例上：内核执行时读实例，/object_info 只读类属性，前端端口显示不受影响。
         self.OUTPUT_IS_LIST = (False,) + (True,) * _EZ_LOOP_MAX
         try:
             cfg = json.loads(config) if isinstance(config, str) else (config or {})
@@ -9402,14 +2853,165 @@ class LoopStartNode:
         if not isinstance(cfg, dict):
             cfg = {}
         idx = max(0, int(index or 0))
+        _resume_dir = ""
+        try:
+            _resume_dir = str((cfg or {}).get("resumeDir") or "").strip()
+        except Exception:
+            _resume_dir = ""
+        # resumeDir 来自工作流 config：只允许 output/input/temp/models 和根表里的可写目录，
+        # 否则「重跑」会变成一个能读任意本地文件的入口（后续按 seg_*.mp4/.wav/.png 读）。
+        if _resume_dir and not _ez_inside(_resume_dir, _ezsp_allowed_roots()):
+            print("[EzFlex-LoopStart] resumeDir 不在允许的目录内，已忽略：%s" % _resume_dir)
+            _resume_dir = ""
         out = [idx]
+        _cards_cfg = cfg.get("refs") if isinstance(cfg.get("refs"), list) else []
         for k in range(1, _EZ_LOOP_MAX + 1):
             v = kwargs.get(self._feed_name(k))
+            if isinstance(v, dict) and set(v.keys()) == {_EZ_HANDOFF_KEY}:
+                v = _ez_handoff_load(v)      # 队列续跑：上一轮落在 temp 的张量取回来
+            if v is None and idx > 0 and _resume_dir:
+                # 区间重跑：上一段的 valueK 从 run 目录缓存里取（不用重跑前一段）
+                _meta0 = _ez_resume_media_meta(_resume_dir, idx - 1)
+                _fallback = cfg.get("resumeMedia") if isinstance(cfg.get("resumeMedia"), dict) else {}
+                if not _meta0:
+                    _meta0 = dict(_fallback)
+                elif _fallback:
+                    # media.json 里可能只有 files、没有逐项类型；用内置 fallback 类型按端口补默认值
+                    _meta0 = dict(_meta0)
+                    for _fk, _ft in _fallback.items():
+                        _meta0.setdefault(str(_fk), _ft)
+                _fmap = _meta0.get("files") if isinstance(_meta0.get("files"), dict) else {}
+                _fname = str(_fmap.get(str(k)) or "")
+                _mtyp = str(_meta0.get(str(k)) or "").lower()
+                _cands = []
+                if _fname:
+                    _cands.append(os.path.join(_resume_dir, _fname))
+                _cands.append(os.path.join(_resume_dir, "seg_%04d.v%d.pt" % (idx - 1, k)))
+                _cands.append(os.path.join(_resume_dir, "seg_%04d_v%d.pt" % (idx - 1, k)))
+                _cands.append(os.path.join(_resume_dir, "seg_%04d_v%d.latent" % (idx - 1, k)))
+                _fp = next((p for p in _cands if os.path.exists(p)), "")
+                if _fp:
+                    try:
+                        if _mtyp and _mtyp != "latent":
+                            v = _ezsp_load_persist_file(_resume_dir, os.path.basename(_fp), _mtyp, "-999", 24)
+                        else:
+                            # .latent = 核心 safetensors 格式；.pt = 本插件旧格式（只读纯 tensor/dict）
+                            v = _ez_load_latent_file(_fp)
+                        # 带上类型/形状：下游是核心节点时，形状不对会炸在很深的地方（resize/reshape），
+                        # 这里先把它记下来，报错时能一眼看出是哪个 value 喂了什么。
+                        try:
+                            _shp = tuple(v.shape) if hasattr(v, "shape") else (type(v).__name__,)
+                        except Exception:
+                            _shp = ("?",)
+                        print("[EzFlex-LoopStart] 重跑续接：读取上一段 value%d 缓存 %s -> %s %s"
+                              % (k, os.path.basename(_fp), type(v).__name__, _shp))
+                    except Exception as _exc:
+                        print("[EzFlex-LoopStart] resume cache load failed: %s" % _exc)
+                if v is None:
+                    # 上一段视频/音频参考：按正常跑时记录的 media.json，从 seg_{K-1}.mp4/.wav 重建
+                    _meta = _meta0   # 已在上面读好（custom file name / type 共用）
+                    _typ = _meta.get(str(k))
+                    if _typ == "image":
+                        v = _ez_resume_images(_resume_dir, idx - 1)
+                    elif _typ == "audio":
+                        v = _ez_resume_audio(_resume_dir, idx - 1)
+                    elif _typ == "video":
+                        v = _ez_resume_video(_resume_dir, idx - 1)
             if idx <= self._start_round(cfg) or v is None:
                 # 还没有回喂（第 1 轮 / 起始轮之前）：用初值口兜底。
                 # ★ 别直接给 None：下游若是 torch.cat / VAE 这类吃实值的节点，收到 None 会直接报错。
                 v = kwargs.get(self._init_name(k))
+            # ★ 回喂的是**上一整段**：按该口的参考卡 `range` 裁掉多余帧，否则 H3 的 ref_videos
+            #   会吃到整段参考（token 暴涨、每步慢好几倍）。卡上没写 range 就不动。
+            try:
+                _rc = None
+                if isinstance(_cards_cfg, list) and 0 < k <= len(_cards_cfg) and isinstance(_cards_cfg[k - 1], dict):
+                    _rc = _cards_cfg[k - 1]
+                if _rc is not None and v is not None:
+                    _rt = str(_rc.get("type") or "").lower()
+                    _rr = str(_rc.get("range") or "").strip()
+                    if _rr and _rt in ("frames", "image"):
+                        _before = None
+                        try:
+                            if torch.is_tensor(v) and v.ndim == 4:
+                                _before = int(v.shape[0])
+                            elif isinstance(v, dict) and "waveform" in v:
+                                _before = int(v["waveform"].shape[-1])
+                        except Exception:
+                            _before = None
+                        v = _ez_ref_range_slice(v, _rt, _rr, cfg.get("fps") or 24)
+                        _after = None
+                        try:
+                            if torch.is_tensor(v) and v.ndim == 4:
+                                _after = int(v.shape[0])
+                            elif isinstance(v, dict) and "waveform" in v:
+                                _after = int(v["waveform"].shape[-1])
+                        except Exception:
+                            _after = None
+                        if _before is not None and _after is not None and _before != _after:
+                            print("[EzFlex-LoopStart] value%d 参考裁剪：%d -> %d（type=%s range=%s）"
+                                  % (k, _before, _after, _rt, _rr))
+            except Exception:
+                pass
             out.append(self._as_items(self._unwrap_literal(v)))
+        try:
+            _cards = cfg.get("refs") if isinstance(cfg.get("refs"), list) else []
+            _paths = cfg.get("refPaths") if isinstance(cfg.get("refPaths"), dict) else {}
+            if _paths:
+                for _i in range(4):
+                    _card = _cards[_i] if _i < len(_cards) and isinstance(_cards[_i], dict) else {}
+                    if not bool(_card.get("timeline", (_card.get("enabled", True) and _card.get("follow", True)))):
+                        continue
+                    _role = str(_card.get("role") or "prev").lower()
+                    _typ = str(_card.get("type") or "video").lower()
+                    _rng = str(_card.get("range") or _card.get("count") or "-5")
+                    _use_rng = _rng if _typ == "frames" else "0"
+                    try:
+                        _need = abs(int(_rng.replace("-", "") or 0))
+                    except (TypeError, ValueError):
+                        _need = 5
+                    _rp = (_paths.get(_role) or {}) if isinstance(_paths.get(_role), dict) else {}
+                    _p = str(_rp.get(_typ) or "")
+                    _val = None
+                    if _resume_dir and _role in ("prev", "cur", "next"):
+                        try:
+                            _si = idx - 1 if _role == "prev" else (idx if _role == "cur" else idx + 1)
+                            _mm = _ez_resume_media_meta(_resume_dir, _si)
+                            _ff = (_mm.get("files") or {}).get(str(_i + 1)) if isinstance(_mm, dict) else None
+                            _mt = str((_mm.get(str(_i + 1)) if isinstance(_mm, dict) else "") or "").lower()
+                            if _ff and (_mt == _typ or (_mt == "image" and _typ in ("frames", "image"))):
+                                _val = _ezsp_load_persist_file(_resume_dir, str(_ff), _mt, _use_rng, cfg.get("fps") or 24)
+                        except Exception:
+                            _val = None
+                    if _typ in ("frames", "image"):
+                        if os.path.isdir(_p):
+                            try:
+                                _have = len([x for x in os.listdir(_p) if x.lower().endswith(".png")])
+                            except Exception:
+                                _have = 0
+                            if _have < _need and _rp.get("video"):
+                                _p = str(_rp.get("video") or "")
+                        elif _rp.get("video"):
+                            _p = str(_rp.get("video") or "")
+                    if _val is None:
+                        _val = _ezsp_load_ref_file(_p, _typ, _use_rng, cfg.get("fps") or 24)
+                    if (_i + 1) < len(out):
+                        # ★ 必须走 _as_items：valueK 是「列表输出」，内核会对返回值 extend。
+                        #   直接把 4 维帧批次（T,H,W,C）放进去会被 extend 拆成 T 张单帧（H,W,3），
+                        #   下游拿到的是**一张 3 维图**——核心节点按 IMAGE 批次读就会
+                        #   「shape [576,-1,3,1024,32] invalid」这种错（重新生成本段时踩到）。
+                        #   取不到值时**必须保持 valueK 原样**（首段没有上一段、或文件已被清），
+                        #   直接写 None 会让内核 extend(None) 抛 TypeError。
+                        try:
+                            _sh = tuple(_val.shape) if hasattr(_val, "shape") else (type(_val).__name__,)
+                            print("[EzFlex-LoopStart] 参考卡 %d -> value%d: %s %s (type=%s, range=%s)"
+                                  % (_i + 1, _i + 1, type(_val).__name__, _sh, _typ, _use_rng))
+                        except Exception:
+                            pass
+                        if _val is not None:
+                            out[_i + 1] = self._as_items(_val)
+        except Exception as _exc:
+            print("[EzFlex-LoopStart] ref card failed: %s" % _exc)
         return tuple(out)
 
     @staticmethod
@@ -9436,13 +3038,12 @@ class LoopStartNode:
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")   # 循环控制节点不进缓存：每次提交都重新展开，避免「改了 body 却什么都不跑」
-
-
+# 节点：循环终点：按总轮数展开（或队列续跑）下一轮，收尾时把 valueK 从 outK 吐出。
 class LoopEndNode:
     """EzFlex-LoopEnd：循环触发器 + 终点。面板只有一个「次数」框，语义是**总轮数**（含第 1 轮）：
     0 或 1 = 只跑 1 次（等于普通运行）；N = 一共跑 N 次（`loop_close` 的收尾条件是 `cur + 1 >= total`，
     cur 从 0 起，所以 rounds=2 → index 0/1 两轮）。
-    ⚠️ 早先的文案写成「1 = 再点一次运行（总共 2 次）」是错的，实际是「1 = 总共 1 次」。
+    ⚠️ 接了 timeplan 时以 `plan["total"]` 为准，面板「次数」框不生效（见 `_total_from`）。
 
     输入口是动态的 value1 / value2 / …，和 LoopStart 的输出口一一对应：
       · 每个口收什么 → 下一轮 LoopStart 同编号的 valueK 就输出什么（段间参考 / 尾帧钉入这类用法）。
@@ -9465,27 +3066,42 @@ class LoopEndNode:
     @classmethod
     def INPUT_TYPES(s):
         opt = {}
+        # ★ timeplan 透传：接上游 TimePlan（或它下游任一透传口），原样从第一位的 `timeplan` 出口送出。
+        #   为什么需要：TimeLine 现在只吃 `timeplan`，而它常在循环体外 —— 有这个口就能写
+        #   「LoopEnd.timeplan → TimeLine.timeplan」，不必再从 SplitVideo 那种中途节点上取。
+        #   EZFLEX_TIMEPLAN 不是 widget 类型 ⇒ 不生成 widget ⇒ 老工作流 widgets_values 不错位。
+        opt["timeplan"] = ("EZFLEX_TIMEPLAN", {"tooltip": "Plan object to pass through to the `timeplan` output (e.g. from EzFlex-TimePlan)."})
         for k in range(1, _EZ_LOOP_MAX + 1):
             opt["value%d" % k] = ("*", {"tooltip": "Loop data %d. Whatever this port receives becomes the next round's LoopStart value%d (implicit feed, do not wire End back to Start)." % (k, k)})
         # 「次数」只是个可序列化的落点，面板画的是自绘数字框。★ 必须放 required：
         #   放 optional 会被当成一个可选输入口 + 不可序列化，值一存就丢。
         req = {"rounds": ("INT", {"default": 1, "min": 0,
-                                  "tooltip": "Total rounds including the first one. 0 or 1 = a single pass (plain run); N = N passes total."})}
+                                  "tooltip": "Total rounds including the first one. 0 or 1 = a single pass (plain run); N = N passes total."}),
+               "rerun_stop": ("STRING", {"default": "-1",
+                                      "tooltip": "Internal: when >= 0, stop after this segment index (range re-run). Not a canvas port."})}
         # ★ __ezround：轮次标记。展开时写进克隆节点的字面量输入（不是画布连线，面板也不画口）。
         #   必须声明成 optional，否则 get_input_data 会把未知键整个丢掉、传不进 kwargs；
         #   前端 stripCoreSockets 会把这个口摘掉，用户看不到它。
         #   ★★ forceInput：**别让前端建 widget** —— INT 类型不写 forceInput 时前端会做一个数字框，
-        #     于是节点上挂着一个 `__ezround` 给用户看（2026-10-05 用户反馈「不需要显示」）。
+        #     否则前端会给 `__ezround` 建一个数字框挂在节点上。
         #     它也不需要序列化：第 1 轮没有这个键时 cur 就是 0（正确），之后每轮由展开器写字面量。
         opt["__ezround"] = ("INT", {"default": 0, "min": 0, "forceInput": True,
                                     "tooltip": "Internal round marker written by the loop expander. Not a canvas port."})
+        # 用户级落盘：JSON {"ports":[1,2],"types":["latent","audio"]}；空 = 不落盘（默认）
+        opt["persist"] = ("STRING", {"default": "", "multiline": False,
+                                     "tooltip": "Internal: which value ports/types to cache for re-runs (JSON). Empty = no cache."})
         return {"required": req,
                 "optional": opt,
                 "hidden": {"dynprompt": "DYNPROMPT", "unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO",
                            "execution_list": "EXECUTION_LIST"}}
 
-    RETURN_TYPES = ("*",) * _EZ_LOOP_MAX
-    RETURN_NAMES = tuple("out%d" % k for k in range(1, _EZ_LOOP_MAX + 1))
+    # ★ `timeplan` 透传口放在第一位。内核按槽位下标回填连线（`outputs[i].links`），存有 out1 的
+    #    工作流会把它读回第 0 槽，所以前端 `loop_nodes.js#ensurePlanPort` 在加载后把 `timeplan`
+    #    口搬到第 0 位（搬 socket 对象，连线跟着走），再由 `reindexLinks` 重写 `origin_slot`。
+    RETURN_TYPES = ("EZFLEX_TIMEPLAN",) + ("*",) * _EZ_LOOP_MAX
+    RETURN_NAMES = ("timeplan",) + tuple("out%d" % k for k in range(1, _EZ_LOOP_MAX + 1))
+    RETURN_TOOLTIPS = ("Pass-through of the incoming plan.",) + \
+        tuple("Last round's value %d." % k for k in range(1, _EZ_LOOP_MAX + 1))
     FUNCTION = "loop_close"
     CATEGORY = "EzFlex"
     DESCRIPTION = "Loop End"
@@ -9546,6 +3162,14 @@ class LoopEndNode:
             return {"__value__": list(v)}
         return v
 
+    def _ret(self, kwargs):
+        """统一的返回值：**`timeplan` 透传口排第一位**，后面接 `out1..outN`（本轮 valueK）。
+
+        ★ 顺序必须与 `RETURN_NAMES` 严格一致（`timeplan` 在**第一位**），
+          任何 return 分支漏掉它都会让输出长度对不上类声明。
+        """
+        return (kwargs.get("timeplan"),) + tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+
     def _queue_next_round(self, dynprompt, unique_id, start_id, cur, total, kwargs, extra_pnginfo):
         """把「下一轮」写进一份新 prompt 塞回队列，并返回本轮的值（下游照常拿到本轮结果）。
 
@@ -9562,14 +3186,14 @@ class LoopEndNode:
             server = None
         if server is None or getattr(server, "prompt_queue", None) is None:
             print("[EzFlex-LoopEnd] queue mode: no PromptServer available (offline / headless) -> single pass.")
-            return values
+            return self._ret(kwargs)
         try:
             base = dynprompt.get_original_prompt() or {}
         except Exception:
             base = {}
         if not base:
             print("[EzFlex-LoopEnd] queue mode: cannot read the original prompt -> single pass.")
-            return values
+            return self._ret(kwargs)
         try:
             nxt = {}
             for nid, info in base.items():
@@ -9585,7 +3209,14 @@ class LoopEndNode:
                         v = values[k - 1]
                         if v is None:
                             continue      # 没接的口不写（与「不写 = None」等价，省得 prompt 变胖）
-                        node["inputs"][LoopStartNode._feed_name(k)] = self._wrap_literal(v)
+                        lit = self._wrap_literal(v)
+                        if not _ez_json_ok(lit):
+                            # 张量 / 含张量的 dict：落盘换标记，让 prompt 能被 /queue、/history 序列化。
+                            _mark = _ez_handoff_save(v)
+                            if _mark is not None:
+                                lit = _mark
+                            # 落盘失败就保持原值（执行仍然正确，只是那两个面板照旧报错）
+                        node["inputs"][LoopStartNode._feed_name(k)] = lit
                 elif str(nid) == str(unique_id):
                     node["inputs"][self._ROUND] = int(cur) + 1
                 nxt[str(nid)] = node
@@ -9597,19 +3228,26 @@ class LoopEndNode:
                     mod_nodes = None
             if mod_nodes is None:
                 print("[EzFlex-LoopEnd] queue mode: cannot import ComfyUI nodes -> single pass.")
-                return values
+                return self._ret(kwargs)
             outputs = [str(nid) for nid, info in base.items()
                        if isinstance(info, dict)
                        and getattr(mod_nodes.NODE_CLASS_MAPPINGS.get(info.get("class_type")), "OUTPUT_NODE", False) is True]
             if not outputs:
                 print("[EzFlex-LoopEnd] queue mode: no output node in the prompt -> single pass.")
-                return values
+                return self._ret(kwargs)
             number = getattr(server, "number", 0)
             try:
                 server.number = number + 1
             except Exception:
                 pass
-            extra = {"client_id": getattr(server, "client_id", None)}
+            # 进度归属：优先用这次 /prompt 请求带来的 client_id（PromptExecutor.extra_data），
+            # 读不到就保持原行为（None = 广播给所有客户端），不影响已有流程。
+            try:
+                _ex = PromptServer.instance.prompt_executor
+                _cid = (getattr(_ex, "extra_data", None) or {}).get("client_id")
+            except Exception:
+                _cid = None
+            extra = {"client_id": _cid or getattr(server, "client_id", None)}
             if extra_pnginfo:
                 extra["extra_pnginfo"] = extra_pnginfo
             server.prompt_queue.put((number, str(_uuid.uuid4()), nxt, extra, outputs, {}))
@@ -9618,11 +3256,21 @@ class LoopEndNode:
         except Exception as e:
             print("[EzFlex-LoopEnd] queue mode: failed to enqueue the next round (%s: %s) -> single pass."
                   % (type(e).__name__, e))
-        return values
+        return self._ret(kwargs)
 
     @staticmethod
-    def _total_from(rounds, cfg):
-        """总轮数：面板次数优先，回落到 cfg（旧工作流的 rounds / count / times 键都认）。"""
+    def _total_from(rounds, cfg, timeplan=None):
+        """总轮数：接上 `timeplan` 时用 `plan["total"]`（规划段数 = 需要的轮数）；
+
+        否则依次读面板次数与 cfg 的 rounds / count / times，取第一个 > 0 的值。
+        """
+        if isinstance(timeplan, dict):
+            try:
+                n = int(timeplan.get("total") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n > 0:
+                return n
         for v in (rounds, (cfg or {}).get("rounds"), (cfg or {}).get("count"), (cfg or {}).get("times")):
             try:
                 n = int(v)
@@ -9733,6 +3381,8 @@ class LoopEndNode:
         execution_list = self._unwrap(execution_list)
         kwargs[self._ROUND] = self._unwrap(kwargs.get(self._ROUND))
         kwargs["config"] = self._unwrap(kwargs.get("config"))
+        kwargs["timeplan"] = self._unwrap(kwargs.get("timeplan"))
+        kwargs["persist"] = self._unwrap(kwargs.get("persist"))
         # 队列续跑要带着 extra_pnginfo（PreviewAny 靠它读端口标签，丢了预览面板会空）
         extra_pnginfo = self._unwrap(kwargs.get("extra_pnginfo"))
         for _k in range(1, _EZ_LOOP_MAX + 1):
@@ -9758,21 +3408,121 @@ class LoopEndNode:
                     break
             except (TypeError, ValueError):
                 continue
-        total = self._total_from(rounds, cfg)
+        total = self._total_from(rounds, cfg, kwargs.get("timeplan"))
+        try:
+            rerun_stop = int(self._unwrap(kwargs.get("rerun_stop", -1)) if kwargs.get("rerun_stop") is not None else -1)
+        except (TypeError, ValueError):
+            rerun_stop = -1
+        # 段缓存：把本轮 valueK（AV latent 等）落到 run 目录，供「区间重跑」当上一段 handoff。
+        try:
+            _tp = kwargs.get("timeplan") if isinstance(kwargs.get("timeplan"), dict) else {}
+            _rd = str(_tp.get("ezRunDir") or "").strip()
+            if _rd and os.path.isdir(_rd):
+                # ★ 按**类型**缓存，不再写死 value2：
+                #   · latent dict（samples / audio_latent）→ 存小 .pt，重跑时原样读回
+                #   · IMAGE 张量 → 不存数据，只记类型，重跑时从 seg_K.mp4 解码
+                #   · AUDIO dict → 不存数据，只记类型，重跑时从 seg_K.wav 读
+                #   · 列表/累积值（如 v1）→ 不缓存（又大又不参与条件）
+                try:
+                    _pv = json.loads(kwargs.get("persist") or "{}")
+                except Exception:
+                    _pv = {}
+                if not isinstance(_pv, dict):
+                    _pv = {}
+                try:
+                    _pp = {int(x) for x in (_pv.get("ports") or [])}
+                except Exception:
+                    _pp = set()
+                try:
+                    _pt = {str(x) for x in (_pv.get("types") or [])}
+                except Exception:
+                    _pt = set()
+                _meta = {}
+                _names = _pv.get("names") if isinstance(_pv.get("names"), dict) else {}
+                _used = set()
+                for _k in range(1, _EZ_LOOP_MAX + 1):
+                    _vv = kwargs.get("value%d" % _k)
+                    if _vv is None:
+                        continue
+                    if isinstance(_vv, dict) and ("samples" in _vv or "audio_latent" in _vv):
+                        _typ = "latent"
+                    elif isinstance(_vv, torch.Tensor) and int(getattr(_vv, "ndim", 0)) == 4:
+                        _typ = "image"
+                    elif isinstance(_vv, dict) and "waveform" in _vv:
+                        _typ = "audio"
+                    elif hasattr(_vv, "get_stream_source") or hasattr(_vv, "save_to"):
+                        _typ = "video"
+                    elif isinstance(_vv, torch.Tensor) and int(getattr(_vv, "ndim", 0)) == 3:
+                        _typ = "mask"
+                    elif isinstance(_vv, torch.Tensor):
+                        _typ = "tensor"
+                    elif isinstance(_vv, list) and _vv and isinstance(_vv[0], (list, tuple)) and len(_vv[0]) >= 2:
+                        _typ = "conditioning"
+                    else:
+                        _typ = "other"
+                    if _pt and _typ not in _pt:
+                        continue
+                    # 媒体类型只记类型字符串，成本极低 ⇒ 即使没勾选也记，供重跑恢复上一段视频/音频
+                    if _pp and _k not in _pp and _typ not in ("image", "audio", "video"):
+                        continue
+                    if _typ in ("latent", "mask", "tensor", "conditioning") and not (_pp or _pt):
+                        continue
+                    if _typ in ("latent", "mask", "tensor"):
+                        _nm = str(_names.get(str(_k)) or ("v%d" % _k)).strip()
+                        _nm = re.sub(r"[^0-9A-Za-z_.\-\u4e00-\u9fff]+", "_", _nm).strip(" ._-")[:48] or ("v%d" % _k)
+                        if _nm in _used:
+                            _nm = (_nm[:40] + "_v%d" % _k)
+                        _used.add(_nm)
+                        _fn = "seg_%04d_%s.pt" % (int(cur), _nm)
+                        try:
+                            torch.save(_vv, os.path.join(_rd, _fn))
+                            _meta.setdefault("files", {})[str(_k)] = _fn
+                            _ezsp_ver_attach_latent(_rd, "seg_%04d" % int(cur), os.path.join(_rd, _fn), _fn, int(_k))
+                        except Exception:
+                            pass
+                    elif _typ in ("image", "audio", "conditioning", "video"):
+                        _meta[str(_k)] = _typ
+                _cards = _pv.get("cards") if isinstance(_pv.get("cards"), dict) else {}
+                for _ck, _card in _cards.items():
+                    if not isinstance(_card, dict) or not _card.get("enabled"):
+                        continue
+                    try:
+                        _k = int(_ck)
+                    except (TypeError, ValueError):
+                        continue
+                    _vv = kwargs.get("value%d" % _k)
+                    if _vv is None:
+                        continue
+                    _fn, _styp = _ezsp_save_persist_value(
+                        _rd, cur, _k, _card.get("name") or "", _card.get("type"),
+                        _vv, _card.get("range") or "-5", (_tp.get("fps") or 24))
+                    if _fn:
+                        _meta[str(_k)] = _styp
+                        _meta.setdefault("files", {})[str(_k)] = _fn
+                if _meta:
+                    try:
+                        with _io.open(os.path.join(_rd, "seg_%04d.media.json" % int(cur)), "w", encoding="utf-8") as _f:
+                            json.dump(_meta, _f)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        if rerun_stop >= 0 and cur >= rerun_stop:
+            return self._ret(kwargs)     # 区间重跑：跑到目标段就停，不再入队下一轮
         if total <= 0:
             print("[EzFlex-LoopEnd] rounds is 0: running a single pass without looping. "
-                  "Set the panel round counter to 1 or more to loop.")
-            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+                  "Wire EzFlex-TimePlan.timeplan here (auto) or set the panel round counter to 1+.")
+            return self._ret(kwargs)
         if cur + 1 >= total:
-            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+            return self._ret(kwargs)
         if cur >= _EZ_LOOP_SAFE_MAX:
             # 兜底熔断：任何意外（旧工作流里 rounds 特别大 / 轮次标记丢失）都不该让画布卡死。
             print("[EzFlex-LoopEnd] safety cap %d reached: stopping the loop early. "
                   "Check the panel round counter and whether LoopStart is still on the canvas."
                   % _EZ_LOOP_SAFE_MAX)
-            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+            return self._ret(kwargs)
         if dynprompt is None or not unique_id:
-            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+            return self._ret(kwargs)
         fwd = None
         try:
             info = dynprompt.get_node(unique_id)
@@ -9786,7 +3536,7 @@ class LoopEndNode:
             # 找不到配对 Start 时不要静默只跑一轮（最难查的症状）：报清楚，但别把整个执行炸掉
             print("[EzFlex-LoopEnd] cannot find the paired EzFlex-LoopStart; running a single pass. "
                   "Add an EzFlex-LoopStart node and re-queue so the loop can be expanded.")
-            return tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1))
+            return self._ret(kwargs)
         if fwd is None:
             fwd = open_node   # 首次展开时把门牌号记下，下一轮的克隆 End 靠它定位（见 _find_start）
         # ★★★ 队列续跑模式（V1.3.7）：配对 Start 的 config 里 `queue: true` 时**不展开图**，
@@ -9798,10 +3548,9 @@ class LoopEndNode:
         if self._queue_mode(dynprompt, open_node):
             return self._queue_next_round(dynprompt, unique_id, open_node, cur, total, kwargs, extra_pnginfo)
         # ★★ 循环体一律按「显示图」算：Start 的显示 id / End 的显示 id 都归一到画布门牌号。
-        #    这一条是「回喂值传不下去」的根因修复：早先直接拿 unique_id（第 2 轮起是带前缀的
-        #    克隆 id "P.Recurse"）去和 upstream 的键比较，克隆体的键是 "P.1"/"P.3"，两边对不上
-        #    → contained 为空 → 除 Start/End 外整段 body 丢失 → 每轮只剩 Start 重算初值，
-        #    于是 out1 永远停在第一轮的值（用户看到的「好像没循环」）。
+        #    取 body 前必须先用 _display() 把 unique_id 映射成显示 id：克隆体在 dynprompt 里的键是
+        #    "P.1"/"P.3"，而 unique_id 第 2 轮起是带前缀的 "P.Recurse"，直接比较会得到空 body，
+        #    除 Start/End 外整段 body 丢失（表现是 out1 永远停在第一轮）。
         start_did = self._display(dynprompt, open_node)
         end_did = self._display(dynprompt, unique_id)
         body, _display_of = self._body_of(dynprompt, start_did, end_did)
@@ -9859,221 +3608,631 @@ class LoopEndNode:
             new_open.set_input("index", cur + 1)
             # ★ 回喂：上一轮 End 每个输入口收到的值，原样写进下一轮 Start 同编号口（字面量，不是连线）
             for k in range(1, _EZ_LOOP_MAX + 1):
-                new_open.set_input(LoopStartNode._feed_name(k), kwargs.get("value%d" % k))
+                # list/tuple 必须包一层 __value__：内核把「长度 2 的 [str, int]」当成节点连线，
+                # 裸写会静默丢值（找不到上游 → mark_missing → 回落到初值）。队列模式用的是同一个包装。
+                new_open.set_input(LoopStartNode._feed_name(k), self._wrap_literal(kwargs.get("value%d" % k)))
 
         # ④ 下一轮 End：带上配对门牌号 + 轮次标记（否则下一轮读不到第几轮 → 无限展开）
         my_clone = built.get(end_did)
         if my_clone is not None:
             my_clone.set_input(self._FWD, fwd)
             my_clone.set_input(self._ROUND, cur + 1)
-        return {"result": tuple(my_clone.out(i) for i in range(_EZ_LOOP_MAX)) if my_clone is not None
-                          else tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1)),
+        return {"result": tuple(my_clone.out(i) for i in range(_EZ_LOOP_MAX + 1)) if my_clone is not None
+                          else (kwargs.get("timeplan"),) + tuple(kwargs.get("value%d" % k) for k in range(1, _EZ_LOOP_MAX + 1)),
                 "expand": graph.finalize()}
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return float("NaN")   # 每次提交都重新展开（否则重跑同一份工作流会命中缓存、整个循环被跳过）
-
-
-_TL_MODELS = {
-    "minimax_h3": {"defaultFps": 24, "B": 5, "S": 17, "maxF": 362},
-    "wan": {"defaultFps": 16, "B": 1, "S": 4, "maxF": 121},
-    "ltx": {"defaultFps": 24, "B": 1, "S": 8, "maxF": 257},
-}
-
-
-def _tl_snap_up(x, B, S):
-    """把帧数向上吸附到模型网格 B + S*k（x <= B 时取 B）。"""
-    if x <= B:
-        return B
-    return B + S * ((x - B + S - 1) // S)
-
-
-def _tl_alloc_steps(mtot, k1, N):
-    """把「第 2..N+1 段的总网格步数」平摊成 N 个整数步数（大段在前，和恰为 mtot - k1）。
-
-    ⚠️ 用 m_base/m_base+1 平摊（而不是 ceil）能让 Σk 恰好等于 mtot，
-       从而 Σgen 精确落在 (N+1)*B + S*mtot —— 这是总时长能对齐的前提。
-    """
-    snet = int(mtot) - int(k1)
-    if snet < N:
-        return [max(1, snet // N)] * N
-    mb, r = snet // N, snet - N * (snet // N)
-    return [(mb + 1) if i < r else mb for i in range(N)]
-
-
-def _tl_plan(model="minimax_h3", total=30.0, segment=5.0, fps=None, overlap=22, tolerance=1, align="align"):
-    """按模型帧网格把总时长切成分段，返回每段的帧数表。
-
-    ★ 核心口径（2026-10-06 恢复原设计 + 修正扣减顺序）：
-
-    【生成帧 vs 净增帧】
-        genFrames  = 交给采样器的帧数 —— **必须落在网格** B + S*k（内核 `align_frame_count` 会吸附）
-        netFrames  = 裁掉头帧后的播放长度 = gen - overlap - tolerance —— **不必**在网格上
-      内核只约束「生成了几帧」，不管「播多久」。
-
-    【时长扣减顺序】容差在**生成之后**减去，不加进生成里：
-        net → gen = 吸附到网格(net + overlap + tolerance) → net = gen - overlap - tolerance
-
-    【总时长对齐 · 在「网格步数空间」求解】
-      每段帧数都写成 B + S*k_i，则
-        Σnet = Σ(B + S*k_i) - (N+1)*oeff = (N+1)*(B - oeff) + S * Σk_i
-      于是给定目标 Σnet ≈ fps*T，反解总步数：
-        ideal_k = (fps*T - (N+1)*(B - oeff)) / S
-      取 ideal_k 附近的整数 mtot（多取几个候选、挑 Σnet 最贴近目标者），
-      再把 mtot 平摊到 N+1 段上。首段固定 k1（按每段时长取整），其余 N 段由 `_tl_alloc_steps` 平摊。
-      ⇒ 每段 net 都含 S 的整数倍（+ 常数偏移），相位纯净、段边界稳定对齐。
-
-      ⚠️ 两个曾经的错法（都表现为「对齐时长逻辑丢了」）：
-        ① 用原始帧数相减（remaining = round(fps*T - F1)）⇒ net 出现 120 这种非 S 倍数 ⇒ 相位漂移。
-        ② 按 gen 目标均分（Σgen ≈ fps*T + N*oeff 后再逐段取整）⇒ 逐段取整把误差累乘，
-           总时长稳定偏出 16~33 帧。必须**先在步数空间解总数、再一次性平摊**。
-
-    【align 两档】
-        align  ：首段步数向上取整（≥ 目标段长），总时长对齐
-        strict ：首段与其余段都按「每段时长」取整 —— 段长稳定，但总时长会有余数
-
-    每段：index / genFrames / netFrames / overlapFrames / toleranceFrames /
-          genStart / netStart / genDuration / netDuration / exceed。
-    """
-    m = _TL_MODELS.get(str(model)) or _TL_MODELS["minimax_h3"]
-    B, S, maxF = m["B"], m["S"], m["maxF"]
-    try:
-        fps = max(1, int(fps or m["defaultFps"]))
-    except (TypeError, ValueError):
-        fps = m["defaultFps"]
-    try:
-        T = max(0.1, float(total))
-    except (TypeError, ValueError):
-        T = 30.0
-    try:
-        n = max(0.1, float(segment))
-    except (TypeError, ValueError):
-        n = 5.0
-    try:
-        raw = max(0, int(overlap))
-    except (TypeError, ValueError):
-        raw = 22
-    try:
-        tol = max(0, int(tolerance))
-    except (TypeError, ValueError):
-        tol = 0
-    # overlap 帧数本身也要落在网格上（内核只认 0 或 B+S*k），向下取网格
-    if raw <= 0:
-        overlap_frames = 0
-    elif raw <= B:
-        overlap_frames = B
-    else:
-        overlap_frames = B + S * ((raw - B) // S)
-    oeff = overlap_frames + tol          # 每段要「多生成」的量：给上一段尾巴 + 拼接容差
-    strict = str(align) == "strict"
-    N = max(1, int(T / n + 0.5)) - 1     # 除首段外的段数
-
-    # ---- 第 1 段：没有上一段的尾巴要接，gen 直接按「每段时长」吸附到网格 ----
-    want1 = fps * n
-    if strict:
-        k1 = max(1, int((want1 - B) / S + 0.5))   # 严格模式：四舍五入到最近的网格步
-    else:
-        k1 = max(1, -(-(want1 - B) // S))          # 对齐模式：向上取网格步（不少于目标时长）
-    F1 = B + S * k1
-    out = [{"index": 1, "genFrames": F1, "netFrames": F1, "overlapFrames": 0, "toleranceFrames": 0,
-            "genStart": 0.0, "netStart": 0.0, "genDuration": F1 / fps, "netDuration": F1 / fps,
-            "exceed": F1 > maxF}]
-
-    if N > 0:
-        # ---- 第 2..N+1 段：先在「网格步数空间」解出总步数，再一次性平摊 ----
-        if strict:
-            klist = [max(1, int((fps * n) / S + 0.5))] * N     # 每段净增 = 每段时长的网格步数
-        else:
-            ideal_k = (fps * T - (N + 1) * (B - oeff)) / S     # 实数意义下的总步数
-            cands = sorted({int(ideal_k // 1), int(ideal_k // 1) + 1, int(round(ideal_k))})
-            best = None
-            for mtot in cands:
-                if mtot < k1 + N:                              # 每段至少 1 步
-                    continue
-                kl = _tl_alloc_steps(mtot, k1, N)
-                gens = [F1] + [B + S * k for k in kl]
-                err = abs(sum(g - oeff for g in gens) - fps * T)
-                if best is None or err < best[0]:
-                    best = (err, kl)
-            klist = best[1] if best is not None else _tl_alloc_steps(k1 + N, k1, N)
-
-        cursor = F1 / fps          # 时间轴游标（净增意义下：上一段净终点）
-        for i, kk in enumerate(klist):
-            gen = B + S * kk                                   # gen 天然落在网格上（步数直接展开）
-            net_eff = max(1, gen - oeff)                       # 真实净增（允许不在网格上）
-            out.append({"index": i + 2, "genFrames": gen, "netFrames": net_eff,
-                        "overlapFrames": overlap_frames, "toleranceFrames": tol,
-                        "genStart": cursor - (overlap_frames + tol) / fps,
-                        "netStart": cursor,
-                        "genDuration": gen / fps, "netDuration": net_eff / fps,
-                        "exceed": gen > maxF})
-            cursor += net_eff / fps
-    return out
-
-
-class TimeLineNode:
-    """EzFlex-TimeLine：按模型帧网格（MiniMax H3 / Wan 2.2 / LTX）规划时间轴，
-    把总时长切成若干段并输出每段帧数列表，供循环逐段生成。"""
+# 节点：把 VIDEO 拆成 images / audio / fps / 位深 / 分辨率等。
+class VideoComponentsNode:
+    """EzFlex-VideoComponents：把一段 VIDEO 拆成可继续接线的元素。"""
 
     @classmethod
     def INPUT_TYPES(s):
-        return {
-            "required": {
-                "model": (list(_TL_MODELS.keys()), {"default": "minimax_h3"}),
-                "total": ("FLOAT", {"default": 30.0, "min": 0.1, "step": 0.1,
-                                    "tooltip": "Total length in seconds. Split into ceil(total / segment) segments."}),
-                "segment": ("FLOAT", {"default": 5.0, "min": 0.1, "step": 0.1,
-                                      "tooltip": "Target length of each segment in seconds (before overlap). Segment 1 is snapped up to the model grid; later segments get the remainder spread evenly."}),
-                "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
-                "overlap": ("INT", {"default": 22, "min": 0, "max": 200,
-                                    "tooltip": "Frames re-used from the previous segment's tail. Snapped DOWN to the model grid (MiniMax H3: 0 or 5+17k). Fed to the sampler as extra frames, then trimmed off the head of each segment's output."}),
-                "tolerance": ("INT", {"default": 1, "min": 0, "max": 5,
-                                      "tooltip": "Extra frames generated ONLY to make the seam smooth, then trimmed off. Subtracted in addition to overlap: net = gen - overlap - tolerance. Does NOT push the generation length off the model grid."}),
-                "align": (["align", "strict"], {"default": "align",
-                                                 "tooltip": "align = snap generation length UP to the grid (never shorter than the target). strict = snap to the NEAREST grid step."}),
-            },
-            "optional": {
-                "index": ("INT", {"default": 0, "min": 0, "forceInput": True,
-                                   "tooltip": "Segment index (0-based). Wire EzFlex-LoopStart.index / easy forLoop index here; frames outputs that segment's frame count. Out of range = 0 (lets the loop finish)."}),
-                "video": ("*", {"tooltip": "Segment videos (a list, one item per segment). Wire the generated segments here; the panel previews segment i with item i."}),
-            },
-        }
+        return {"required": {"video": ("VIDEO", {"forceInput": True,
+            "tooltip": "Video to inspect (SplitVideo video output / MediaLoader / built-in Load Video)."})}}
 
-    RETURN_TYPES = ("INT", "INT", "INT", "INT", "INT", "INT")
-    RETURN_NAMES = ("frames", "overlap_frames", "tolerance_frames", "net_frames", "gen_start", "segments")
-    OUTPUT_IS_LIST = (False, False, False, False, False, False)
-    OUTPUT_TOOLTIPS = ("Frames to GENERATE for this segment (= ezSampler length; always on the model grid).",
-                       "Frames trimmed off the HEAD of this segment's output (= frames reused from the previous tail).",
-                       "Extra frames trimmed off the head on top of overlap (the seam tolerance).",
-                       "Net frames this segment contributes to the timeline (= frames - overlap_frames - tolerance_frames).",
-                       "Where this segment's generation starts inside the net timeline, in seconds (negative-free: gen_start = net_start - (overlap + tolerance) / fps).",
-                       "Total number of segments.")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "STRING", "INT", "FLOAT", "INT", "INT")
+    RETURN_NAMES = ("images", "audio", "fps", "bit_depth", "color_space", "frame_count", "duration", "width", "height")
+    RETURN_TOOLTIPS = ("All decoded frames (IMAGE batch).", "Audio track (None when absent).", "Average frame rate.",
+                       "Bits per channel when known.", "Color space/pixel format when known.",
+                       "Decoded frame count.", "Duration in seconds.", "Pixel width.", "Pixel height.")
     FUNCTION = "run"
     CATEGORY = "EzFlex"
-    DESCRIPTION = "Time Line"
+    DESCRIPTION = "Get Video Components"
 
-    def run(self, model="minimax_h3", total=30.0, segment=5.0, fps=24, overlap=22, tolerance=1, align="align", index=0, **kwargs):
-        segs = _tl_plan(model, total, segment, fps, overlap, tolerance, align)
+    @staticmethod
+    def _probe(video):
+        meta = {"width": 0, "height": 0, "frames": 0, "fps": 0.0, "duration": 0.0, "bit_depth": 8, "color_space": ""}
         try:
-            idx = max(0, int(index))
-        except (TypeError, ValueError):
-            idx = 0
-        n = len(segs)
-        if idx >= n:   # 越界 = 这一段不存在；给 0，让循环自己收尾
-            return (0, 0, 0, 0, 0.0, n)
-        seg = segs[idx]
-        return (int(seg["genFrames"]),
-                int(seg.get("overlapFrames") or 0),
-                int(seg.get("toleranceFrames") or 0),
-                int(seg.get("netFrames") or 0),
-                round(float(seg.get("genStart") or 0.0), 4),
-                n)
+            path = video.get_stream_source() if hasattr(video, "get_stream_source") else ""
+            if not path:
+                return meta
+            import av
+            with av.open(path) as c:
+                vs = next((s for s in c.streams if s.type == "video"), None)
+                if vs is None:
+                    return meta
+                cc = vs.codec_context
+                meta["width"] = int(getattr(cc, "width", 0) or 0)
+                meta["height"] = int(getattr(cc, "height", 0) or 0)
+                meta["frames"] = int(getattr(vs, "frames", 0) or 0)
+                try:
+                    meta["fps"] = float(vs.average_rate or vs.base_rate or 0)
+                except Exception:
+                    meta["fps"] = 0.0
+                try:
+                    meta["duration"] = float(vs.duration * vs.time_base) if vs.duration else 0.0
+                except Exception:
+                    meta["duration"] = 0.0
+                try:
+                    bd = int(getattr(cc, "bits_per_raw_sample", 0) or 0)
+                    if not bd and getattr(cc, "format", None) is not None:
+                        bd = int(getattr(cc.format, "bits_per_raw_sample", 0) or 0)
+                    if bd:
+                        meta["bit_depth"] = bd
+                except Exception:
+                    pass
+                try:
+                    meta["color_space"] = str(getattr(cc, "colorspace", "") or getattr(cc, "name", "") or "")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return meta
+
+    def run(self, video=None):
+        if video is None:
+            return (None, None, 24.0, 8, "", 0, 0.0, 0, 0)
+        images = None
+        audio = None
+        fps = 0.0
+        frames = 0
+        meta = self._probe(video)
+        # 内置 Get Video Components 用的是 VIDEO 对象自己的元数据；对象有就优先用它。
+        # 尤其 color_space：PyAV 的 `cc.colorspace` 是枚举数字，直接用会输出 "9"/"1"，对不上内置的 "sRGB"/"HDR"。
+        try:
+            if hasattr(video, "get_bit_depth"):
+                _bd = int(video.get_bit_depth() or 0)
+                if _bd:
+                    meta["bit_depth"] = _bd
+        except Exception:
+            pass
+        try:
+            if hasattr(video, "get_color_space"):
+                _cs = str(video.get_color_space() or "")
+                if _cs:
+                    meta["color_space"] = _cs
+        except Exception:
+            pass
+        try:
+            comp = video.get_components() if hasattr(video, "get_components") else None
+            images = getattr(comp, "images", None) if comp is not None else None
+            audio = getattr(comp, "audio", None) if comp is not None else None
+            fr = getattr(comp, "frame_rate", None) if comp is not None else None
+            if fr:
+                fps = float(fr)
+        except Exception:
+            images = None
+            audio = None
+        if isinstance(images, (list, tuple)):
+            try:
+                images = torch.stack([x for x in images if isinstance(x, torch.Tensor)], dim=0)
+            except Exception:
+                images = None
+        if isinstance(images, torch.Tensor):
+            if images.ndim == 3:
+                images = images.unsqueeze(0)
+            if images.ndim != 4:
+                images = None
+        if images is not None and int(images.shape[0]) == 0:
+            images = None
+        try:
+            frames = int(images.shape[0]) if images is not None else 0
+        except Exception:
+            frames = 0
+        if not fps:
+            fps = float(meta.get("fps") or 24.0)
+        fps = max(1e-6, float(fps))
+        if not frames:
+            frames = int(meta.get("frames") or 0)
+        width = int(images.shape[2]) if images is not None and images.ndim == 4 else int(meta.get("width") or 0)
+        height = int(images.shape[1]) if images is not None and images.ndim == 4 else int(meta.get("height") or 0)
+        duration = float(meta.get("duration") or 0.0) or (float(frames) / fps if fps > 0 else 0.0)
+        if isinstance(audio, (tuple, list)) and len(audio) >= 2:
+            audio = {"waveform": audio[0], "sample_rate": audio[1]}
+        if not isinstance(audio, dict):
+            audio = None
+        else:
+            try:
+                wf = audio.get("waveform")
+                if wf is None or int(wf.shape[-1]) <= 0:
+                    audio = None
+            except Exception:
+                audio = None
+        return (images, audio, float(fps), int(meta.get("bit_depth") or 8), str(meta.get("color_space") or ""),
+                int(frames), float(duration), int(width), int(height))
+_EZ_PREP_MAX = 64          # 声明多少个 image_i 口（前端按「所有卡片输入口总数」裁；一张卡可能多输入）
+_PREP_PARAM_DESC = {
+    "resolution": "预处理分辨率：先把图缩到这个短边再算，再放大回原尺寸。越大越清晰也越慢（常用 512）。",
+    "safe": "安全模式：分块处理，省显存但更慢（图大或爆显存时开）。",
+    "coarse": "粗粒度：enable = 线条更少更概括，disable = 保留更多细节。",
+    "low_threshold": "Canny 低阈值：越小抓到的边缘越多（也越容易有噪点）。",
+    "high_threshold": "Canny 高阈值：越大越只保留强边缘。低:高 常用 100:200 或 50:150。",
+    "bin_threshold": "二值化阈值：灰度高于它的算白、低于算黑，决定线条多少。",
+    "merge_with_lineart": "把 AnyLine 的结果和 lineart 结果合并（取并集）。",
+    "lineart_lower_bound": "线稿灰度下界：比它更暗的像素才算线。",
+    "lineart_upper_bound": "线稿灰度上界：比它更亮的像素才算线。",
+    "object_min_size": "过滤掉小于这个尺寸的连通块（去噪点）。",
+    "object_connectivity": "连通性：4 = 只算上下左右相邻，8 = 斜角也算。",
+    "environment": "场景类型：indoor 室内 / outdoor 室外（影响深度先验）。",
+    "ckpt_name": "用哪个模型权重文件。首次使用会自动下载。",
+    "model": "用哪个模型文件。首次使用会自动下载。",
+    "cmap": "DensePose 的配色方案（只影响观感）。",
+    "patch_batch_size": "分块批大小：越大越快越吃显存。",
+    "fov": "相机视场角（度）：影响法线估计的透视假设。",
+    "iterations": "迭代次数：越大越精细也越慢。",
+    "detect_hand": "是否检测手部关键点。",
+    "detect_body": "是否检测身体关键点。",
+    "detect_face": "是否检测面部关键点。",
+    "bbox_detector": "人体检测器模型（先框出人，再估姿态）。",
+    "pose_estimator": "姿态估计模型。",
+    "scale_stick_for_xinsr_cn": "加粗骨架线条：给 xinsr 系 ControlNet 用时开。",
+    "rm_nearest": "去掉离相机最近的若干深度层（前景干扰）。",
+    "rm_background": "去掉背景（远处）深度层。",
+    "boost": "enable = 用 LeReS++，细节更好但更慢。",
+    "a": "深度曲率参数：越大深度越平缓。",
+    "bg_threshold": "背景阈值：把背景从法线图里剔除。",
+    "backbone": "主干网络规格：越大越准越慢。",
+    "fx": "相机内参焦距 fx（像素）：不填按图宽估。",
+    "fy": "相机内参焦距 fy（像素）：不填按图高估。",
+    "mask_bbox_padding": "手部框向外扩多少像素（让掩码多包一点）。",
+    "mask_type": "掩码类型：决定手部区域怎么生成。",
+    "mask_expand": "掩码再膨胀多少像素。",
+    "rand_seed": "随机种子（换一个结果会变）。",
+    "detect_thr": "手部检测阈值：越高越保守（漏检多）。",
+    "presence_thr": "手存在置信度阈值。",
+    "bbox_threshold": "人体框检测阈值：越高越保守。",
+    "bbox_dilation": "人体框膨胀量（留点边）。",
+    "bbox_crop_factor": "按人体框裁剪时外扩的倍数。",
+    "drop_size": "小于这个尺寸的框直接丢掉。",
+    "max_faces": "最多检测几张脸。",
+    "min_confidence": "人脸检测置信度下限。",
+    "remove_background_using_abg": "enable = 顺带把背景抠掉。",
+    "gamma_correction": "伽马校正：调亮/调暗再提取亮度结构。",
+    "pyrUp_iters": "金字塔上采样次数：越大 tile 纹理越粗。",
+    "scale_factor": "缩放系数：决定 tile 的细节尺度。",
+    "blur_strength": "导向滤波强度：越大越平滑。",
+    "radius": "导向滤波半径。",
+    "eps": "导向滤波的数值稳定项（很小，一般不用动）。",
+    "score_threshold": "直线检测分数阈值：越高只留越明显的直线。",
+    "dist_threshold": "直线合并的距离阈值。",
+    "threshold": "XDoG 阈值：控制线条浓淡。",
+    "guassian_sigma": "高斯模糊 sigma：越大线条越粗越糊。",
+    "intensity_threshold": "强度阈值：决定哪些梯度算成线。",
+    "safe_steps": "TEED 安全步数：越大越稳（也越慢）。",
+    "seed": "随机种子：换一个结果会变。",
+}
+_PREP_PARAM_ZH = {
+    "resolution": "分辨率",
+    "safe": "安全模式",
+    "coarse": "粗粒度",
+    "low_threshold": "低阈值",
+    "high_threshold": "高阈值",
+    "bin_threshold": "二值化阈值",
+    "merge_with_lineart": "合并线稿",
+    "lineart_lower_bound": "线稿灰度下界",
+    "lineart_upper_bound": "线稿灰度上界",
+    "object_min_size": "最小连通块",
+    "object_connectivity": "连通性",
+    "environment": "场景",
+    "ckpt_name": "模型权重",
+    "model": "模型",
+    "cmap": "配色方案",
+    "patch_batch_size": "分块批大小",
+    "fov": "视场角",
+    "iterations": "迭代次数",
+    "detect_hand": "检测手",
+    "detect_body": "检测身体",
+    "detect_face": "检测脸",
+    "bbox_detector": "人体检测器",
+    "pose_estimator": "姿态模型",
+    "scale_stick_for_xinsr_cn": "加粗骨架(xinsr)",
+    "rm_nearest": "去掉近景",
+    "rm_background": "去掉背景",
+    "boost": "细节增强",
+    "a": "深度曲率",
+    "bg_threshold": "背景阈值",
+    "backbone": "主干规格",
+    "fx": "内参 fx",
+    "fy": "内参 fy",
+    "mask_bbox_padding": "手框外扩",
+    "mask_type": "掩码类型",
+    "mask_expand": "掩码膨胀",
+    "rand_seed": "随机种子",
+    "detect_thr": "手部检测阈值",
+    "presence_thr": "手存在阈值",
+    "bbox_threshold": "人体框阈值",
+    "bbox_dilation": "人体框膨胀",
+    "bbox_crop_factor": "人体框外扩倍数",
+    "drop_size": "最小框尺寸",
+    "max_faces": "最多人脸数",
+    "min_confidence": "人脸置信度下限",
+    "remove_background_using_abg": "抠背景",
+    "gamma_correction": "伽马校正",
+    "pyrUp_iters": "金字塔上采样",
+    "scale_factor": "缩放系数",
+    "blur_strength": "导向滤波强度",
+    "radius": "滤波半径",
+    "eps": "滤波稳定项",
+    "score_threshold": "直线分数阈值",
+    "dist_threshold": "直线合并距离",
+    "threshold": "阈值",
+    "guassian_sigma": "高斯 sigma",
+    "intensity_threshold": "强度阈值",
+    "safe_steps": "安全步数",
+    "seed": "随机种子",
+    "preprocessor": "预处理器",
+}
+def _prep_source():
+    """(类映射, 显示名映射) —— 来自 comfyui_controlnet_aux。
+
+    ⚠️ 本节点**依赖那个插件**：没装 ⇒ 两个空表，目录为空、卡片会提示去装（README 里已写明）。
+    """
+    try:
+        import nodes as _nodes
+        return ((getattr(_nodes, "NODE_CLASS_MAPPINGS", {}) or {}),
+                (getattr(_nodes, "NODE_DISPLAY_NAME_MAPPINGS", {}) or {}))
+    except Exception:
+        return ({}, {})
+def _prep_cls_of(key):
+    """按 key 拿预处理器类。没装 comfyui_controlnet_aux / key 不存在 / 不是 ControlNet 预处理器 ⇒ None。"""
+    if not key:
+        return None
+    try:
+        mapping, _disp = _prep_source()
+        cls = mapping.get(str(key))
+        if cls is None:
+            return None
+        if not str(getattr(cls, "CATEGORY", "") or "").startswith("ControlNet Preprocessors"):
+            return None
+        return cls
+    except Exception:
+        return None
+def _prep_disp_name(key):
+    try:
+        _mapping, disp = _prep_source()
+        return str(disp.get(str(key)) or key or "")
+    except Exception:
+        return str(key or "")
+_PREP_PARAM_TYPES = ("INT", "FLOAT", "BOOLEAN", "STRING")
+def _prep_port_type(spec):
+    """spec 是「张量端口」⇒ 返回类型字符串；是「参数」⇒ None。"""
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return None
+    typ = spec[0]
+    if isinstance(typ, (list, tuple)):
+        return None                      # COMBO（选项列表）⇒ 参数
+    ts = str(typ)
+    return None if ts in _PREP_PARAM_TYPES else ts
+def _prep_param_of(name, spec, meta):
+    """单个参数的 schema（老 _prep_param_schema 的那段逻辑）。"""
+    typ = spec[0]
+    if isinstance(typ, (list, tuple)):
+        opts = [str(x) for x in typ]
+        return {"name": str(name), "type": "COMBO", "options": opts,
+                "default": meta.get("default", opts[0] if opts else "")}
+    if str(typ) in ("INT", "FLOAT"):
+        p = {"name": str(name), "type": str(typ), "default": meta.get("default", 0)}
+        for k in ("min", "max", "step"):
+            if k in meta:
+                p[k] = meta[k]
+        return p
+    if str(typ) in ("BOOLEAN", "STRING"):
+        return {"name": str(name), "type": str(typ), "default": meta.get("default")}
+    return None
+def _prep_param_schema(cls):
+    """该预处理器的**可调参数**列表（不含输入/输出端口）。取不到 ⇒ []。"""
+    try:
+        it = cls.INPUT_TYPES() or {}
+    except Exception:
+        return []
+    params = []
+    for section in ("required", "optional"):
+        for name, spec in (it.get(section) or {}).items():
+            if _prep_port_type(spec) is not None:
+                continue                 # 是端口，不是参数
+            if not isinstance(spec, (list, tuple)) or not spec:
+                continue
+            meta = spec[1] if (len(spec) > 1 and isinstance(spec[1], dict)) else {}
+            p = _prep_param_of(name, spec, meta)
+            if p:
+                params.append(p)
+    for _p in params:
+        _p["desc"] = _PREP_PARAM_DESC.get(_p["name"], "")
+        _p["labelZh"] = _PREP_PARAM_ZH.get(_p["name"], "")
+    return params
+def _prep_input_ports(cls):
+    """该预处理器的**输入端口** [{name,type}]（顺序 = INPUT_TYPES 声明顺序）。"""
+    try:
+        it = cls.INPUT_TYPES() or {}
+    except Exception:
+        return []
+    out = []
+    for section in ("required", "optional"):
+        for name, spec in (it.get(section) or {}).items():
+            ts = _prep_port_type(spec)
+            if ts is not None:
+                out.append({"name": str(name), "type": ts})
+    return out
+def _prep_output_ports(cls):
+    """该预处理器的输出端口 [{name,type}]（含第二输出）。"""
+    rt = getattr(cls, "RETURN_TYPES", None) or ()
+    rn = getattr(cls, "RETURN_NAMES", None) or ()
+    out = []
+    for i, t in enumerate(rt):
+        nm = str(rn[i]) if i < len(rn) else str(t)
+        out.append({"name": nm, "type": str(t)})
+    return out
+def _prep_out_name(key):
+    """该预处理器在**原插件**里的第一个输出口名（卡片模型只暴露第一个输出）。
+
+    原插件多数没写 `RETURN_NAMES` ⇒ ComfyUI 拿 `RETURN_TYPES` 顶 ⇒ `"IMAGE"`；
+    AnyLineArt 那种写了名字的就是 `"image"`。前端拿它当出口后缀。
+    """
+    try:
+        cls = _prep_cls_of(key)
+        if cls is None:
+            return ""
+        rn = getattr(cls, "RETURN_NAMES", None)
+        if rn:
+            return str(rn[0])
+        rt = getattr(cls, "RETURN_TYPES", None) or ()
+        return str(rt[0]) if rt else ""
+    except Exception:
+        return ""
+def _prep_card_label(c, i):
+    """卡片的显示名：自定义名 > 预处理器显示名 > Card N。"""
+    nm = str((c or {}).get("name") or "").strip()
+    if nm:
+        return nm
+    return _prep_disp_name((c or {}).get("cls")) or ("Card %d" % (i + 1))
+def _prep_card_names(cards):
+    """所有卡片的**输出口名**（扁平；每张卡按它自己的输出口数展开），给类 RETURN_NAMES 用。"""
+    out = []
+    for i, c in enumerate(cards or []):
+        c = c if isinstance(c, dict) else {}
+        base = _prep_card_label(c, i)
+        cls = _prep_cls_of(c.get("cls"))
+        ports = _prep_output_ports(cls) if cls is not None else [{"name": "image"}]
+        for p in ports:
+            out.append(base + "_" + str(p["name"]).lower())
+    return out
+# 节点：卡片式预处理器：运行期调用 controlnet_aux 的原节点，端口按卡片展开。
+class ControlnetPreprocessorNode:
+    """EzFlex-ControlnetPreprocessor：卡片列表式预处理器（数据来自 comfyui_controlnet_aux）。
+
+    一张卡 = 一个预处理器实例，输入口按该预处理器的输入端口展开，输出口按它的**全部输出**展开
+    （IMAGE / MASK / POSE_KEYPOINT / OPTICAL_FLOW 等都会出）；端口类型统一为 `*`，运行期调
+    原预处理器的 FUNCTION，算法与 comfyui_controlnet_aux 一致。卡片参数存 config（随工作流序列化）。
+    收录全部预处理器（含 Inpaint / Unimatch / MaskOptFlow / Pose Keypoint Postprocess 这类
+    多输入或首输出非 IMAGE 的），每张卡按它的真实端口展开。
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        opt = {}
+        for k in range(1, _EZ_PREP_MAX + 1):
+            opt["image_%d" % k] = ("*", {"tooltip": "Card %d's input image." % k})
+        return {
+            "required": {
+                "config": ("STRING", {"multiline": True, "default": "{}",
+                                      "tooltip": "Preprocessor panel state: one card per preprocessor (class key + custom name + parameters). Kept as a serialisable widget so it survives save / load."}),
+            },
+            "optional": opt,
+        }
+
+    RETURN_TYPES = _DynamicOutputTypes()
+    RETURN_NAMES = ()
+    FUNCTION = "run"
+    CATEGORY = "EzFlex"
+    DESCRIPTION = "Preprocessor"
+
+    def run(self, config="{}", **kwargs):
+        cfg = {}
+        try:
+            cfg = json.loads(config) if isinstance(config, str) else (config or {})
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        cards = [c for c in (cfg.get("cards") or []) if isinstance(c, dict)]
+        names = _prep_card_names(cards)
+        outs = []
+        in_idx = 0                                  # 输入口的**全局**序号（多输入卡会吃掉好几个）
+        for i, card in enumerate(cards):
+            cls = _prep_cls_of(card.get("cls"))
+            ports = _prep_input_ports(cls) if cls is not None else [{"name": "image"}]
+            nout = len(_prep_output_ports(cls)) if cls is not None else 1
+            nout = max(1, nout)
+            # 该卡的输入：按全局输入口顺序取（前端把第 k 个输入口命名为 image_k）
+            args = {}
+            for p in ports:
+                in_idx += 1
+                args[p["name"]] = kwargs.get("image_%d" % in_idx)
+            res = None
+            if cls is not None and any(v is not None for v in args.values()):
+                try:
+                    allowed = {p["name"] for p in (_prep_param_schema(cls) or [])}
+                    raw = card.get("params") if isinstance(card.get("params"), dict) else {}
+                    params = {k: v for k, v in raw.items() if k in allowed}
+                    inst = cls()
+                    fn = getattr(inst, str(getattr(cls, "FUNCTION", "execute") or "execute"))
+                    got = fn(**args, **params)
+                    res = list(got) if isinstance(got, (list, tuple)) else [got]
+                except Exception as e:
+                    _ez_log.warning(
+                        "[EzFlex-ControlnetPreprocessor] card %d (%s) failed: %s", i + 1, card.get("cls"), e)
+                    raise ValueError(
+                        "[EzFlex-ControlnetPreprocessor] card %d (%s) failed: %s"
+                        % (i + 1, card.get("cls"), e)) from e
+            if res is None:
+                outs.extend([None] * nout)
+            else:
+                outs.extend(res)
+                if len(res) < nout:
+                    # 不静默：卡片少返回输出时，下游拿到 None 会报一个看不懂的错（NoneType ...）。
+                    # 这里把「哪张卡片的哪个输出是空的」写进日志，行为不变。
+                    try:
+                        _miss = list(names[len(res):nout]) or ["#" + str(k) for k in range(len(res), nout)]
+                        _ez_log.warning(
+                            "[EzFlex-ControlnetPreprocessor] card %d (%s) returned %d/%d outputs -> %s will be None",
+                            i + 1, card.get("cls") or "empty", len(res), nout, ", ".join(str(x) for x in _miss))
+                    except Exception:
+                        pass
+                    outs.extend([None] * (nout - len(res)))
+        return _ez_apply_dynamic_ports(self, names, outs)
+from .ezflex.preview_nodes import (MEDIA_TO_COMFY, PreviewAnyNode, _media_kind, _media_safe, _preview_any_folders, _preview_any_fs, _preview_any_open, _preview_any_outputs, _preview_any_pick_folder, _preview_any_save_roots, _preview_any_serve_video, _preview_any_static, _pv_card_valid_names, _pv_clean_dir, _pv_delete, _pv_file_path, _pv_get_or_migrate_card, _pv_migrate_value, _pv_relocate_legacy,  _pv_store_dataurl, _pv_tag_valid_names)
+try:
+    _ez_route(PromptServer, "get", "/preview_any/folders", _preview_any_folders)
+    _ez_route(PromptServer, "post", "/preview_any/open", _preview_any_open)
+    _ez_route(PromptServer, "post", "/preview_any/pick_folder", _preview_any_pick_folder)
+    _ez_route(PromptServer, "get", "/preview_any/save_roots", _preview_any_save_roots)
+    _ez_route(PromptServer, "post", "/preview_any/save_roots", _preview_any_save_roots)
+    _ez_route(PromptServer, "get", "/preview_any/serve_video", _preview_any_serve_video)
+    _ez_route(PromptServer, "get", "/preview_any/serve_3d", _preview_any_serve_video)
+    _ez_route(PromptServer, "get", "/preview_any/fs/{path:.*}", _preview_any_fs)
+    _ez_route(PromptServer, "get", "/preview_any/3d/{path:.*}", _preview_any_static)
+    _ez_route(PromptServer, "post", "/preview_any/outputs", _preview_any_outputs)
+except Exception as _e:
+    _ez_log.warning("routes for preview_any/folders were NOT registered: %s", _e)
+from .ezflex.segments_nodes import (MotionContextNode, SegmentPanelNode, SplitVideoNode, TimeLineNode, TimePlanNode, _EZPV_PREFIXES, _ezsp_allowed_roots, _EZPV_SWEEP_MIN_GAP, _EZPV_TTL_SEC, _ezpv_sweep_last, _ezsp_cache_clear, _ezsp_latest_run_get, _ezsp_load_persist_file, _ezsp_load_ref_file, _ezsp_manifest_get, _ezsp_open_dir, _ezsp_pick_video, _ezsp_replace_final, _ezsp_replace_segment, _ezsp_save_persist_value, _ezsp_trim_segment, _ez_load_latent_file, _ezsp_ver_attach_latent, _ezsp_version_set, _ezsp_versions_clear, _ezsp_versions_get)
+try:
+    from server import PromptServer as _PS_SP
+    _ez_route(_PS_SP, "get", "/ezflex/segment_manifest", _ezsp_manifest_get)
+    _ez_route(_PS_SP, "get", "/ezflex/segment_versions", _ezsp_versions_get)
+    _ez_route(_PS_SP, "post", "/ezflex/segment_version_set", _ezsp_version_set)
+    _ez_route(_PS_SP, "post", "/ezflex/versions_clear", _ezsp_versions_clear)
+    _ez_route(_PS_SP, "get", "/ezflex/latest_run", _ezsp_latest_run_get)
+    _ez_route(_PS_SP, "post", "/ezflex/segment_open", _ezsp_open_dir)
+    _ez_route(_PS_SP, "post", "/ezflex/segment_cache_clear", _ezsp_cache_clear)
+    _ez_route(_PS_SP, "post", "/ezflex/pick_video", _ezsp_pick_video)
+    _ez_route(_PS_SP, "post", "/ezflex/segment_replace", _ezsp_replace_segment)
+    _ez_route(_PS_SP, "post", "/ezflex/segment_trim", _ezsp_trim_segment)
+    _ez_route(_PS_SP, "post", "/ezflex/final_replace", _ezsp_replace_final)
+except Exception as _e_sp_routes:
+    _ez_log.warning("SegmentPanel routes not registered (%s)", _e_sp_routes)
+from .ezflex.prompt_nodes import (PromptHelperNode, _ph_api_hosts_get, _ph_api_hosts_post, _ph_api_key_post, _ph_categories_get, _ph_categories_save, _ph_clip_models, _ph_custom_delete, _ph_custom_load, _ph_custom_save, _ph_gen_card_preview, _ph_gen_get, _ph_gen_preview, _ph_gen_save, _ph_libs_get, _ph_llama_models, _ph_media_target_get, _ph_media_target_save, _ph_forget_scan_path, _ph_md_roots, _ph_model_paths_get, _ph_model_paths_save, _ph_optimize, _ph_pcards_delete, _ph_pcards_get, _ph_pcards_save, _ph_pick_folder, _ph_pick_skill, _ph_preview_delete, _ph_rules_get, _ph_rules_save, _ph_scan_paths_get, _ph_scan_paths_save, _ph_scan_roots_info, _ph_tag_desc_get, _ph_tag_furry_get, _ph_tag_import, _ph_tag_kind_get, _ph_tag_lib_get, _ph_tag_nsfw_get, _ph_tag_related_get, _ph_tag_series_get, _ph_tag_zh_get, _ph_tags_get, _ph_tags_save, _ph_thumb_get)
+try:
+    _ez_route(PromptServer, "post", "/prompt_helper/optimize", _ph_optimize)
+except Exception as _e:
+    _ez_log.warning("routes for prompt_helper/optimize were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "get", "/prompt_helper/custom_providers", _ph_custom_load)
+    _ez_route(PromptServer, "get", "/prompt_helper/api_hosts", _ph_api_hosts_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/api_hosts", _ph_api_hosts_post)
+    _ez_route(PromptServer, "post", "/prompt_helper/custom_providers", _ph_custom_save)
+    _ez_route(PromptServer, "delete", "/prompt_helper/custom_providers", _ph_custom_delete)
+    _ez_route(PromptServer, "post", "/prompt_helper/api_key", _ph_api_key_post)
+    _ez_route(PromptServer, "post", "/prompt_helper/pick_folder", _ph_pick_folder)
+    _ez_route(PromptServer, "post", "/prompt_helper/pick_skill", _ph_pick_skill)
+    _ez_route(PromptServer, "get", "/prompt_helper/scan_roots", _ph_scan_roots_info)
+    _ez_route(PromptServer, "get", "/prompt_helper/scan_paths", _ph_scan_paths_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/scan_paths", _ph_scan_paths_save)
+    _ez_route(PromptServer, "get", "/prompt_helper/model_paths", _ph_model_paths_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/model_paths", _ph_model_paths_save)
+    _ez_route(PromptServer, "get", "/prompt_helper/media_target", _ph_media_target_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/media_target", _ph_media_target_save)
+    _ez_route(PromptServer, "get", "/prompt_helper/rules", _ph_rules_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/rules", _ph_rules_save)
+    _ez_route(PromptServer, "get", "/prompt_helper/prompt_cards", _ph_pcards_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/prompt_cards", _ph_pcards_save)
+    _ez_route(PromptServer, "delete", "/prompt_helper/prompt_cards", _ph_pcards_delete)
+    _ez_route(PromptServer, "get", "/prompt_helper/prompt_categories", _ph_categories_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/prompt_categories", _ph_categories_save)
 
 
+    _ez_route(PromptServer, "get", "/prompt_helper/prompt_tags", _ph_tags_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/prompt_tags", _ph_tags_save)
+    _ez_route(PromptServer, "get", "/prompt_helper/gen_settings", _ph_gen_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/gen_settings", _ph_gen_save)
+    _ez_route(PromptServer, "post", "/prompt_helper/gen_preview", _ph_gen_preview)
+    _ez_route(PromptServer, "post", "/prompt_helper/gen_card_preview", _ph_gen_card_preview)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_libs", _ph_libs_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_lib", _ph_tag_lib_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_zh", _ph_tag_zh_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_furry", _ph_tag_furry_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_kind", _ph_tag_kind_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_series", _ph_tag_series_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_nsfw", _ph_tag_nsfw_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_related", _ph_tag_related_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/tag_desc", _ph_tag_desc_get)
+    _ez_route(PromptServer, "post", "/prompt_helper/tag_import", _ph_tag_import)
+    _ez_route(PromptServer, "get", "/prompt_helper/thumb/{kind}/{fname}", _ph_thumb_get)
+    _ez_route(PromptServer, "get", "/prompt_helper/thumb/{fname}", _ph_thumb_get)   # 兼容旧 URL（默认 tag）
+    _ez_route(PromptServer, "post", "/prompt_helper/preview_delete", _ph_preview_delete)
+except Exception as _e:
+    _ez_log.warning("routes for prompt_helper/custom_providers were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "get", "/prompt_helper/llama_models", _ph_llama_models)
+    _ez_route(PromptServer, "get", "/prompt_helper/clip_models", _ph_clip_models)
+except Exception as _e:
+    _ez_log.warning("routes for prompt_helper/llama_models were NOT registered: %s", _e)
+from .ezflex.routes_nodes import (_ez_reroute_outputs, _fl_default_get, _fl_default_set, _lora_meta_detail, _lora_meta_list, _mc_files, _mc_outputs, _ml_browse, _ml_files, _ml_open, _ml_outputs, _ml_pick_folder, _ml_roots_get, _ml_roots_post, _ml_save_as, _ml_serve, _ml_upload, _mo_outputs, _ppc_outputs, _ppo_outputs, _prep_nodes, _prep_open_model, _prep_outputs, _preview_handler)
+
+
+try:
+    _ez_route(PromptServer, "get", "/models_combo/preview", _preview_handler)
+except Exception as _e:
+    _ez_log.warning("routes for models_combo/preview were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "get", "/models_combo/lora_meta", _lora_meta_list)
+    _ez_route(PromptServer, "get", "/models_combo/lora_meta_detail", _lora_meta_detail)
+except Exception as _e:
+    _ez_log.warning("routes for models_combo/lora_meta were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "get", "/freelatent/presets/default", _fl_default_get)
+    _ez_route(PromptServer, "post", "/freelatent/presets/default", _fl_default_set)
+except Exception as _e:
+    _ez_log.warning("routes for freelatent/presets/default were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "get", "/models_combo/files", _mc_files)
+    _ez_route(PromptServer, "post", "/models_combo/outputs", _mc_outputs)
+except Exception as _e:
+    _ez_log.warning("routes for models_combo/files were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "post", "/param_preset_control/outputs", _ppc_outputs)
+    _ez_route(PromptServer, "post", "/param_preset_output/outputs", _ppo_outputs)
+except Exception as _e:
+    _ez_log.warning("routes for param_preset_control/outputs were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "get", "/media_loader/files", _ml_files)
+    _ez_route(PromptServer, "get", "/media_loader/roots", _ml_roots_get)
+    _ez_route(PromptServer, "post", "/media_loader/roots", _ml_roots_post)
+    _ez_route(PromptServer, "get", "/media_loader/browse", _ml_browse)
+    _ez_route(PromptServer, "get", "/media_loader/serve", _ml_serve)
+    _ez_route(PromptServer, "post", "/media_loader/outputs", _ml_outputs)
+    _ez_route(PromptServer, "post", "/media_loader/upload", _ml_upload)
+    _ez_route(PromptServer, "post", "/media_loader/open", _ml_open)
+    _ez_route(PromptServer, "post", "/media_loader/save_as", _ml_save_as)
+    _ez_route(PromptServer, "post", "/media_loader/pick_folder", _ml_pick_folder)
+    _ez_route(PromptServer, "post", "/media_out/outputs", _mo_outputs)
+except Exception as _e:
+    _ez_log.warning("routes for media_loader/files were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "post", "/ezreroute/outputs", _ez_reroute_outputs)
+except Exception as _e:
+    _ez_log.warning("routes for ezreroute/outputs were NOT registered: %s", _e)
+try:
+    _ez_route(PromptServer, "get", "/ezflex_prep/nodes", _prep_nodes)
+    _ez_route(PromptServer, "post", "/ezflex_prep/outputs", _prep_outputs)
+    _ez_route(PromptServer, "post", "/ezflex_prep/open_model", _prep_open_model)
+except Exception as _e:
+    _ez_log.warning("routes for ezflex_prep/nodes were NOT registered: %s", _e)
+# ===== §9 节点映射与前端路由注册 =====
 NODE_CLASS_MAPPINGS = {
-    "EzFlex-MainControl": MainControlNode,
-    "EzFlex-ModelsCombo": ModelsComboLoader,
+    "EzFlex-MainControl": MainControlNode,    "EzFlex-ModelsCombo": ModelsComboLoader,
     "EzFlex-FreeLatent": FreeLatentNode,
     "EzFlex-NodeSwitchMaster": NodeSwitchMasterNode,
     "EzFlex-NodeSwitchGroup": NodeSwitchGroupNode,
@@ -10087,10 +4246,15 @@ NODE_CLASS_MAPPINGS = {
     "EzFlex-SplitList": SplitListNode,
     "EzFlex-Reroute": EzFlexRerouteNode,
     "EzFlex-TimeLine": TimeLineNode,
+    "EzFlex-SplitVideo": SplitVideoNode,
+    "EzFlex-VideoComponents": VideoComponentsNode,
+    "EzFlex-SegmentPanel": SegmentPanelNode,
+    "EzFlex-MotionContext": MotionContextNode,
+    "EzFlex-TimePlan": TimePlanNode,
+    "EzFlex-ControlnetPreprocessor": ControlnetPreprocessorNode,
     "EzFlex-LoopStart": LoopStartNode,
     "EzFlex-LoopEnd": LoopEndNode,
 }
-
 NODE_DISPLAY_NAME_MAPPINGS = {
     "EzFlex-MainControl": "EzFlex-MainControl",
     "EzFlex-ModelsCombo": "EzFlex-ModelsCombo",
@@ -10107,6 +4271,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EzFlex-SplitList": "EzFlex-SplitList",
     "EzFlex-Reroute": "EzFlex-Reroute",
     "EzFlex-TimeLine": "EzFlex-TimeLine",
+    "EzFlex-SplitVideo": "EzFlex-SplitVideo",
+    "EzFlex-VideoComponents": "EzFlex-VideoComponents",
+    "EzFlex-SegmentPanel": "EzFlex-SegmentPanel",
+    "EzFlex-MotionContext": "EzFlex-MotionContext",
+    "EzFlex-TimePlan": "EzFlex-TimePlan",
+    "EzFlex-ControlnetPreprocessor": "EzFlex-ControlnetPreprocessor",
     "EzFlex-LoopStart": "EzFlex-LoopStart",
     "EzFlex-LoopEnd": "EzFlex-LoopEnd",
 }

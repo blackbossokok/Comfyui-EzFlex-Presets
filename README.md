@@ -1,305 +1,464 @@
-# Comfyui-EzFlex-Presets (V1.3.0 Beta3)
+# Comfyui-EzFlex-Presets (V1.3.0)
 
 **English** | [中文](README_ZH.md)
 
-A flexible combo plugin for ComfyUI, built with AI; still being improved.
+A preset, media and long-video toolkit for ComfyUI, built with AI assistance. **23 nodes**, all under the `EzFlex` category.
 
-!\[overview](./images/overview.png)
+![Overview](images/overview.png)
 
 Demo video (Bilibili): [watch](https://www.bilibili.com/video/BV1T8hy6JEf4)
 
-## EzFlex node list:
+## Node list (23)
 
-* Main Control (`MainControl`)
-* Models Combo Loader (`EzFlex-ModelsCombo`)
-* Resolution / Latent Selector (`EzFlex-FreeLatent`)
-* Node Switch Master (`NodeSwitchMaster`)
-* Node Switch Group (`NodeSwitchGroup`)
-* Param Preset Control (`ParamPresetControl`)
-* Param Preset Output (`ParamPresetOutput`)
-* Preview Any (`EzFlex-PreviewAny`)
-* Prompt Helper (`EzFlex-PromptHelper`)
-* Media Loader (`EzFlex-MediaLoader`)
-* Media Out (`EzFlex-MediaOut`)
-* Merge List (`EzFlex-MergeList`)
-* Split List (`EzFlex-SplitList`)
-* Loop Start (`EzFlex-LoopStart`)
-* Loop End (`EzFlex-LoopEnd`)
-* Time Line (`EzFlex-TimeLine`)
-* Reroute (`EzFlex-Reroute`)
-* **17 nodes in total**
+**Control / presets**
+- Main Control (`EzFlex-MainControl`)
+- Models Combo Loader (`EzFlex-ModelsCombo`)
+- Resolution / Latent Selector (`EzFlex-FreeLatent`)
+- Node Switch Master (`EzFlex-NodeSwitchMaster`)
+- Node Switch Group (`EzFlex-NodeSwitchGroup`)
+- Param Preset Control (`EzFlex-ParamPresetControl`)
+- Param Preset Output (`EzFlex-ParamPresetOutput`)
 
-## Version history:
-* V1.3.0Beta3: Optimized the find/replace display in Prompt Assistant, and optimized PreviewAny’s save logic (to avoid overwriting).
-* V1.3.0Beta2: Optimized the operation logic of Prompt Assistant, and added a right-click quick tool feature.
-* V1.3.0 (earlier in this cycle): Optimized random tags; fixed category selection diverging from the in-library categories; added a duplicate-category warning (a child category duplicating its parent); the card manager gained image generation; reworked MediaLoader / MediaOut port types and interaction; reworked PreviewAny preview \& save logic; added loop nodes — Merge List (`EzFlex-MergeList`), Split List (`EzFlex-SplitList`), Loop Start (`EzFlex-LoopStart`), Loop End (`EzFlex-LoopEnd`), Time Line (`EzFlex-TimeLine`) — the Reroute node (`EzFlex-Reroute`), and a loop system for MediaLoader and PromptHelper; tag / card previews are stored as standalone image files (`tag\\\_preview` / `card\\\_preview`), with Ctrl+Z / Ctrl+Y guarded so panel undo does not touch the graph.
-* V1.2.12: Tag-system performance improvements; fixed cards failing to fill content; fixed the display conflict between the tag hint and "@" media reference; fixed PreviewAny failing to save some media types; improved the save logic.
-* V1.2.11: Fixed several PromptHelper frontend bugs and the API-call issue; added API-call error hints; overhauled the tag system: random match/exclude field filters, related tags, a "Hide NSFW" filter, finer in-library tag classification, and a new anima 2.9B tag library.
-* V1.2.10: Fixed the ModelsCombo first output port disconnecting after switching windows, refreshing, or restarting; fixed preset selections being lost after switching windows or refreshing.
-* V1.2.9: Fixed Preview Any reading incorrect image generation info (prompt text is now read through connected nodes); fixed Node Switch Group possibly failing to match nodes after being copied. ModelsCombo keeps the trigger-words output port whenever it has a config (empty without LoRA).
-* V1.2.8: Preview Any (`EzFlex-PreviewAny`) supports batch image preview; the preview window behavior was improved.
-* V1.2.7: Fixed the preview-image disappearing bug, improved black-label text rendering, updated to align with official node features.
-* V1.2.6: Added the theme system, optimized the FreeLatent canvas, optimized tag previews, normalized data storage, cleaned up some redundant code, and fixed some bugs.
-* V1.2.5: The tag system gained random tags; the default tag library is now bundled (it was missed last time); preview generation gained a cleanup action. ModelsCombo can auto-generate the trigger words of a loaded LoRA (shown live in PromptHelper), and the browser gained a "loaded models" view. Fixed black tag sub-nodes not showing and residue after fast moves. Overall edit supports collapsing individual cards.
-* V1.2.4: Prompt Helper big update: new tag system / card manager; improved security.
-* V1.2.3: Fixed some bugs, continued comprehensive security improvements, enhanced node features.
-* V1.2.2: Fixed the `EzFlex-NodeSwitchGroup` dropdown bug; fixed the bug where `EzFlex-ParamPresetOutput`, `EzFlex-PreviewAny` etc. could not validate input after switching presets in `EzFlex-ParamPresetControl`; optimized where the custom size presets sit in `EzFlex-FreeLatent`. Fixed the unclickable controls in the Media Loader preview popup. Fixed Media Loader loading 3D models and preview images too slowly. Fixed PromptHelper's highlight logic.
-* V1.2.1: Fixed the Node 2.0 click bugs in Prompt Helper (`EzFlex-PromptHelper`), Media Loader (`EzFlex-MediaLoader`) and Media Out (`EzFlex-MediaOut`). Prompt Helper (`EzFlex-PromptHelper`) and Node Switch Group (`NodeSwitchGroup`) gained collapsible rows. Comprehensive security hardening across the plugin.
-* V1.2.0: Comprehensive security hardening; Main Control (`MainControl`) gained an EN / 中文 toggle.
-* V1.11: Prompt Helper overhaul and bug fixes.
-* V1.1: General node polish and performance work; Prompt Helper improvements; compatibility fixes.
-* V1.05: Prompt Helper gained "reference media" and a stronger `@media` reference.
-* V1.04: Added Media Loader (`EzFlex-MediaLoader`) and Media Out (`EzFlex-MediaOut`); Prompt Helper overhaul (still in development).
-* V1.03: README cleanup; FreeLatent gained a "force override" button (ignore external width/height/batch); fixed the align default (multiples of 8); added the Prompt Helper node.
-* V1.02: ModelsCombo gallery/search improvements.
-* V1.01: ParamPresetControl preset switching + wiring fix.
-* V1.0: First stable release.
+**Preview / prompt**
+- Preview Any (`EzFlex-PreviewAny`)
+- Prompt Helper (`EzFlex-PromptHelper`)
+
+**Media**
+- Media Loader (`EzFlex-MediaLoader`)
+- Media Out (`EzFlex-MediaOut`)
+- Merge List (`EzFlex-MergeList`)
+- Split List (`EzFlex-SplitList`)
+- Reroute (`EzFlex-Reroute`)
+
+**Long video / loops**
+- Time Plan (`EzFlex-TimePlan`)
+- Motion Context (`EzFlex-MotionContext`)
+- Split Video (`EzFlex-SplitVideo`)
+- Segment Panel (`EzFlex-SegmentPanel`)
+- Time Line (`EzFlex-TimeLine`)
+- Video Components (`EzFlex-VideoComponents`)
+- Loop Start (`EzFlex-LoopStart`)
+- Loop End (`EzFlex-LoopEnd`)
+
+**Preprocessors**
+- Controlnet Preprocessor (`EzFlex-ControlnetPreprocessor`)
+
+## Version
+
+Current version: **V1.3.0** (the version number stays fixed; later work is merged incrementally).
+
+- **V1.3.0 stable**: two continuation modes — `keyframe` (pin the previous latent tail as guide rows; fast) and `masked` (freeze the AV prefix with `noise_mask`; exact continuity, roughly an order of magnitude slower per step). Both share `pin_next_head`, which on rerun pins the next segment's visible head at this segment's tail.
+- Audio in `masked` mode always matches the video context window (same head trim); `keyframe` keeps the longer guide window (22↔24 = 40 ticks, 39↔39 = 65 ticks).
+- Saved files follow ComfyUI formats: LATENT → `.latent`, single-entry CONDITIONING → `.safetensors`, MESH → `.glb`, AUDIO → `.wav`, VIDEO → `.mp4`, frames → PNG, other tensors → `.pt`.
+- `TimePlan` links video context ↔ transition audio (`ceil(n/3)*3`; 39↔39 and 90↔90 are tick-exact).
+
+- **V1.3.0**: the long-video suite — `TimePlan` (planning), `MotionContext` (pin the previous latent tail), `SegmentPanel` (per-segment save + assemble), `SplitVideo` (card-based slicing), `TimeLine` (timeline view / rerun), `VideoComponents` (split a VIDEO).
+- `TimePlan`: three-column panel (preset / save / delete, align / custom / max, then the parameter rows); the custom-duration dialog supports add/remove segments, live totals, `×`/Cancel = discard, Save/click-outside = save.
+- `SplitVideo`: up to 16 cards; `loop` / `one` / `frames`; outputs frames / video / GIF / audio; the video output is a lazy trim (no eager re-encode).
+- `PreviewAny`: full container ↔ video-codec ↔ audio-codec constraints, real HDR ↔ SDR tone mapping, metadata on copy paths; up to 16 inputs.
+- `SegmentPanel`: segments stay MP4; separate segment/final encoding settings in the order format / codec / FPS / CRF / bit depth / colour space.
+- `TimeLine`: fixed context menu; "Set overall duration" opens TimePlan's custom dialog directly.
+
+**Earlier versions**
+
+- V1.3.0 Beta3: Prompt Helper find/replace display; PreviewAny save no-overwrite.
+- V1.3.0 Beta2: Prompt Helper operation logic; right-click quick tools.
+- V1.3.0 Beta: random tag / category / card-manager image generation; MediaLoader / MediaOut port rework; loop nodes; tag/card previews as standalone files; Ctrl+Z/Y canvas guard.
+- V1.2.12: tag-system performance, card content fill, PreviewAny saving.
+- V1.2.11: random/exclude tags, related tags, hide NSFW, finer categories, API error hints.
+- V1.2.10: ModelsCombo first-port disconnect, preset loss.
+- V1.2.9: PreviewAny generation info, NodeSwitchGroup copy matching.
+- V1.2.8: PreviewAny batch image preview.
+- V1.2.7: preview-image disappearance, black-label text, official node alignment.
+- V1.2.6: theme system, FreeLatent canvas, data-storage cleanup.
+- V1.2.5: random tags, bundled tag library, preview-image cleanup, LoRA trigger words, loaded-model browser, black-tag fixes, card collapse.
+- V1.2.4: Prompt Helper big update: tag system / card manager, security.
+- V1.2.3: bug fixes, security, node enhancements.
+- V1.2.2: NodeSwitchGroup dropdown, ParamPreset validation, FreeLatent preset position, MediaLoader popup / 3D / preview speed, PromptHelper highlight.
+- V1.2.1: Node 2.0 click fixes for PromptHelper / MediaLoader / MediaOut; collapsible rows; security hardening.
+- V1.2.0: security hardening; MainControl EN / 中文.
+- V1.11: Prompt Helper overhaul and fixes.
+- V1.1: node polish, Prompt Helper improvements, compatibility fixes.
+- V1.05: Prompt Helper "reference media" and stronger `@media`.
+- V1.04: MediaLoader / MediaOut; Prompt Helper overhaul.
+- V1.03: README cleanup; FreeLatent force override; align default 8; Prompt Helper node.
+- V1.02: ModelsCombo gallery/search.
+- V1.01: ParamPresetControl preset-switch wiring.
+- V1.0: first stable release.
 
 ## Install
 
-* Put this folder under `ComfyUI/custom\\\_nodes/` and restart ComfyUI.
-* Dependencies: the plugin **only needs `mutagen` as an extra** (to read audio/video tags); the rest (torch / numpy / Pillow / safetensors / av) ships with ComfyUI. If you don't want to install it manually, run `pip install -r requirements.txt`.
-* Optional (**deliberately not in requirements**, so ComfyUI-Manager never forces a compile — install by hand when needed): `llama-cpp-python` (Prompt Helper's "in-process llama-cpp-python" mode), `gguf` / `onnx` (model metadata cards for those two formats). Or install everything at once: `pip install -e .\\\[llama,metadata]`.
+- Put this folder under `ComfyUI/custom_nodes/` and restart ComfyUI.
+- The plugin **only needs `mutagen` as an extra** (audio/video tags); torch / numpy / Pillow / safetensors / av ship with ComfyUI. Or `pip install -r requirements.txt`.
+- **`EzFlex-ControlnetPreprocessor` needs [comfyui_controlnet_aux](https://github.com/Fannovel16/comfyui_controlnet_aux)** — that pack ships the 47 preprocessors and their weights. Without it the node still loads but the list is empty.
+- Optional (deliberately not in requirements): `llama-cpp-python` (in-process llama mode), `gguf` / `onnx` (metadata cards). Or `pip install -e .[llama,metadata]`.
 
 ## Usage
 
-Search `EzFlex` in the ComfyUI node list and pick the node you need.
+Search `EzFlex` in the node list. After front-end changes press `Ctrl+F5`; after Python/route changes restart ComfyUI.
+
+### Minimal long-video wiring
+
+```text
+TimePlan.timeplan ──► MotionContext.timeplan
+MotionContext.positive ──► sampler.conditioning
+LoopStart.index ──► TimePlan.index (optional, plan per round)
+LoopStart.valueK (previous latent) ──► MotionContext.context_latent
+SegmentPanel.images / audio ◄── VAE decode
+SegmentPanel.video / timeplan ──► TimeLine
+```
+
+- `MotionContext` pins the previous tail into this segment; it does not trim. `SegmentPanel` trims `overlap + tolerance` from the plan.
+- `SplitVideo` slices source video; it is not the timeline view.
+- Segment saving and final assembly live in `SegmentPanel`; TimeLine's rerun / trim / replace all go through the same path.
 
 ## Node features
 
-### Main Control (`MainControl`):
+### Main Control (`EzFlex-MainControl`)
 
-* Control: drives the overall node behavior; presets can be freely combined, saved and deleted.
-* Card list: Models Combo Loader (`EzFlex-ModelsCombo`), Resolution / Latent Selector (`EzFlex-FreeLatent`), Node Switch Master (`NodeSwitchMaster`) and Param Preset Control (`ParamPresetControl`) — each with its own preset dropdown and drag-to-reorder. A master preset records their current presets together and cascades them down when switched. **Node Switch Group is not listed here separately** — it is managed by Node Switch Master.
-* Quick load: load the other EzFlex nodes in one click (**Media Out (`MediaOut`) is loaded by Media Loader (`EzFlex-MediaLoader`) itself**).
-* Language: switch between 中文 / English.
-* Theme: one palette switch recolors every EzFlex panel (Light / Lilac / Sage / Nord / Minimal Cool Grey / Warm Caramel / Cool Haze Blue / Deep Space / Morandi Purple-Grey / Mermaid Core / Chocolate / Klein Blue / Cloud White / Banana Yellow / Burgundy / Deep Teal — 16 in total). Palettes live in the theme module and the panels only write CSS variables, so a switch repaints all open panels immediately.
+- Drives overall behaviour; presets can be combined, saved and deleted.
+- Card list: `ModelsCombo`, `FreeLatent`, `NodeSwitchMaster`, `ParamPresetControl` — each with its own preset dropdown, drag-reorderable.
+- A master preset records the four nodes' current presets and cascades them down on switch.
+- Quick load: add other EzFlex nodes in one click (`MediaOut` is created by `MediaLoader` itself).
+- Language: 中文 / English.
+- Themes: 16 palettes (Light / Lilac / Sage / Nord / Minimal Cool Grey / Warm Caramel / Cool Haze Blue / Deep Space / Morandi Purple-Grey / Mermaid Core / Chocolate / Klein Blue / Cloud White / Banana Yellow / Burgundy / Deep Teal) repainting all open panels instantly.
 
-### Models Combo Loader (`EzFlex-ModelsCombo`):
+### Models Combo Loader (`EzFlex-ModelsCombo`)
 
-* Combo loading: freely combine UNet / CLIP / VAE / Checkpoint / LoRA loaders.
-* Presets: freely combine / save / delete model-loading setups.
-* Preview: preview dropdown-list model covers.
-* Gallery: gallery-style browsing to pick models. (Needs the ComfyUI-Lora-Manager plugin to generate JSON files via Civitai.)
-* Outputs: ports are generated by the number (loader cards) and type; the LoRA loader chains after its selected target model, multiple LoRAs chain in card order, and port names look like `custom\\\_name\\\_model/clip/vae`.
-* Order: reorder cards freely.
+- Freely combine UNet / CLIP / VAE / Checkpoint / LoRA.
+- Presets: save / delete / switch combinations.
+- Preview: model covers in the dropdown; gallery browsing (needs JSON from ComfyUI-Lora-Manager).
+- Loaded-model browser: the picker / gallery marks currently loaded models and lets you remove or replace them.
+- Outputs: `MODEL / CLIP / VAE 1..32` according to card count and type; LoRAs chain after their target model in card order; port names are `custom_name_model/clip/vae`.
+- Fixed trailing `trigger_words` (STRING); empty without LoRA.
+- Reorder cards freely; ports are not reshuffled before loaders are ready, so links and presets survive reloads.
 
-### Resolution / Latent Selector (`EzFlex-FreeLatent`):
+### Resolution / Latent Selector (`EzFlex-FreeLatent`)
 
-* Canvas: drag freely to generate the matching empty latent; hold Ctrl to disable snapping.
-* Width/height input: type width/height manually.
-* Align resolution: computes width/height with the `Opt / Std` algorithm and the `resolution step`; it currently affects `manual width/height input, size-preset selection, and sizes derived from ratio and MP`.
-* MP: megapixels.
-* Ratio presets: width : height; choose built-in and custom ratio presets.
-* Size presets: choose built-in and custom size presets; custom ones can be saved/deleted (`based on the current actual size`).
-* Custom ratios: save / delete your own input ratio presets.
-* Info panel: live actual width/height, ratio and MP.
-* Inputs: external width/height, batch size.
-* Outputs: empty latent, width/height, batch size.
-* Force override: when green, external width/height/batch are ignored and the panel values win, and the controls are unlocked (available only when at least one input has a value).
+- Canvas: drag to create the matching empty latent; hold Ctrl to disable snapping.
+- Width/height input; optional external `width/height/batch_size`.
+- Align: `Opt / Std` algorithm with a resolution step; affects manual input, size presets, ratio and MP calculations.
+- MP (megapixels); ratio presets (built-in + custom); size presets (built-in + save/delete from current actual size).
+- Info panel: live actual size, ratio, MP.
+- Outputs: empty latent, Width, Height, Batch.
+- Force override: green = ignore external width/height/batch and use panel values; controls unlock only when at least one input is connected.
 
-### Node Switch Master (`NodeSwitchMaster`):
+### Node Switch Master (`EzFlex-NodeSwitchMaster`)
 
-* Control: drives Node Switch Group behavior; freely combine / save / delete presets.
+- Drives Node Switch Group behaviour; combine / save / delete presets.
+- Each row maps to one `NodeSwitchGroup` instance on the canvas.
 
-### Node Switch Group (`NodeSwitchGroup`):
+### Node Switch Group (`EzFlex-NodeSwitchGroup`)
 
-* Control: switch grouped nodes between `on / off / bypass (ignore)`.
-* Presets: freely save / delete node switch presets.
-* Group matching: by name / by color, subgraph matching.
-* Order: auto-sort cards by position / name.
-* Note: presets are per node instance; deleting the node removes its presets.
+- Switches grouped nodes between `on / off / bypass (ignore)`.
+- Presets: save / delete; per-instance — deleting the node removes its presets.
+- Group matching: by name / by colour, including subgraphs; auto-sort cards by position / name.
+- Works with Node Switch Master for multi-group control.
 
-### Param Preset Control (`ParamPresetControl`):
+### Param Preset Control (`EzFlex-ParamPresetControl`)
 
-* Control: `green/red parameter buttons`: whether a parameter shows in the output list and in the parameter-group card dropdown. `Parameter group dropdown`: select the output parameter (all or a specific one).
-* Presets: freely save / delete parameter-group presets.
-* Parameters: eight types — int, float, bool, string, complex, tuple, list, set, dictionary.
-* Order: parameter-group cards and parameter cards can both be dragged freely.
-* Outputs: one output port per parameter-group card; multiple parameters are red, a single parameter is gray.
+- Green/red parameter buttons: whether a parameter appears in the output list and group dropdown.
+- Parameter group dropdown: choose all or a specific parameter.
+- Presets: save / delete parameter groups.
+- Types: int, float, bool, string, complex, tuple, list, set, dictionary.
+- Drag-reorder group cards and parameter cards.
+- Outputs: one port per group card; multi-parameter ports red, single-parameter grey.
 
-### Param Preset Output (`ParamPresetOutput`):
+### Param Preset Output (`EzFlex-ParamPresetOutput`)
 
-* Control: enable/disable parameter output; int->0, bool->false, float->0.0, string etc.->empty string.
+- Enable/disable parameter output; disabled outputs neutral values: int→0, bool→false, float→0.0, string etc.→empty.
+- Type hint: shows the actual type; on mismatch with ParamPresetControl it outputs string and marks red.
+- Value preview popup.
+- Ports follow parameter count 1:1; disabled parameters keep their port, so no rewiring is needed.
 
+### Preview Any (`EzFlex-PreviewAny`)
 
+- Up to **16** any-type inputs; auto-detects the type and builds a preview card; cards follow connections and can be reordered.
+- Preview-only by default; click "auto save" to write files, with optional location and save options.
+- Save options follow the format: lossless formats have no bitrate, lossless images no quality; IMAGE / AUDIO / VIDEO offer "keep source" (file-backed values are copied, not re-encoded).
+- LATENT, CONDITIONING and MESH save with ComfyUI formats too: `.latent`, `.safetensors` (single entry) and `.glb`; JPEG/WebP carry the workflow metadata as EXIF/XMP.
+- File names support `%year% %month% %day% %hour% %minute% %second%`; empty uses the card name with auto numbering.
+- Batch images: **64** frames per card by default (configurable on the panel; 0 = unlimited); multi-image save type (auto / batch images / video / animation) is per card.
+- Supported types:
 
-* Type hint: shows the actual type; if the value does not match the type set in Param Preset Control (`ParamPresetControl`), it outputs string by default and is marked red.
-* Value preview: click to open a preview popup.
+| Type | Accepts | Preview | Formats |
+|---|---|---|---|
+| IMAGE | `[B,H,W,C]` tensor | thumbnail + full view; batches page / save as sequence / video / animation | PNG / JPEG / WebP / BMP / TIFF / animation (WebP / PNG / GIF) |
+| MASK | 2D / 3D tensor | grayscale PNG | PNG |
+| AUDIO | `{waveform,sample_rate}` / `(waveform,sr)` / file object | player | WAV / MP3 / FLAC / OGG / M4A / AAC |
+| VIDEO | `VideoFromFile` / `VideoFromComponents` | first-frame cover + player | MP4 / WebM / MOV / GIF / AVI / MKV |
+| CONDITIONING | dict with `conditioning/context` | text summary | — |
+| LIST / TUPLE / SET | list / tuple / set | indexed value tree | JSON |
+| DICT | dict | key/value tree | JSON |
+| STRING / INT / FLOAT / BOOLEAN | Python values | text (truncated + popup) | TXT / MD / JSON / CSV / LOG / HTML |
+| LATENT | `{samples}` | shape / dtype summary | — |
+| FILE_3D / MODEL_3D | `File3D` | offline three.js viewer | glb / gltf / obj / fbx / splat |
+| MESH | `Types.MESH` | temp OBJ → three.js | vertices ≤500k, faces ≤1M |
+| SPLAT / VOXEL | `Types.SPLAT` / `Types.VOXEL` | text summary | — |
+| MODEL / CLIP / VAE | ComfyUI objects | metadata card | safetensors / gguf / onnx / ckpt / pt |
+| CONTROL_NET / CLIP_VISION / STYLE_MODEL / UPSCALE_MODEL / LORA_MODEL / GLIGEN / SAMPLER / SIGMAS / GUIDER / NOISE / SEGS | matching objects | text summary | — |
+| EMPTY | not connected | "(not connected)" | — |
 
+- Video constraints: container ↔ video codec ↔ audio codec are fully validated (front-end convergence + back-end check); e.g. WebM only accepts VP9/AV1 + Opus.
+- Real HDR ↔ SDR tone mapping: HDR→SDR uses Hable; SDR→HDR re-encodes in BT.2020 / PQ·HLG; mislabeled output is refused on failure.
+- Copy saves also carry prompt / workflow metadata (PNG iTXt, container metadata for video).
+- Model types save info text only, never the model file; absolute save paths are limited to `output/` and locally registered folders.
 
+### Prompt Helper (`EzFlex-PromptHelper`)
 
-### Preview Any (`EzFlex-PreviewAny`):
+- Cards: up to **32**; add/remove, drag-reorder, double-click rename; each card has Default / Optimized pages and a merge toggle (green = merged).
+- Editor: bold/italic/underline/strike, alignment, font size/colour, highlight, first-line indent, find & replace, colour picker, full/half-width conversion; a skill button inserts a `*.md` line by line at the caret.
+- Media references: reads generator media ports live and numbers `@image N / @video N / @audio N`; the reference window lists media per generator node with + insert / − remove / right-click global library.
+- Prompt rules: 15 built-in rules under Settings · Rules (including "no compile" and "use API") plus custom rules (editable, bilingual, 中|EN) that compile reference marks into vendor syntax (`<Picture 1>`, `@image1`, …).
+- Optimize: tool menu offers API / TextGenerate / llama; use once or enable runtime auto-optimize. The three auto toggles are mutually exclusive and failures stop with an error.
+- Quick weight: with the caret on a tag, `Ctrl+↑ / Ctrl+↓` adjusts by the weight step (default 0.05); brackets are removed when the weight returns to 1.
+- Collapse: toolbar and tab-row collapse bars in the card popup / overall editor; state is stored in config; both collapsed merge into "expand all".
+- Card manager: save cards as presets (`user/EzFlex/prompts/<name>.json`), save only selected cards, load, delete.
+- Ports: dynamic `media_in_1..16` (ANY) + `card_in_i` (STRING) per card; outputs "merged prompt" + one STRING per card. A wired `card_in_i` overrides that card (dimmed on the panel) and still takes part in merge/optimization.
+- Loop mode: adds an `index` (INT) input at the end and renames the first output to "loop output", emitting only card `index`; other card outputs stay 1:1.
+- Settings: General / Rules / API / TextGenerate / llama / Paths; the header toggles tile / popup mode.
+- Tag entry: **editor right-click menu → Tag** (the footer button was removed on 2026-10-05); tag-hint candidates can also be picked directly.
 
-* Preview: auto-detects any input type and renders the matching preview card (drag to reorder, cards are added/removed with connections).
-* Save: preview-only by default; click "auto save" to write to disk. Save options follow the format (lossless formats take no bitrate, lossless images take no quality) and IMAGE / AUDIO / VIDEO offer "Keep source" (copy the source file as-is, no re-encode). File names support `%year% %month% %day% %hour% %minute% %second%`.
-* Batch: one card exports at most 64 frames; the multi-image save mode (auto / batch images / video / animation) is chosen per card.
-* Supported types, preview and saving details:
+#### Tag system
 
-|Type|Accepts|Preview|Formats|
-|-|-|-|-|
-|IMAGE|tensor `\\\[B,H,W,C]`|thumbnail + full-screen original (batches: thumbnail strip paging; saves as image sequence / video / animation)|PNG / JPEG / WebP / BMP / TIFF / animation (WebP / PNG / GIF)|
-|MASK|2D/3D tensor|grayscale PNG|PNG|
-|AUDIO|`{waveform,sample\\\_rate}` or `(waveform,sr)` or a file object|player|WAV / MP3 / FLAC / OGG / M4A / AAC|
-|VIDEO|`VideoFromFile` / `VideoFromComponents` object|first-frame cover + player|MP4 / WebM / MOV / GIF / AVI / MKV|
-|CONDITIONING|a dict with `conditioning/context`|text summary|—|
-|LIST / TUPLE / SET|list / tuple / set|indexed value tree (index: value)|JSON|
-|DICT|dict|key/value tree (key: value)|JSON|
-|STRING / INT / FLOAT / BOOLEAN|str / int / float / bool|text (truncated + popup full text)|TXT / MD / JSON / CSV / LOG / HTML|
-|LATENT|`{samples}` dict|shape / dtype summary|—|
-|FILE\_3D|`File3D` object (same as the built-in Load3D)|three.js viewer (offline)|glb / gltf / obj / fbx / splat|
-|MODEL\_3D|File3D object (with path/file)|three.js viewer (offline)|glb / gltf / obj / fbx / splat|
-|MESH|`Types.MESH` (vertex/face tensors, Hunyuan3D / Trellis / MoGe …)|vertices/faces exported to a temp OBJ → three.js viewer|vertices ≤500k, faces ≤1M (beyond that: summary only)|
-|SPLAT / VOXEL|`Types.SPLAT` / `Types.VOXEL` (tensors)|text summary (point count / SH coefficients / voxel resolution)|—|
-|MODEL|ModelPatcher|model metadata card|safetensors / gguf / onnx / ckpt / pt|
-|CLIP|comfy.sd CLIP|metadata card|safetensors / gguf / onnx|
-|VAE|comfy.sd VAE|metadata card|safetensors / gguf / onnx|
-|CONTROL\_NET / CLIP\_VISION / STYLE\_MODEL / UPSCALE\_MODEL / LORA\_MODEL / GLIGEN / SAMPLER / SIGMAS / GUIDER / NOISE / SEGS|the matching ComfyUI object|text summary|—|
-|EMPTY|not connected|"(not connected)"|—|
+- Data: `user_data/PromptHelperLib/*.csv` — 12 files: 8 tag libraries + `_tag_kind` (fine categories) / `_zh_CN` (Chinese) / `_e621_species` / `_furry_extra`; ~26 MB and **must ship with the repo**, otherwise the tag panel has neither libraries nor Chinese.
+- Two spaces: **library side** (built-in categories / favourites / placement) + **My tags** (copies of library tags that you can freely edit). The fixed "Uncategorised" node; "My tags" expands by default.
+- Category tree: both sides support create / rename / delete / drag-reorder / drag to become a child; right-click blank creates at the end of the current level; duplicate names at the same level are rejected.
+- Tag manager: multi-select, drag to recategorise, library tag → My tags (copy; the library copy stays), rename, delete, move to; batch bar.
+- Tag cards: preview image, favourite star, dashed border for My copies, batch drag; card count / height / display mode (cover thumb / contain full) are global in `localStorage['ezflex.tagCardSize']` / `ezflex.tagPreviewFit`; pager like the card manager.
+- Previews: standalone image files (`tag_preview`), cleanable separately, never embedded in tag records.
+- Search / filter: search box + filter dropdown — favourites only, exclude e621, exclude keywords (multi-line, each line removable), exclude categories (real category tree multi-select), exclude tags with popularity below N, hide NSFW, exclude furry; the three "…" items open a side panel and clicking the same item again closes it.
+- Related tags: `_related.csv`; shown line by line in the insert panel and can be inserted.
+- Insert panel: movable floating window (like find/replace), with an "inserted" box on top, groups on the left and cards on the right; clicking a card inserts at the caret; the inserted box can be edited as plain text; inserted tags are chips that can be deleted or quick-weighted.
+- Tag hint: typing in the body pops candidates (case-insensitive, Chinese / alias mapping); Enter / Tab / click confirms; after confirming, an automatic symbol can be appended (default `,`, configurable in Settings · Other).
+- Quick weight: caret on a tag, `Ctrl+↑ / Ctrl+↓` changes the weight by the step; the insert panel's "inserted" box shows `(tag:1.05)`; brackets are removed when the weight returns to 1; range 0.05–10.
+- Random tags: the card toolbar's "random tag" clears the card and regenerates immediately; "auto random tag" regenerates at every queue (mutually exclusive). The random-group dialog has category + count + toggle + minus per row; groups live in `localStorage['ezflex.randGroups']`.
+- The tag panel opens from the editor right-click menu (card popup and overall editor both work; collapsing the toolbar does not affect it).
+- Library selection is stored in `localStorage['ezflex.tagLib']`; tag data in `user_data/ezflex_prompt_tags.json`.
 
-* Saving details: preview-only by default; click "auto save" to write to disk, with an optional save location and save options.
-* Save options follow the format: lossless formats take no bitrate, lossless images take no quality; IMAGE / AUDIO / VIDEO offer "Keep source" (a file loaded from disk is copied as-is, no re-encode).
-* File name: supports `%year% %month% %day% %hour% %minute% %second%`; if left empty the card name is used with an automatic number.
-* Model types (MODEL / CLIP / VAE / LORA\_MODEL): only the info text is saved (summary + metadata) — **the model file is not copied**.
-* Batch images: one card exports at most 64 frames (beyond that only the count is recorded); the corner badge shows images / frames by the upstream node class name (video/frame/sequence …) — batch image output and video frame extraction cannot be told apart on the tensor.
-* Multi-image save mode is chosen per card ("multi-image save type": auto / batch images / video / animation, default auto, only for multi-image cards): auto = extract frames → video, batch output → one by one; the animation format / fps / lossless are set under "save type". File name is `name\\\_index\\\_NN`. Non-multi-image cards are saved normally by type.
-* Preview: data preview popup / generation info.
+#### Sliders and optimization logic
 
+- **Two independent layers**: the Default / Optimized slider in a **card** popup only affects **that card's output port**; the slider in **overall edit** only affects the **merged prompt** port. Their optimized slots never overwrite each other.
+- **Tool optimization** (manual, one call):
+  - Card popup "Tool → optimize prompt": source is fixed to that card's **Default** page; the result fills that card's Optimized slot and the slider switches to Optimized; the Default body is untouched.
+  - Overall edit "Tool → optimize prompt": source is each card's **Default** body joined in order with the card merge separator (merged = green cards; empty cards take no slot), **one single call**; the result goes to the "overall optimization result" and the overall slider switches to Optimized; the original cards are unchanged.
 
+| Slider | Default | Optimized | Behavior |
+|---|---|---|---|
+| Default / Optimized | has | none | optimize using the default prompt → fills the optimized slot, slider switches to Optimized |
+| Default / Optimized | has | has | optimize using the default prompt → **overwrites** the optimized slot (does not reuse hand-edited optimized text) |
+| any | empty | has / none | pops "this card has no prompt content to optimize." |
 
-### Prompt Helper (`EzFlex-PromptHelper`):
+- **Runtime optimization (overall edit → merged prompt)**: active when any of the three auto-optimize toggles is on. The optimized slot is a "memo": if it has content it is not re-called, only when empty. Failures (API / TextGenerate / llama) **stop with red**.
 
-* Cards: add / remove / drag to reorder / double-click to rename; each card has a "Default / Optimized" pair of pages and a "merge" toggle (green = merged, gray = not merged).
-* Editor: Word-style toolbar (bold/italic/underline/strike, alignment, font size, font color, highlight, first-line indent, find \& replace, color picker, full/half-width conversion) plus a skill button (pick a \*.md and insert it line by line at the cursor).
-* Reference media: reads the media ports of generation nodes on the canvas live and numbers them as @image N / @video N / @audio N; the "reference media" window lists material per generation node, with + insert / − remove / right-click to set as the global reference library.
-* Prompt rules: 15 built-in rules under "Settings · Rules" (including "no compile" and "use API") plus custom ones (editable, savable, with 中/EN variants), compiling reference marks into each vendor's syntax (`<Picture 1>`, `@image1`, …).
-* Optimize: the tool dropdown offers "optimize prompt (API) / (TextGenerate) / (llama)"; use it once or enable "optimize at runtime". The three toggles are mutually exclusive and failures are reported directly.
-* Quick weight: with the caret on a tag, press **Ctrl+↑ / Ctrl+↓** to add/subtract the "weight step" (Settings · Other settings, default 0.05) — e.g. `long_hair` → `(long_hair:1.05)`, then back to `long_hair` once the weight returns to exactly 1 (the brackets are dropped). It follows the caret, so moving with the arrow keys first weights whatever tag the caret is now on. Clamped to 0.05 – 10.
-* Collapse: two hover-only bars in the card popup / overall edit fold the **toolbar** and the **Default / Optimized tab row** separately (the text area is never folded). Collapse state is saved in the node config and survives a refresh; when both are collapsed they merge into a single "expand all" bar that is again hover-only.
-* Tag entry: a **Tag** button sits to the right of **Hint** in the card popup / overall edit footer, opening the tag panel — it stays available even when the prompt tools are collapsed.
-* Card manager: store cards as presets (`user/EzFlex/prompts/<name>.json`); save only the checked ones, click to load, delete.
-* Ports: no CLIP input — a dynamic "combined media" port (ANY: images / video / audio / 3D) plus one text input per card; outputs are "merged prompt" plus one per card.
-* Settings: six tabs — General / Rules / API / TextGenerate / llama / Paths.
-* Mode: the header's "⧉ tile / 🗗 popup" switches the window shape in one click.
-* Optimization rules \& rule compilation:
+| Overall slider | Default | Optimized | Behavior |
+|---|---|---|---|
+| any | has | none | optimize once overall → write to "overall optimization result" → slider switches to Optimized → output it |
+| Optimized | has / empty | has | output the "overall optimization result" directly (**no re-optimize**), slider unchanged |
+| Default | has | has | output the **default merged** (the optimized version is kept unused, and no optimization), slider unchanged |
+| Default | empty | has | output the "overall optimization result", slider switches to Optimized |
+| any | empty | empty | output empty (the user wrote nothing), slider unchanged |
 
-  * Two sliders: the "Default / Optimized" pages in a **card** popup only affect **that card's output port**; the ones in **overall edit** affect the **"merged prompt" port**. Each layer's optimized content is its own slot — they do not overwrite each other.
-  * **Tool optimization** — card popup "Tool → optimize prompt": the source is fixed to that card's **Default** page; the result is written to that card's Optimized slot and the slider switches to Optimized, the Default body is untouched. Overall edit "Tool → optimize prompt": the source is each card's **Default** body joined in order with the "card merge separator" (merged = green card; empty cards take no slot), **one single call**; the result goes to the "overall optimization result" and the overall-edit slider switches to Optimized, the original cards are unchanged. Both obey the same table:
+- **Each card → "card i" port**: when **merge is green** (joins the merge) it is **not optimized separately** at runtime, strictly output by that card's slider — Default outputs Default, Optimized outputs Optimized; **pointing at an empty slot outputs empty** (no fallback). When **merge is gray** (does not join the merge) it is **optimized separately on demand** (the result only reaches its own port):
 
-|Slider|Default|Optimized|Behavior|
-|-|-|-|-|
-|Default / Optimized|has|none|optimize using the default prompt → fills the optimized slot, slider switches to Optimized|
-|Default / Optimized|has|has|optimize using the default prompt → **overwrites** the optimized slot (does not reuse hand-edited optimized text)|
-|any|empty|has / none|pops "this card has no prompt content to optimize."|
+| Slider | Default | Optimized | Card port |
+|---|---|---|---|
+| any | has | none | optimize the default separately once → fills that card's optimized slot → port = result, slider switches to Optimized |
+| Default | has | has | port = Default (the optimized version is kept unused, and no optimization), slider unchanged |
+| Optimized | has | has | port = optimized version (no re-optimize), slider unchanged |
+| any | empty | has | port = optimized version (no re-optimize); if the slider was on Default it switches to Optimized |
+| any | empty | empty | port = empty, slider unchanged |
 
-* **Runtime optimization — any of the three auto-optimize toggles on**: on failure (API / TextGenerate / llama error) it **stops with red**. The optimized slot is a "memo": if it has content it is **not re-called**, only when empty. Overall layer → "merged prompt" (source = the merged **Default** bodies of merged=green cards, joined with the card merge separator):
+- **All three toggles off**: no optimization call, with the same "strictly by slider, empty stays empty" rule. Overall: Default → default merge (each card's Default body, filtered by merge, gray cards excluded); Optimized → overall optimization result; empty stays empty, no fallback, no filling in. Each card (green and gray the same): Default → that card's Default body; Optimized → that card's optimized content; empty stays empty. A card slider **does not affect** the merged prompt.
+- **Rule compilation (referencing media), and at which step**: the body sent to the API / TextGenerate / llama is the **uncompiled original text** (`@image1` / `@video1` / `@audio1`); the system prompt explicitly asks the model to **keep those marks as-is** (no translating, rewriting or renumbering). Both optimized slots also store the **model's original text** (uncompiled) — you can still recompile with a different rule set and never lose the mapping. **Only the output ports go through rule compilation**: the "card i" port, and the default merge / overall-optimized content used by the "merged prompt"; compilation is idempotent. If the model **keeps** `@image1` → the output automatically becomes that rule's syntax (e.g. `<Picture 1>`); if the model **translates/rewrites** it into natural language ("the first picture"), the mark is gone and no compilation can recover it (only the system prompt can lower the odds, or use a more obedient model).
 
-|Overall slider|Default|Optimized|Behavior|
-|-|-|-|-|
-|any|has|none|optimize once overall → write to "overall optimization result" → slider switches to Optimized → output it|
-|Optimized|has/empty|has|output the "overall optimization result" directly (**no re-optimize**), slider unchanged|
-|Default|has|has|output the **default merged** (the optimized version is kept unused, and no optimization), slider unchanged|
-|Default|empty|has|output the "overall optimization result", slider switches to Optimized|
-|any|empty|empty|output empty (the user wrote nothing), slider unchanged|
+### Media Loader (`EzFlex-MediaLoader`)
 
-* Each card → "card i" port: when **merge is green** (joins the merge) it is **not optimized separately** at runtime, strictly output by that card's slider — Default outputs Default, Optimized outputs Optimized; **pointing at an empty slot outputs empty** (no fallback). The card list tag follows the slider ("opt" / "def"). When **merge is gray** (does not join the merge) it is **optimized separately on demand** at runtime (the result only reaches its own port):
+- Presets: save/delete groups, card groups and names.
+- Parameters: cards per row, card height multiplier.
+- Groups / card groups / media cards: drag-reorder, double-click rename, context menu, long-press merge, hover info, click preview, delete.
+- Browser: explorer-style (directory tree, back/forward/up/refresh, manual path, search, multi-select).
+- Outputs: one `EZFLEX_MEDIA_CARD` port per card (only for `MediaOut`); output modes split / card / card group / group, with optional merging.
+- Loads images / video / audio / 3D / text / other with the same values as built-in loaders.
+- Extensions: images `.png .jpg .jpeg .webp .gif .bmp .tif .tiff`; video `.mp4 .webm .mov .mkv .avi .m4v`; audio `.mp3 .wav .flac .ogg .aac .m4a .opus .wma`; 3D `.obj .glb .gltf .fbx .stl .ply .spz .splat .ksplat .3ds .dae .blend`; text/other → STRING.
+- "Load output" creates and wires an `EzFlex-MediaOut`.
+- Fixed / loop mode: a top "loop" toggle; settings contain splice and loop tabs. The loop tab starts with slot presets (`default`, `minimaxH3`, non-deletable), then counts for image / video / audio / text / model / other. At runtime `index` selects the matching card group; out of range yields None; MediaOut follows the slot ports automatically.
+- In fixed mode, card groups only draw preset slots (empty slots show a type icon); drag-upload / single add / batch add all enforce type limits. A card group can be marked as a "loop card group": it participates in every index but takes no number and no order slot; with one group every segment reuses it.
+- Root security: only ComfyUI `input` / `output` by default; other folders must be registered manually and only from localhost. Never register drives, home directories or project roots; with `--listen 0.0.0.0`, a tunnel or a reverse proxy, registered folders may be reachable by others.
 
-|Slider|Default|Optimized|Card port|
-|-|-|-|-|
-|any|has|none|optimize the default separately once → fills that card's optimized slot → port = result, slider switches to Optimized|
-|Default|has|has|port = Default (the optimized version is kept unused, and no optimization), slider unchanged|
-|Optimized|has|has|port = optimized version (no re-optimize), slider unchanged|
-|any|empty|has|port = optimized version (no re-optimize); if the slider was on Default it switches to Optimized|
-|any|empty|empty|port = empty, slider unchanged|
+### Media Out (`EzFlex-MediaOut`)
 
-* Port count = number of cards + 1 (port 0 is "merged prompt", then "card 1..N" all STRING); ports follow card add/remove/sort. If `card\\\_in\\\_i` is wired to external text it overrides that card (the card is dimmed on the panel) and also takes part in the merge and optimization.
-* **All three toggles off**: no optimization call is made, with the same "strictly by slider, empty stays empty" rule. Overall edit: slider on **Default** → outputs the **default merge** (each card's Default body, filtered by merge, gray cards excluded); on **Optimized** → outputs the "overall optimization result". Empty stays empty, no fallback, no filling in. Each card (green and gray the same): Default → that card's Default body; Optimized → that card's optimized content; empty stays empty. A card slider **does not affect** the "merged prompt" — the merged port only takes each card's Default body (this is why a card's optimized content only goes through "its own port").
-* **Rule compilation (referencing media), and at which step**: the body sent to the API / TextGenerate / llama is the **uncompiled original text** (the `@image1` / `@video1` / `@audio1` you typed); the system prompt explicitly asks the model to **keep those marks as-is** (no translating, rewriting or renumbering). Both optimized slots (that card's "optimized prompt" / "overall optimization result") also store the **model's original text** (uncompiled) — you can still recompile with a different rule set and never lose the mapping. **Only the output ports go through rule compilation**: the "card i" port, and the default merge / overall-optimized content used by the "merged prompt"; compilation is idempotent. If the model **keeps** `@image1` → the output automatically becomes that rule's syntax (e.g. `<Picture 1>`); if the model **translates/rewrites** it into natural language ("the first picture"), the mark is gone and no compilation can recover it (only the system prompt can lower the odds, or use a more obedient model).
+- Input: one `EZFLEX_MEDIA_CARD`, wired to a MediaLoader card port.
+- Outputs: neutral ports typed/coloured by the real value — IMAGE / VIDEO / AUDIO / FILE_3D / STRING.
+- Modes: split / card / card group / group. Split = one port per file; other modes merge per structure.
+- Merge: images → batch `[B,H,W,C]`; audio → concatenated (sample rates must match, mono is upmixed); text → newline-joined; mixed types / rates raise an error suggesting split.
+- Batch settings (card / card group / group): target size "first / specified", fit crop / pad / stretch, max items (0=all), start index.
+- Switches: split mode keeps disabled ports and outputs `None` (re-enable without rewiring); other modes drop disabled items. At queue time, disabled-but-connected inputs are removed from the submitted prompt; canvas links and the saved workflow are untouched.
 
-### Media Loader (`EzFlex-MediaLoader`):
+### Merge List (`EzFlex-MergeList`)
 
-* Presets: save and delete group and card-group state plus names.
-* Parameters: cards per row, card height multiplier (default 1).
-* Groups / card groups / media cards: drag to reorder, double-click to rename, context menu, long-press drag to merge, hover info, click to preview, delete.
-* Browse: file-explorer style (directory tree, back/forward/up/refresh, manual path entry, search, multi-select).
-* Output: one port per card, of the dedicated `EZFLEX\\\_MEDIA\\\_CARD` type (dark red) — it carries the *card object*, not a media value, so it can only connect to `EzFlex-MediaOut` (this blocks accidental wiring into built-in nodes); for real media values use MediaOut.
-* Loadable types: images / video / audio / 3D models / text / other, with the same output values as ComfyUI's built-in loaders, so they wire straight into standard nodes.
-* Supported extensions: images `.png .jpg .jpeg .webp .gif .bmp .tif .tiff` | video `.mp4 .webm .mov .mkv .avi .m4v` | audio `.mp3 .wav .flac .ogg .aac .m4a .opus .wma` | 3D `.obj .glb .gltf .fbx .stl .ply .spz .splat .ksplat .3ds .dae .blend` | text/other → STRING.
-* Top bar "load output": creates one EzFlex-MediaOut and wires it for you.
-* ⚠️ **Be careful with the root-directory (browsable roots) setting**: by default you can only browse ComfyUI's own `input` / `output`; to reach other directories, type a path in the toolbar and click "save root" to register it explicitly. **Only people who can reach your ComfyUI port can see those roots** — when it listens on `127.0.0.1` (the default) adding roots only affects you; but once you use `--listen 0.0.0.0`, a tunnel or a reverse proxy to the internet, anyone on that network/internet can list and download the directories you registered. So: never register a drive letter, your home directory or a project root (the plugin also refuses whole drives and clears legacy ones); registering/deleting is local-only; and delete roots when you are done (the built-in `input` / `output` cannot be deleted).
+- Joins multiple inputs, in order, into one list; inputs are added/removed as needed (up to 16).
+- A list input is flattened in; anything else is appended as one item.
+- One `*` list output for `SplitList` or other list nodes.
+- Order follows the top-to-bottom port order on the canvas, not `input_N` numbers.
 
-### Media Out (`EzFlex-MediaOut`):
+### Split List (`EzFlex-SplitList`)
 
-* Input: a single input (dedicated type `EZFLEX\\\_MEDIA\\\_CARD`), wired to one card port of `EzFlex-MediaLoader`.
-* Output: neutral ports colored/typed by the real file type — IMAGE / VIDEO / AUDIO / FILE\_3D / STRING (same as the built-in loaders, so they wire straight into standard nodes).
-* Modes: split / card / card group / group (switched from the panel header); split → one port per file, card / card group / group → merged into one port following the structure.
-* Merge: multiple images → a batch tensor `\\\[B,H,W,C]` (accepts any IMAGE input, and can be split again with the built-in `ImageFromBatch` / `RebatchImages`); multiple audio files → concatenated into one track (sample rates must match; mono is upmixed); multiple texts → joined with newlines; mixed types / mismatched sample rates → an error suggesting "split" (the port degrades to `\\\*` and the hover label shows `×N`).
-* Batch settings (shown in card / card group / group mode, aligned with KJNodes `Load Images From Folder`): target size `use first` / `specify size`, fit `crop` / `pad` / `stretch`, `max items` (0 = all), `start index` (0-based).
-* Switches: each can be toggled; in split mode a disabled port is kept and outputs `None` (re-enabling needs no re-wiring), in the other modes a disabled item is dropped from the group. At **runtime** (before the prompt is queued) an input that is "disabled but still connected" is removed from the **submitted prompt** — downstream treats it as not connected, and **neither the canvas wiring nor the saved workflow changes**.
+- Splits one list into multiple outputs (inverse of MergeList).
+- Outputs are added/removed as needed (up to 16), always keeping at least one; unconnected ports get no label.
+- Commonly used to take accumulated loop segments out one by one.
 
-### Merge List (`EzFlex-MergeList`):
+### Reroute (`EzFlex-Reroute`)
 
-* What it does: joins multiple inputs, in order, into one list.
-* Input ports are added/removed as needed (`input\\\_1..20`); a list input is flattened in, anything else is appended as one item.
-* Outputs one `\\\*` list port, ready for `EzFlex-SplitList` or another loop node.
+- Per-port 1:1 passthrough: input i → output i; no merge or split.
+- Adds ports as you connect (up to 32); each port can be named.
+- Port/link colours follow the upstream output (VAE red / CLIP yellow / MODEL purple …).
 
-### Split List (`EzFlex-SplitList`):
+### Time Plan (`EzFlex-TimePlan`)
 
-* What it does: splits one list into multiple output ports (the inverse of Merge List).
-* Output ports are added/removed as needed, always keeping at least one; unconnected ports get no black label.
-* Commonly used to take the segments of a collected loop list out one by one.
+- Three-column panel. Row 1: preset dropdown / save / delete; row 2: align dropdown / custom / max; rows 3–5: total·segment·FPS, overlap·tolerance·trim tail, transition audio·B·S.
+- Preset and align cells have no labels; other rows use a fixed label + input; input text is centred.
+- Minimum width 660, enough for three columns.
+- Model presets: `minimax_h3` / `wan` / `ltx`; `B` / `S` are the frame grid (H3 = 5 / 17).
+- `Max` fills `max_frames` with the current model's maximum frame count in one click.
+- Align: `align` snaps to the grid; `strict` raises on overflow.
+- Three built-in presets are read-only; custom plans can be saved/deleted.
+- "Custom" opens the duration dialog: add/remove segments, live totals and per-segment frames; `×`/Cancel discards; Save/click-outside saves. Edits persist with a debounce, and TimeLine follows live.
+- Outputs: `timeplan` (`EZFLEX_TIMEPLAN`) + `frames` (frames to generate for this segment).
+- Two-way sync with TimeLine: dragging a segment / changing duration writes `segOverride`.
 
-### Loop Start (`EzFlex-LoopStart`):
+### Motion Context (`EzFlex-MotionContext`)
 
-* What it does: the loop entry point. The panel has a single `index` field — which round this run starts from (0 by default). At runtime it is read-only and increments every round.
-* Outputs: `index` (INT, always first — wire it into PromptHelper / MediaLoader / TimeLine's index input) plus `value1`, `value2`, … (dynamic, added one at a time as you connect).
-* Inputs: `index` (optional — feed an upstream value when you want to drive the start round from the graph) plus `initial value1`, `initial value2`, … (dynamic, one per value port). This is the first-round seed: **until feed-back arrives, `valueN` outputs the matching `initial valueN`** (left unwired, it outputs nothing). Wire the same kind of data you expect Loop End port N to carry back — you need it whenever a downstream node cannot accept a missing value (torch.cat / VAE / …).
-* `valueN` is the fed-back value: whatever Loop End's port N received last round. From round 2 on it overrides the initial value.
-* The round count does not live here — it is Loop End's panel field.
+- Pins the previous AV latent's tail (`context_length` frames) into this segment's conditioning (`minimax_keyframes`, `img_update=False`, hard-locked).
+- Zero VAE round trip: slices the previous sampled latent directly (no decode + encode), saving one lossy pass and memory versus AddGuide.
+- Inputs: `positive`, `latent` (this segment's AV latent, used for frame count / shape check), `context_length` (default 22), `context_audio_length` (default 24), `follow_plan`.
+- Optional: `context_latent` (previous AV latent, usually `LoopStart.valueK`), `context_video_latent` / `context_audio_latent` (override either half), `timeplan`.
+- With `follow_plan` on and `timeplan` wired, `context_length` = `overlapFrames` (**only overlap is pinned**; `tolerance` is extra head burn-in that is trimmed, not pinned) and the audio length comes from TimePlan; overlap=0 pins nothing.
+- Two modes (`mode`): `keyframe` (default) pins the previous tail as `minimax_keyframes` rows (more tokens); `masked` writes the same tail into this latent's prefix with `noise_mask` (0 = frozen, 1 = generate) and leaves conditioning untouched.
+- `masked` also outputs `latent` (third port) — wire it to the sampler's `latent_image`; conditioning passes straight through. Nodes that rebuild the latent drop the mask, so keep the latent direct.
+- `masked` forces the audio prefix to the video window (same head trim); `keyframe` uses `context_audio_length` as a guide.
+- `pin_next_head` works in both modes: `keyframe` appends a tail keyframe, `masked` writes tail rows with mask 0. It only fires on rerun, when `timeplan.nextRef` exists.
+- Outputs: `timeplan` + `positive` + `latent`.
+- `pin_next_head` (default off, experimental): when TimeLine re-runs this segment, pin the next segment's saved latent **visible head** (skipping its own overlap/tolerance) at this segment's tail; TimeLine detects the port from `valueN → MotionContext.context_latent` instead of hardcoding v2.
+- Does not trim; `SegmentPanel` trims `overlap + tolerance`.
+- Rerun: LoopEnd records media types; LoopStart restores the previous segment's VIDEO from `seg_XXXX.mp4`; `nextRef` pins the **next segment's head latent** at this segment's tail for the last segment of a rerun range (TimeLine sets it automatically).
+- Changing value ports: TimeLine inspects the actual `LoopStart.valueN → context_latent / SplitVideo.video_* / AUDIO / IMAGE` wiring and writes `resumeMedia` + `nextRef.latentPort`; as long as the semantic wiring is unchanged, moved ports still resolve to the same files.
 
-### Loop End (`EzFlex-LoopEnd`):
+### Split Video (`EzFlex-SplitVideo`)
 
-* What it does: the loop trigger and exit point. The panel has a single round counter, and it counts **total** rounds (the first one included): 0 or 1 = a single pass (a plain run), N = N passes total.
-* Inputs `value1`, `value2`, … (dynamic — added one at a time as you connect, one-to-one with Loop Start's outputs): **whatever a port receives becomes the next round's Loop Start value N**.
-* Once the total round count is reached, these values are returned as-is on `out1`, `out2`, … (the values of the **last** round — wire a `EzFlex-MergeList` output into `valueN` if you want `outN` to be the accumulated per-round list).
-* ⚠️ Do not wire Loop End back into Loop Start on the canvas — the feed is automatic, and a real wire closes the graph cycle (`Dependency cycle detected`).
-* ⚠️ `outN` can only feed nodes **outside** the loop body: the body is everything downstream of Loop Start (up to Loop End), so `LoopEnd.out1 → TimeLine.video` is a cycle when TimeLine also takes `LoopStart.index`. Use `LoopStart.valueN → TimeLine.video` instead (valueN is the previous rounds' accumulated value).
+- Up to **16 cards**; one card = one `video_N` input + one `Segment N` output; optional `timeplan` passthrough (only `loop` mode needs it).
+- Modes:
+  - `loop`: the current TimePlan segment (`netStart / netDuration`);
+  - `one`: a time window `[one_start, one_end)`;
+  - `frames`: a frame range; negative indices count from the end; `end_frame=0` = end of video; e.g. `-22, 0` = last 22 frames.
+- Each card can override mode / values / output type (turn off its "master" toggle); the master row applies to the others.
+- Four outputs:
+  - `frames`: IMAGE batch;
+  - `video`: lazy-trimmed `VIDEO` (`as_trimmed`, no encode, no temp file; `SaveVideo` / `GetVideoComponents` honour the window, only preview transcodes once);
+  - `gif`: frames saved as an animated GIF under `output/`;
+  - `audio`: source audio for the same window (sample-accurate, no resample; `None` without an audio track).
+- The first-row "Settings" button opens max-frames / stride:
+  - `Max frames`: frames / GIF only, 0 = unlimited;
+  - `Every N`: 0 = no thinning, N = keep every Nth frame; frames / GIF only; video / audio keep the full timeline.
+- Decoding uses `container.decode()` so the H.264 tail B-frames are flushed (no lost last frames).
+- If the input is already trimmed, windows / frame numbers are relative to that input (same nesting as built-in `Video Slice`).
+- Same source + window reuses frame / audio / lazy-trim caches; `max_frames` truncates when hit.
 
-### Time Line (`EzFlex-TimeLine`):
+### Segment Panel (`EzFlex-SegmentPanel`)
 
-* What it does: slices a total duration into segments on the model's frame grid, giving each segment's frame count and the total segment count.
-* Inputs: `index` (from the loop's index) and `video` (segment video list, item i = segment i).
-* Outputs: `frames` (frames to generate for this segment), `overlap\\\_frames` (overlap frames), `segments` (total segments; wire into LoopEnd's round counter when the round count is not known up front).
-* Ships with minimax\_h3 / wan / ltx model parameters; the segmentation is visualized in the "big preview on top + splice track at the bottom" panel.
+- Inputs: `images`, optional `timeplan`, optional `audio`.
+- Fields: save folder, FPS, clean VRAM, assemble final, trim tail, internal rerun stop, plus two encoding groups.
+- Clean VRAM = `gc.collect()` + `soft_empty_cache()`: releases Python garbage and free CUDA cache blocks only. It does **not** unload loaded models, so the next segment does not reload model weights.
+- Two collapsible sections share the same order (two per row): **format / codec / FPS / CRF / bit depth / colour space**.
+- Segments: format fixed MP4 (disabled placeholder); codec auto / h264 / av1.
+- Final: format mp4 / mkv / webm; codec auto / h264 / h265 / av1; may follow the segment encoding except the container.
+- Each segment is written immediately with a manifest; the last segment (or rerun stop) concatenates with ffmpeg into `final`.
+- Seam handling (the row under Clean VRAM):
+  - `Blend frames`: visible crossfade frames at each seam (xfade), 0 = off; the final gets shorter by that many frames per seam.
+  - `Audio xfade (ms)`: audio crossfade per seam; 0 = follow the video blend duration; best used together with the video blend.
+  - Both values are stored in the manifest; TimeLine's rerun / trim / replace go through the same `_ezsp_concat` and reuse them.
+- Trim / replace segment / replace final / range rerun all re-run through the manifest; TimeLine's rerun / trim / replace reuse the same path.
+- Segments stay MP4 for stable looping, preview and concatenation; only the final picks a container.
+- HDR is tag-only for now (no tone mapping here; PreviewAny does tone mapping in its encode path).
+- Outputs: `timeplan`, `images`, `audio`, `video`.
 
-### Reroute (`EzFlex-Reroute`):
+### Time Line (`EzFlex-TimeLine`)
 
-* Relay: a mid-flow reroute node for larger workflows.
-* Connections: adds connectable ports as you wire, and each relay card can be named freely.
-* Colors: port and link colors follow the upstream output port (VAE red / CLIP yellow / MODEL purple …), so you can see at a glance what is being relayed.
+- Inputs: optional `timeplan`, `video` (segment list, item i = segment i).
+- View: large preview + bottom splice track; play / stop / mute / fullscreen / volume; exiting fullscreen syncs play, mute and volume back to the custom controls.
+- Clicking a segment selects it and seeks to its net start; returning to segment 1 / the start needs only one click.
+- Context menu (fixed):
+  1. Set segment duration (#n)
+  2. Set overall duration
+  3. Regenerate this segment
+  4. Regenerate to the end
+  5. Regenerate selected segments
+  6. Trim segment head/tail
+  7. Restore segment trim
+  8. Replace this segment video
+  9. Replace final video
+  10. Clear this segment cache
+- "Set overall duration" opens the upstream TimePlan's custom dialog (same implementation / style) — not a separate total field.
+- Regenerate / trim / replace write the manifest and reassemble the final.
+
+### Video Components (`EzFlex-VideoComponents`)
+
+- Input: `VIDEO` (SplitVideo / MediaLoader / built-in Load Video …).
+- Nine outputs: `images`, `audio`, `fps`, `bit_depth`, `color_space`, `frame_count`, `duration`, `width`, `height`.
+- Decoding matches the built-in `Get Video Components` (`video.get_components()`); metadata prefers the VIDEO object's own `get_bit_depth()` / `get_color_space()` so it matches the built-in outputs.
+- `frame_count` is the actual decoded count; `duration` prefers container duration, else `frames / fps`.
+
+### Loop Start (`EzFlex-LoopStart`)
+
+- Loop entry; the panel has one `index` field (start round, default 0), read-only at runtime and incremented each round.
+- Outputs: `index` (INT, always first) + `value1..20` (dynamic, one per connection).
+- Inputs: `index` (optional, drive the start round from the graph) + `initial value1..20` (one per value port).
+- Initial values: before feedback arrives, `valueN` outputs `initial valueN`; downstream nodes that cannot accept empty values (torch.cat / VAE …) need them, otherwise round 1 fails.
+- The round count lives on Loop End.
+- Ref cards (only used when reading files: `refPaths` or resume): role (`prev` / `cur` / `next`) + type (Frames / Video / Audio / Latent) + range. Normal rounds ignore the cards and pass the feedback value through; a Frames card slices the fed batch to the last N frames, video/audio pass unchanged.
+
+### Loop End (`EzFlex-LoopEnd`)
+
+- Loop trigger and exit; "rounds" = **total** rounds including the first: 0/1 = one pass, N = N passes.
+- Inputs `value1..20` (dynamic, one-to-one with Start): whatever a port receives becomes the next round's Start value N.
+- Outputs `timeplan` (passthrough) + `out1..20` (last round's values); wire a `MergeList` output into `valueN` to accumulate per-round lists.
+- Do not wire End back into Start (cycle error); `outN` may only feed nodes outside the loop body.
+- Two continuation modes: expand (default) / queue. Queue is stored on the paired `LoopStart` config (`queue: true`), enqueues one prompt per round, keeps the graph flat and can pause between rounds; each round is a separate prompt, so cross-round preview accumulation is lost and outputs must be released manually.
+- Save cards: type is **Frames** or **Other**; each row shows its port number and the edge label shows `#K`. Frames writes the last N frames as PNG (non-frame values fall back to Other). Other follows ComfyUI formats: LATENT `.latent`, single-entry CONDITIONING `.safetensors` (multi-entry `.pt`), MESH `.glb`, AUDIO `.wav`, VIDEO `.mp4`, text `.txt`, other tensors `.pt`.
+
+### Controlnet Preprocessor (`EzFlex-ControlnetPreprocessor`)
+
+- Turns `comfyui_controlnet_aux` preprocessors into a card list; one card per preprocessor, ports follow the upstream node's real inputs/outputs (up to 64 input slots).
+- Each card keeps its own parameters (model / weight, thresholds, resolution …), unlike the AIO node.
+- Cards: drag-reorder, expand/collapse parameters, index, picker (category then node, submenu to the right, hover help), custom name (becomes the output port name), delete.
+- Toolbar: preset dropdown + save/delete + add preprocessor + expand/collapse all.
+- Ports are `*` (ANY) with no native strong typing; only preprocessors with IMAGE input and IMAGE first output are listed (47).
+- Requires `comfyui_controlnet_aux`; without it the node loads but the list is empty.
 
 ## Directory structure
 
-```
+```text
 Comfyui-EzFlex-Presets/
-├── \\\_\\\_init\\\_\\\_.py          # all 17 node classes + preset routes + output-type sync routes
+├── __init__.py          # 23 node classes + preset / output-type / media routes
 ├── pyproject.toml
-├── README.md            # English README (default home page)
-├── README\\\_ZH.md         # Chinese README
-├── docs/                # detailed references and research notes (loop mechanics / long video / director …)
-├── user\\\_data/           # preset library (written at runtime by the plugin)
-├── locales/zh/nodeDefs.json  # official i18n: Chinese node names / descriptions / tooltips
-└── web/                 # frontend panels (one \\\*\\\_node.js per node; shared ezflex\\\_service/i18n/theme)
-    ├── ezflex\\\_service.js       # shared: registry / group matching / preset API / panel helpers
-    ├── ezflex\\\_i18n.js          # panel i18n: ezT(key) + Chinese dictionary (English is the source)
-    ├── ezflex\\\_theme.js         # theme: 16 palettes → shared CSS variables (--ez-\\\*)
-    ├── ezflex\\\_media\\\_index.js   # media numbering engine (generator media ports → image N / video N / audio N)
-    ├── ezflex\\\_listview.js      # list / text preview popup
-    └── libs/ utils/ curves/    # three.js and loader/curve resources (local offline, for the 3D viewer)
+├── README.md            # English
+├── README_ZH.md         # Chinese
+├── PROJECT_STATE.md     # project state / handover
+├── docs/                # detailed references and research notes
+├── locales/zh/nodeDefs.json  # official i18n: node names / descriptions / tooltips
+├── user_data/           # preset store (runtime; PromptHelperLib tag library ships with the repo)
+├── images/              # README images
+└── web/                 # frontend panels (one per node; shared service/i18n/theme/media index/list view)
+    ├── ezflex_service.js
+    ├── ezflex_i18n.js
+    ├── ezflex_theme.js
+    ├── ezflex_media_index.js
+    ├── ezflex_listview.js
+    └── libs/ utils/ curves/   # local offline three.js and resources
 ```
 
 ## Notes
 
-* A personal project, built with AI assistance and still being improved — feedback and suggestions are welcome.
-* Presets and caches live under `user/EzFlex/`; workflows only store each node's own configuration.
-
+- A personal project, built with AI assistance, still being improved.
+- Presets and caches live in `user_data/` and ComfyUI's `user/EzFlex/`; workflows store only each node's own configuration.
+- Check local absolute paths (MediaLoader roots, SegmentPanel save folder) before sharing a workflow.

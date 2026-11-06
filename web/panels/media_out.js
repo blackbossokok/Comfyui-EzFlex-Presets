@@ -1,12 +1,13 @@
+// 面板：MediaOut 面板：按上游 list 拆端口，端口名随素材同步
 // EzFlex-MediaOut 素材输出（内嵌 addDOMWidget 面板）。
 // 输入 = 一个「素材卡片」端口（EzFlex-MediaLoader 的深红 * 输出）；
 // 输出 = 该卡片内每个文件一个端口，类型按文件真实媒体类型（IMAGE/VIDEO/AUDIO/MODEL_3D）。
 // 单文件卡片 = 1 个输出；多文件（批量）卡片 = N 个输出。局部禁用某文件时保留端口、输出 None。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { NODE_TYPES, nodeTypeOf, findNodeById, configWidget, installResizeHandles, makeDomWidgetHitThrough, hideNativeSlotText, TYPE_ICONS, model3dIcon, notifyConfigChanged, scheduleOnRedraw, pumpFrames, pageRange } from "./ezflex_service.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import {ezBindHooks, ezDropOutput, ezApplyDefaultSize, NODE_TYPES, nodeTypeOf, findNodeById, configWidget, installResizeHandles, makeDomWidgetHitThrough, hideNativeSlotText, TYPE_ICONS, model3dIcon, notifyConfigChanged, scheduleOnRedraw, pumpFrames, pageRange, ezfxGraphToScreen, ezfxLabelOffX , ezDropInput , ezScheduleNodeRedraw } from "../core/ezflex_service.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
 
 // 3D 模型统一用 PNG 图标（TYPE_ICONS.model_3d 是 SVG，别的节点仍用）
 const is3dKind = (k) => /^(model_3d|model|3d)$/.test(String(k || '').toLowerCase());
@@ -122,7 +123,8 @@ function readLocalOff(node) {
 function writeLocalOff(node) {
   const w = configWidgetOf(node); if (!w) return;
   const map = node._ezLocalOff || {};
-  const items = (connectedItems(node) || {}).items || [];
+  const slots = fixedSlotsOf(node);
+  const items = slots ? fixedWant(slots).map((w) => ({ id: w.id })) : ((connectedItems(node) || {}).items || []);
   const off = []; const offIdx = [];
   Object.keys(map).forEach((k) => { if (map[k]) { off.push(k); const i = items.findIndex((x) => String(x.id) === String(k)); if (i >= 0) offIdx.push(i); } });
   w.value = JSON.stringify({ off, offIdx });
@@ -216,6 +218,12 @@ function fixedWant(slots, items) {
 }
 // 刷新/重启时前端是先建节点、后铺 graph.links：链路没恢复就重排，会按空 items 把保存的端口全删掉 —— 连线就断了。
 // 上游口还没盖章（面板没铺）同理：先等，最多等一小会儿（第三方上游永远不盖章时兜底放行）。
+// loader 的 config 是否已经恢复（工作流加载中途 widgets_values 还是默认的 '{}'）。
+function upstreamConfigReady(up) {
+  const w = up && Array.isArray(up.widgets) ? up.widgets.find((x) => x && x.name === 'config') : null;
+  if (!w) return false;
+  try { const c = JSON.parse(w.value || '{}') || {}; return Array.isArray(c.groups) || !!c.mode || !!c.fixed; } catch (_) { return false; }
+}
 function mediaOutUpstreamReady(node, inp) {
   const g = node.graph;
   const L = g && g.links && g.links[inp.link];
@@ -225,7 +233,8 @@ function mediaOutUpstreamReady(node, inp) {
   if (!sock || !Array.isArray(sock._ezItems)) return false;
   // 固定模式要等 loader 的 config 能读到：否则 fixedSlotsOf 返回 null，会被当成普通模式按空 items 重排。
   if (fixedSlotsOf(node)) return true;
-  return sock._ezItems.some((x) => x);   // 普通模式：至少有一个真实素材才算铺好
+  if (upstreamConfigReady(up)) return true;   // 普通模式：config 已就位 ⇒ 空卡片也是「真的空」，该照常收口
+  return sock._ezItems.some((x) => x);   // 老存档 / 第三方上游：有真实素材才算铺好
 }
 // 给一个端口盖上素材身份/名字/类型/标签/颜色。返回是否真的改了（用来决定要不要通知下游）。
 function applySockMeta(sock, w) {
@@ -245,17 +254,23 @@ function applySockMeta(sock, w) {
   if (col && (sock.color_on !== col || sock.color !== col)) { sock.color_on = col; sock.color_off = col; sock.color = col; changed = true; }
   return changed;
 }
+// 上游还没铺好：只排队重试，**不改端口**（最多约 7s；之后靠 _ezMediaOutUpdate 通知再进来）。
+function deferPorts(node, noRedraw) {
+  node._ezMoDeferN = (node._ezMoDeferN || 0) + 1;
+  if (node._ezMoDeferN > 60 || node._ezMoDeferIv) return;
+  node._ezMoDeferIv = setTimeout(() => { node._ezMoDeferIv = null; try { updatePorts(node, noRedraw); } catch (_) {} }, 120);
+}
 function updatePorts(node, noRedraw) {
   if (!node || !node.outputs) return false;
   paintCardSocket(node);
   const inp0 = (node.inputs || [])[0];
   if (inp0 && inp0.link != null && !mediaOutUpstreamReady(node, inp0)) {
-    node._ezMoDeferN = (node._ezMoDeferN || 0) + 1;
-    if (node._ezMoDeferN <= 20) {
-      if (!node._ezMoDeferIv) node._ezMoDeferIv = setTimeout(() => { node._ezMoDeferIv = null; try { updatePorts(node, noRedraw); } catch (_) {} }, 120);
-      return false;
-    }
-  } else { node._ezMoDeferN = 0; }
+    // 上游还没铺好就**绝不动端口**：以前重试 20 次后按空 items 继续，会把保存的端口和连线全删掉
+    // （新版前端删口就是断线）。上游铺好后会走 _ezMediaOutUpdate 再进来，不需要自己兜底。
+    deferPorts(node, noRedraw);
+    return false;
+  }
+  node._ezMoDeferN = 0;
   const conn = connectedItems(node);
   const items = conn ? conn.items : [];
   const slots = fixedSlotsOf(node);   // 上游 MediaLoader 开了固定模式就自动跟随，不需要手动开关
@@ -310,11 +325,8 @@ function updatePorts(node, noRedraw) {
   // 刚重载完、布局和保存的对不上（上游内容/配置还没铺好）：这次先不动，免得把保存的连线按新布局删掉。
   // 上游配置变化会走 _ezMediaOutUpdate（那里清 _ezMoFresh），用户切模式/改槽位时才真正重排。
   if (node._ezMoFresh && outgoing.some((o) => !targetOf.has(o.slot))) {
-    node._ezMoDeferN = (node._ezMoDeferN || 0) + 1;
-    if (node._ezMoDeferN <= 20) {
-      if (!node._ezMoDeferIv) node._ezMoDeferIv = setTimeout(() => { node._ezMoDeferIv = null; try { updatePorts(node, noRedraw); } catch (_) {} }, 120);
-      return false;
-    }
+    deferPorts(node, noRedraw);   // 刚重载：等上游把真实布局铺开（_ezMediaOutUpdate 会清 fresh），先保住保存的连线
+    return false;
   }
   node._ezMoFresh = false;
 
@@ -342,6 +354,11 @@ function updatePorts(node, noRedraw) {
   seq.forEach((s) => node.outputs.push(s));
   surplus.forEach((s) => node.outputs.push(s));
   const byId = (id) => (node.graph && node.graph.getNodeById ? node.graph.getNodeById(id) : null) || (((node.graph && node.graph._nodes) || []).find((n) => n && String(n.id) === String(id)));
+  const g2 = node.graph;
+  // 新版前端（frontend 1.55+）把连线存在 graph.links（LinkMap）里，socket.links 只是按**当前下标**
+  // 现拼的兼容视图：往里 push 什么也不会发生，splice 会真断开那些线。所以新前端只改 link 的 origin_slot，
+  // 断开走 graph.removeLink；手改 socket.links 只在旧版 LiteGraph（数组真挂在 socket 上）里做。
+  const linkStore = !!(g2 && gl instanceof Map);
   let moved = false;
   outgoing.forEach((o) => {
     const L = gl[o.lid]; if (!L) return;
@@ -349,22 +366,28 @@ function updatePorts(node, noRedraw) {
     if (!targetOf.has(o.slot)) {
       // 新布局里没有同类型的落点（比如视频槽位被关成 0）：断开这条线。
       // 不能把它原地留下 —— 旧下标现在可能已经是另一个类型的口，会错接上去。
-      if (s && Array.isArray(s.links)) { const p = s.links.indexOf(o.lid); if (p >= 0) s.links.splice(p, 1); }
-      const t = byId(L.target_id); const tin = t && t.inputs && t.inputs[L.target_slot];
-      if (tin && String(tin.link) === String(o.lid)) tin.link = null;
-      try { delete gl[o.lid]; } catch (_) {}
-      try { const m = node.graph && node.graph._links; if (m && typeof m.delete === 'function') m.delete(o.lid); } catch (_) {}   // 新版 LiteGraph 用 _links(Map) 存链接
+      if (linkStore) {
+        try { g2.removeLink(o.lid); } catch (_) { try { delete gl[o.lid]; } catch (_2) {} }
+      } else {
+        if (s && Array.isArray(s.links)) { const p = s.links.indexOf(o.lid); if (p >= 0) s.links.splice(p, 1); }
+        const t = byId(L.target_id); const tin = t && t.inputs && t.inputs[L.target_slot];
+        if (tin && String(tin.link) === String(o.lid)) tin.link = null;
+        try { delete gl[o.lid]; } catch (_) {}
+        try { const m = node.graph && node.graph._links; if (m && typeof m.delete === 'function') m.delete(o.lid); } catch (_) {}   // 旧版 LiteGraph 用 _links(Map) 存链接
+      }
       moved = true;
       return;
     }
     const at = targetOf.get(o.slot);
-    if (s && Array.isArray(s.links)) { const p = s.links.indexOf(o.lid); if (p >= 0) s.links.splice(p, 1); }
-    // 新口（addOutput 建的）links 是 null：必须把 link id 记上，否则前端按 socket.links 画的线/后续 disconnect 都看不到它
-    const to = node.outputs[at];
-    if (to) { if (!Array.isArray(to.links)) to.links = []; if (to.links.indexOf(o.lid) < 0) to.links.push(o.lid); }
+    if (!linkStore) {
+      if (s && Array.isArray(s.links)) { const p = s.links.indexOf(o.lid); if (p >= 0) s.links.splice(p, 1); }
+      // 新口（addOutput 建的）links 是 null：必须把 link id 记上，否则前端按 socket.links 画的线/后续 disconnect 都看不到它
+      const to = node.outputs[at];
+      if (to) { if (!Array.isArray(to.links)) to.links = []; if (to.links.indexOf(o.lid) < 0) to.links.push(o.lid); }
+    }
     if (Number(L.origin_slot) !== at) { try { L.origin_slot = at; } catch (_) {} moved = true; }
   });
-  for (let i = node.outputs.length - 1; i >= seq.length; i--) node.removeOutput(i);
+  for (let i = node.outputs.length - 1; i >= seq.length; i--) ezDropOutput(node, i);
   if ((moved || changed) && node.graph) node.graph.setDirtyCanvas(true, true);
   if (changed) { syncOutputTypes(node); notifyOut(node); }   // 下游 MergeList/SplitList/TimeLine 跟着重算
   return changed;
@@ -436,7 +459,13 @@ function renderPanel(node, conn) {
     const on = el('button'); on.className = 'on' + (!off ? ' active' : ''); on.textContent = ezT('Enabled');
     const offb = el('button'); offb.className = 'off' + (off ? ' active' : ''); offb.textContent = ezT('Disabled');
     const set = (enabled) => { node._ezLocalOff = node._ezLocalOff || {}; node._ezLocalOff[f.id] = !enabled; node._moSig = ''; writeLocalOff(node); renderPanel(node, conn); updatePorts(node, true); };
-    on.addEventListener('click', () => set(true)); offb.addEventListener('click', () => set(false));
+    [on, offb].forEach((b) => {
+      b.type = 'button';
+      b.style.setProperty('pointer-events', 'auto', 'important');
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+    });
+    on.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); set(true); });
+    offb.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); set(false); });
     toggle.appendChild(on); toggle.appendChild(offb); row.appendChild(toggle);
     list.appendChild(row);
   });
@@ -492,11 +521,12 @@ function installOutsideLabels(node) {
     all.forEach((item) => {
       let pos = null; try { pos = node.getOutputPos(item.i); } catch (_) { pos = null; }
       if (!pos || !pos.length) { item.el.style.display = 'none'; return; }
-      const nodeW = (node.size && node.size[0]) || 1; const sx = rect.width / nodeW; const np = node.pos || [0, 0];
-      const cx = rect.left + ((pos[0] || 0) - (np[0] || 0)) * sx; const cy = rect.top + ((pos[1] || 0) - (np[1] || 0)) * sy;
+      // ★ 用画布变换换算（跟画布画圆点同一套口径），别再用 rect 当节点左上角近似
+      const pt = ezfxGraphToScreen(node, pos, rect);
+      const cx = pt.x, cy = pt.y;
       item.el.style.display = 'inline-flex'; item.el.style.zIndex = '20';
-      const zoom = Math.max(0.5, sx); item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px'; item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
-      const tw = item.el.offsetWidth; const th = item.el.offsetHeight || 16; const offX = 10 * zoom;
+      const zoom = Math.max(0.5, pt.zoom); item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px'; item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
+      const tw = item.el.offsetWidth; const th = item.el.offsetHeight || 16; const offX = ezfxLabelOffX(item.in, zoom);
       item.el.style.left = (cx + offX) + 'px'; item.el.style.top = (cy - th / 2) + 'px';
     });
   };
@@ -510,13 +540,13 @@ function installOutsideLabels(node) {
         // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍
         update();
       };
-    scheduleOnRedraw(update);
-    onLocaleChange(() => { node._moSig = ''; update(); });   // 语言切换：清内容签名强制重画
+    ezScheduleNodeRedraw(node, update);
+    ezBindHooks(node, onLocaleChange(() => { node._moSig = ''; update(); }));   // 语言切换：清内容签名强制重画
     schedule();
   }
 }
 function hideConfigWidget(node) {
-  try { const ins = node.inputs || []; for (let i = ins.length - 1; i >= 0; i--) { if (ins[i] && ins[i].name === 'config') { try { node.inputs.splice(i, 1); } catch (_) { try { ins[i].hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const ins = node.inputs || []; for (let i = ins.length - 1; i >= 0; i--) { if (ins[i] && ins[i].name === 'config') { try { ezDropInput(node, i); } catch (_) { try { ins[i].hidden = true; } catch (_) {} } } } } catch (_) {}
   const w = configWidgetOf(node); if (!w || node._emooCfgHid) return;
   node._emooCfgHid = true;
   try { w.origComputeSize = w.computeSize; w.computeSize = () => [0, 0]; w.computedHeight = 0; w.y = 0; w.last_y = 0; w.width = 0; w.draw = () => {}; w.hidden = true; w.options = w.options || {}; w.options.hidden = true; w.options.getMinHeight = () => 0; w.options.getMaxHeight = () => 0; if (w.element && w.element.style) { w.element.style.display = 'none'; w.element.style.height = '0'; w.element.style.minHeight = '0'; w.element.style.maxHeight = '0'; } } catch (_) {}
@@ -539,13 +569,13 @@ function buildRoot(node) {
     lblBtn.title = on ? ezT('Hide port labels') : ezT('Show port labels');
   };
   lblBtn.addEventListener('click', (e) => { e.stopPropagation(); moLabelsSet(!moLabelsOn()); });
-  onLocaleChange(syncLbl);
+  ezBindHooks(node, onLocaleChange(syncLbl));
   syncLbl();
   if (hd) hd.appendChild(lblBtn);
   return shell;
 }
 function fitNode(node) {
-  try { const root = node && node._emooRoot && node._emooRoot.querySelector('.emoo-root'); if (!root || typeof node.setSize !== 'function') return; const cur = node.size || [460, 140]; const contentH = root.scrollHeight + 12; if (contentH > cur[1] + 4) node.setSize([Math.max(460, cur[0]), Math.min(760, contentH)]); } catch (_) {}
+  // 尺寸由用户决定：内容超出走面板内部滚动条，这里不再自动加高
 }
 function setupNode(node) {
   if (!node || node._emooSetup) return;
@@ -562,7 +592,7 @@ function setupNode(node) {
     try { node.widgets_start_y = 0; } catch (_) {}
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
     installResizeHandles(node, root);
-    try { node.setSize([460, 200]); } catch (_) {}
+    try { ezApplyDefaultSize(node, 460, 200); } catch (_) {}
     hideConfigWidget(node);
     updatePorts(node, true); syncOutputTypes(node);
     renderPanel(node, connectedItems(node));
@@ -578,6 +608,13 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__emooHooked) return; nt.__emooHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () {
+    const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
+    // 同 param_preset_output：逐素材的启用/禁用表要在 configure 之后重读，否则刷新后全显示 Enabled
+    // 且首次切换会抹掉已保存的 off 列表（2026-11 审计 P2-20）。
+    try { this._ezLocalOff = readLocalOff(this); renderPanel(this, connectedItems(this)); } catch (_) {}
+    return r;
+  };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;
     try { if (this._emooSetup) setTimeout(() => { updatePorts(this, true); syncOutputTypes(this); renderPanel(this, connectedItems(this)); }, 0); } catch (_) {}
@@ -631,11 +668,73 @@ function installQueuePrune() {
   };
 }
 installQueuePrune();
+// ===== 加载后按「保存的端口名」保线 =====
+// 新版前端有些动态输入（V3 io.Autogrow 的 images.image_N、子图提升输入）在 configure 时重建，
+// 旧 target_slot 对不上就被 LiteGraph 丢掉 —— 表现就是「新工作流里 MediaOut/MediaLoader 的线刷新后自己断」。
+// 这里在 beforeConfigureGraph 记下工作流 JSON 里的连线端点，加载完按目标端口**名字**（再看下标）补回；
+// 只在「确实丢了 + 目标口空着」时才连，正常加载和用户主动断线都不受影响。
+const EZ_KEEP_TYPE = /^EzFlex-/;
+let _ezKeepLinks = [], _ezKeepTimer = 0;
+function ezCaptureGraphLinks(gd) {
+  try {
+    const nodes = (gd && gd.nodes) || [];
+    const on = {}; nodes.forEach((n) => { on[String(n.id)] = n; });
+    const found = [];
+    ((gd && gd.links) || []).forEach((l) => {
+      if (!Array.isArray(l) || l.length < 6) return;
+      const [lid, oid, oslot, tid, tslot, type] = l;
+      const a = on[String(oid)], b = on[String(tid)];
+      if (!a || !b) return;
+      if (!EZ_KEEP_TYPE.test(String(a.type || '')) && !EZ_KEEP_TYPE.test(String(b.type || ''))) return;
+      const tin = (b.inputs || [])[tslot];
+      found.push({ oid: String(oid), oslot: Number(oslot) || 0, tid: String(tid), tslot: Number(tslot) || 0, tname: tin && tin.name, type });
+    });
+    if (found.length) {
+      const seen = new Set(_ezKeepLinks.map((s) => [s.oid, s.oslot, s.tid, s.tslot, s.tname].join('|')));
+      found.forEach((s) => { const k = [s.oid, s.oslot, s.tid, s.tslot, s.tname].join('|'); if (!seen.has(k)) { _ezKeepLinks.push(s); seen.add(k); } });
+    }
+  } catch (_) {}
+}
+function ezRestoreGraphLinks() {
+  if (!_ezKeepLinks.length) return;
+  const g = app && app.graph; if (!g) return;
+  const byId = (id) => (g.getNodeById ? g.getNodeById(id) : null) || ((g._nodes || []).find((n) => n && String(n.id) === String(id)));
+  const all = () => { try { return g.links instanceof Map ? Array.from(g.links.values()) : Object.values(g.links || {}); } catch (_) { return []; } };
+  let fixed = 0;
+  _ezKeepLinks.forEach((s) => {
+    try {
+      const a = byId(s.oid), b = byId(s.tid); if (!a || !b) return;
+      let ts = -1;
+      if (s.tname) ts = (b.inputs || []).findIndex((x) => x && x.name === s.tname);
+      if (ts < 0 && s.tslot < (b.inputs || []).length) ts = s.tslot;
+      if (ts < 0) return;
+      const tin = b.inputs[ts]; if (!tin) return;
+      if (!((a.outputs || [])[s.oslot])) return;
+      if (all().some((L) => L && String(L.origin_id) === s.oid && String(L.target_id) === s.tid && Number(L.target_slot) === ts)) return;
+      if (tin.link != null) return;                       // 目标口已被占用：不抢
+      if (typeof a.connect === 'function') a.connect(s.oslot, b, ts);
+      else if (typeof g.addLink === 'function') g.addLink(s.oid, s.oslot, b.id, ts, s.type || '*');
+      fixed += 1;
+    } catch (_) {}
+  });
+  if (fixed) console.warn('[EzFlex] 加载后补回了 ' + fixed + ' 条被重建端口丢掉的连线');
+}
 app.registerExtension({
   name: 'EzFlex.MediaOut',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },
   nodeCreated(n) { if (nodeTypeOf(n) === NODE) { n._ezMoFresh = true; setupNode(n); } },   // 建节点/重载建节点：这次重排先保守
   loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) { n._ezMoFresh = true; setupNode(n); } },   // 重载：这次重排先保守，别删保存的连线
+  beforeConfigureGraph(gd) { ezCaptureGraphLinks(gd); },
+  afterConfigureGraph() {
+    ezRestoreGraphLinks();
+    // 动态输入（Autogrow / 子图提升口）有时比节点 configure 晚一拍才建出来：再兜一次后清表。
+    if (_ezKeepTimer) clearTimeout(_ezKeepTimer);
+    _ezKeepTimer = setTimeout(() => {
+      _ezKeepTimer = 0;
+      try { ezRestoreGraphLinks(); } catch (_) {}
+      _ezKeepLinks = [];
+    }, 250);
+  },
   setup() {
     try { if (typeof LGraphCanvas !== 'undefined' && LGraphCanvas.link_type_colors) { Object.assign(LGraphCanvas.link_type_colors, { VIDEO: '#e0645c', AUDIO: '#34a853', MODEL_3D: '#b15bd6', FILE_3D: '#b15bd6', IMAGE: '#4a9eff', EZFLEX_MEDIA_CARD: CARD_COLOR }); } } catch (_) {}
     ((app.graph && app.graph._nodes) || []).forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); });

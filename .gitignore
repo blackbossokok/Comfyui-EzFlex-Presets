@@ -20,11 +20,15 @@ user_data/*
 user_data/PromptHelperLib/*
 !user_data/PromptHelperLib/*.csv
 
-# ===== 本地备份 / 事故文件（回退用，14 MB 上下，不入库）=====
+# ===== 本地备份 / 事故文件（回退用，不入库）=====
+backup/
 _backups/
+_dsh_backups/
+*.tar.gz
 *.corrupt-backup
 *.bak
 *.bak_*
+*.p3bak*
 *.orig
 *.rej
 *~
@@ -49,3 +53,11 @@ Thumbs.db
 .vscode/
 .idea/
 node_modules/
+
+# ===== 本地 AI 助手记忆/备份（不属于插件发布内容）=====
+.workbuddy-ai/
+
+# ===== 实验/临时产物（不入库）=====
+_blend_test/
+web/*dshtest*
+web/time_plan_v2.js

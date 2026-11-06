@@ -3,6 +3,10 @@ mutagen>=1.46.0
 
 # comfyui自带 torch / numpy / Pillow / safetensors / av 
 
+# EzFlex-Preprocessor：预处理器节点复用已安装的 comfyui_controlnet_aux（Apache-2.0）。
+#   · 没装该插件时节点目录为空、面板会提示去安装；本插件不再内嵌它的运行时。
+#   · 模型权重不在本插件内，仍由上游逻辑首次使用时下载。
+
 # 提示词助手「设置·llama设置 → 进程内（llama-cpp-python）」
 # pip install llama-cpp-python   
 

@@ -1,16 +1,18 @@
+// 面板：ParamPresetOutput 面板：接一组参数，按参数逐个出口并可局部禁用
 // EzFlex-ParamPresetOutput 参数预设输出节点。
 // 输入 = 一个 EZFLEX_PARAM_GROUP 分组端口（从 ParamPresetControl 对应分组端口连线）；
 // 动态输出端口 = 该分组参数数 1:1，类型按参数类型映射（int->INT/float->FLOAT/string->STRING/bool->BOOLEAN，
 // 复杂类型->STRING(JSON)；禁用参数由 Control 侧输出 None）。
 // 参数增删/排序/类型变化/连接变化后端口跟随（ModelsCombo 经验：按参数 id 复用 socket、原地重排、
 // 更新 o.links origin_slot、POST /param_preset_output/outputs 同步类 RETURN_TYPES）。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
-import {
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
+import { ezApplyDefaultSize,
   NODE_TYPES, nodeTypeOf, findNodeById, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText,
-} from "./ezflex_service.js";
+  ezCaptureSocketLinks, ezApplySocketLinks,
+  ezDropInput, ezDropOutput } from "../core/ezflex_service.js";
 
 const NODE = NODE_TYPES.PARAM_OUT;
 const API = "/param_preset_output/outputs";
@@ -220,7 +222,7 @@ function writeLocalOff(node) {
   if (node.graph) node.graph.setDirtyCanvas(true, true);
 }
 function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
   const w = configWidget(node);
   if (!w || w._ezOutCfgHid) return;
@@ -287,6 +289,7 @@ function updatePorts(node, noRedraw) {
   }
   if (node._ezOutSyncTimer) { clearTimeout(node._ezOutSyncTimer); node._ezOutSyncTimer = null; }
 
+  const cap = ezCaptureSocketLinks(node);   // 重排前按 socket 拍连线快照（新版前端 socket.links 按下标变）
   const used = new Set();
   const assign = new Array(want.length).fill(-1);
   want.forEach((w, wi) => {
@@ -326,7 +329,7 @@ function updatePorts(node, noRedraw) {
   old.forEach((o, i) => {
     if (!used.has(i)) {
       const idx = node.outputs.indexOf(o);
-      if (idx >= 0) { node.removeOutput(idx); changed = true; }
+      if (idx >= 0) { if (ezDropOutput(node, idx)) changed = true; }
     }
   });
 
@@ -337,19 +340,12 @@ function updatePorts(node, noRedraw) {
     node.outputs.length = finalSeq.length;
     changed = true;
   }
-  node.outputs.forEach((o, i) => {
-    const ids = [];
-    if (Array.isArray(o.links)) ids.push(...o.links);
-    if (o.link != null) ids.push(o.link);
-    ids.forEach((lid) => {
-      if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) {
-        try { node.graph.links[lid].origin_slot = i; } catch (_) {}
-      }
-    });
-  });
+  ezApplySocketLinks(node, cap);   // 按快照把线改挂到 socket 的新下标
   if (changed) {
     if (node.graph) node.graph.setDirtyCanvas(true, true);
-    syncOutputTypes([{ type: 'EZFLEX_PARAM_GROUP', name: '数据组合' }, ...want.map((w) => ({ type: w.type, name: w.name }))]);
+    // 只报参数：固定整组口（数据组合）由后端自己前置（__init__.py:_ppo_output_names = ["Data combo"] + 参数名）。
+    // 以前把 group 也塞进 params，后端再加一次 → RETURN_NAMES 永远比真实端口多 1 个幽灵槽。
+    syncOutputTypes(want.map((w) => ({ type: w.type, name: w.name })));
   }
   renderPanel(node, conn);
   return changed;
@@ -452,7 +448,7 @@ function setupNode(node) {
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
     installResizeHandles(node, root);
-    try { node.setSize([400, Math.max(140, node.size ? node.size[1] : 140)]); } catch (_) {} // 默认宽度变为约两倍
+    try { ezApplyDefaultSize(node, 400, 140); } catch (_) {} // 默认宽度变为约两倍
     (node.inputs || []).forEach((i) => { try { i.hideName = true; } catch (_) {} }); // 输入端口只露圆点
     hideConfigWidget(node);
     updatePorts(node, true);
@@ -465,12 +461,19 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__ezOutHooked) return; nt.__ezOutHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () {
+    const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
+    // 局部禁用表必须在配置恢复后重读：setupNode 跑在 configure 之前，那时 config widget 还是默认 '{}'，
+    // 读到的空表会让面板全显示 On，且首次切换就用空表覆写已保存的 off 列表（2026-11 审计 P2-19）。
+    try { this._ezLocalOff = readLocalOff(this); renderPanel(this, connectedGroup(this)); } catch (_) {}
+    return r;
+  };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;
     try { if (this._ezOutSetup) setTimeout(() => updatePorts(this), 0); } catch (_) {}
     return r;
   };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezOutSetup = false; return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; try { if (this._ezOutSyncTimer) { clearTimeout(this._ezOutSyncTimer); this._ezOutSyncTimer = null; } } catch (_) {} try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezOutSetup = false; return r; };
 }
 // 语言切换后重画同类型节点的面板（ezT 在渲染时求值，重画即换语言）
 onLocaleChange(() => {

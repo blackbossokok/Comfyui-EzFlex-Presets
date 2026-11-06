@@ -1,17 +1,19 @@
+// 面板：ParamPresetControl 面板：参数组卡片 + 分组出口
 // EzFlex-ParamPresetControl 参数预设控制节点。
 // 前端面板：预设库 / 参数组列表（可拖拽排序）/ 编辑弹窗（参数增删、拖拽排序、名/类型/值）。
 // 动态输出端口 = 参数组数 1:1（EZFLEX_PARAM_GROUP 自定义类型，携带该组参数数据）；
 // 分组增删/排序/改名后端口跟随（ModelsCombo 经验：按名/按 id 复用 socket、原地重排、更新 o.links origin_slot、
 // 立即 POST /param_preset_control/outputs 同步类 RETURN_TYPES，并通知已连接的 ParamPresetOutput 刷新）。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
-import {
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
+import { ezApplyDefaultSize,
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig,
-  loadPresets, savePreset, deletePreset, uiPrompt, uiConfirm, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText, ezPruneDanglingLinks,
-} from "./ezflex_service.js";
+  loadPresets, savePreset, deletePreset, uiToast, uiPrompt, uiConfirm, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText, ezPruneDanglingLinks,
+  ezCaptureSocketLinks, ezApplySocketLinks,
+  ezDropInput } from "../core/ezflex_service.js";
 
 const NODE = NODE_TYPES.PARAM_CTRL;
 const API = "/param_preset_control/presets";
@@ -197,6 +199,15 @@ function loadFromConfig(node) {
   const st = stateFor(node);
   const cfg = readConfig(node, {});
   st.groups = Array.isArray(cfg.groups) ? cfg.groups : [];
+  // 旧数据归一：数字类型但 value 是字符串（新建参数的历史遗留，没有 _raw）→ 转成数字并补 _raw
+  st.groups.forEach((g) => (g.params || []).forEach((p) => {
+    const ty = String(p.type || '').toLowerCase();
+    if (ty !== 'int' && ty !== 'float') return;
+    if (typeof p.value === 'string' && p.value.trim() !== '' && !isNaN(Number(p.value))) {
+      p.value = ty === 'int' ? parseInt(p.value, 10) : parseFloat(p.value);
+      if (p._raw == null) p._raw = String(p.value);
+    }
+  }));
   st.groups.forEach((g) => { if (g && g.out == null) g.out = 'all'; if (g && !Array.isArray(g.params)) g.params = []; (g.params || []).forEach((p) => { if (p && typeof p.value === 'string') { p._raw = p.value; p.value = parseParamValue(p.value, p.type); } }); normalizeGroupOut(g); });
   st.current = (typeof cfg.current === 'string' && cfg.current) ? cfg.current : DEFAULT_PRESET;
   st.dirty = false;
@@ -225,7 +236,7 @@ function findPreset(name) {
 async function ensureDefaultPreset() {
   const list = await loadPresets(API);
   if (!list.some((p) => p.name === DEFAULT_PRESET)) {
-    await savePreset(API, { name: DEFAULT_PRESET, label: 'default', groups: [] });
+    try { await savePreset(API, { name: DEFAULT_PRESET, label: 'default', groups: [] }); } catch (_) {}
   }
 }
 
@@ -249,13 +260,23 @@ async function savePresetToLib(node, forcedName) {
   const st = stateFor(node);
   const name = forcedName != null ? forcedName : await uiPrompt(ezT('Enter preset name'), st.current === DEFAULT_PRESET ? ezT('New preset') : st.current);
   if (!name || !name.trim()) return;
-  await savePreset(API, { name: name.trim(), label: name.trim(), groups: deepClone(st.groups) });
+  try {
+    await savePreset(API, { name: name.trim(), label: name.trim(), groups: deepClone(st.groups) });
+  } catch (_) {
+    try { uiToast(ezT('Save failed') + ': ' + name.trim()); } catch (_) {}
+    return;
+  }
   st.current = name.trim(); st.dirty = false; syncToConfig(node); refreshUI(node);
 }
 async function deletePresetFromLib(node) {
   const st = stateFor(node);
   if (st.current === DEFAULT_PRESET) return;
-  await deletePreset(API, st.current);
+  try {
+    await deletePreset(API, st.current);
+  } catch (_) {
+    try { uiToast(ezT('Delete failed') + ': ' + st.current); } catch (_) {}
+    return;
+  }
   st.current = DEFAULT_PRESET; st.dirty = false; syncToConfig(node); updatePorts(node); refreshUI(node);
 }
 async function resetAll(node) {
@@ -413,7 +434,13 @@ function addParamToModal(node) {
   const st = stateFor(node);
   const group = st.groups.find((g) => g.id === st.editingId);
   if (!group) return;
-  (group.params = group.params || []).push({ id: genId(), name: `${ezT('Parameter')} ${group.params.length + 1}`, type: 'int', value: '0', enabled: true });
+  // 和后端保持一致：数字类型存数字 + 写 _raw（以前新建的是 value:'0' 且没有 _raw，
+  // 前端类型校验会把它标红，后端还得再做一次字符串转换）
+  (group.params = group.params || []).push({
+    id: genId(),
+    name: `${ezT('Parameter')} ${group.params.length + 1}`,
+    type: 'int', value: 0, _raw: '0', enabled: true,
+  });
   st.dirty = true;
   updatePorts(node);
   refreshUI(node);
@@ -536,6 +563,7 @@ function updatePorts(node, noRedraw) {
   // 参数组 socket：优先按 _ezGroupId 匹配复用；加载后未打标的旧 socket 按位置复用（保留其 link），
   // 不足才新建。顺序 = want（与 groups 同序，位置即组序）。
   const old = (node.outputs || []).slice();
+  const cap = ezCaptureSocketLinks(node);   // 重排前按 socket 拍连线快照（新版前端 socket.links 按下标变）
   const used = new Set();
   const seq = [];
   let dotChanged = false;
@@ -584,16 +612,7 @@ function updatePorts(node, noRedraw) {
     node.outputs.splice(0, node.outputs.length, ...seq);
     changed = true;
   }
-  node.outputs.forEach((o, i) => {
-    const ids = [];
-    if (Array.isArray(o.links)) ids.push(...o.links);
-    if (o.link != null) ids.push(o.link);
-    ids.forEach((lid) => {
-      if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) {
-        try { node.graph.links[lid].origin_slot = i; } catch (_) {}
-      }
-    });
-  });
+  ezApplySocketLinks(node, cap);   // 按快照把线改挂到 socket 的新下标
   if (changed) {
     if (node.graph) node.graph.setDirtyCanvas(true, true);
     syncOutputTypes(node);
@@ -639,7 +658,8 @@ function buildRoot(node) {
     const st = stateFor(node);
     const opts = await presetNames();
     presetSel.innerHTML = '';
-    if (opts.indexOf(st.current) < 0) { st.current = DEFAULT_PRESET; syncToConfig(node); }
+    // 列表拉不到/为空时不要把已保存的 current 冲成 default；把当前值补进下拉先保住状态（同 main_control）。
+    if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
     opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
 
     list.innerHTML = '';
@@ -669,7 +689,16 @@ function buildRoot(node) {
   m.addEventListener('click', (e) => {
     if (e.target === m && m._downOnBackdrop && stateFor(m._node || node).editingId != null) confirmModal(m._node || node);
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && modalEl().classList.contains('active') && stateFor(m._node || node).editingId != null) cancelModal(m._node || node); });
+  // ★ 每个节点都会挂一个 document keydown；不记录句柄的话删节点后永远留着（越建越多）。
+  const onEsc = (e) => {
+    if (e.key !== 'Escape') return;
+    const mm = modalEl();
+    if (!mm.classList.contains('active')) return;
+    if (mm._node && mm._node !== node) return;          // 别的节点打开的弹窗，不归我管
+    if (stateFor(mm._node || node).editingId != null) cancelModal(mm._node || node);
+  };
+  document.addEventListener('keydown', onEsc);
+  try { (node._ezpcKeys = node._ezpcKeys || []).push(onEsc); } catch (_) {}
 
   render();
   return shell;
@@ -715,7 +744,7 @@ function renderGroupItem(node, g) {
 function refreshPresetOptions(node, sel) {
   const st = stateFor(node);
   presetNames().then((opts) => {
-    if (opts.indexOf(st.current) < 0) st.current = DEFAULT_PRESET;
+    if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
     sel.innerHTML = '';
     opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; sel.appendChild(o); });
   });
@@ -726,7 +755,7 @@ function fitNode(node) {
     if (!root || typeof node.setSize !== 'function') return;
     const cur = node.size || [0, 96];
     const contentH = root.scrollHeight + 12;
-    if (contentH > cur[1] + 4) node.setSize([Math.max(320, cur[0]), Math.min(420, contentH)]);
+    // 尺寸由用户决定：内容超出走面板内部滚动条，这里不再自动加高
   } catch (_) {}
 }
 function refreshUI(node) {
@@ -737,7 +766,7 @@ function refreshUI(node) {
   const list = root.querySelector('.ezpc-list');
   if (!presetSel || !list) return;
   presetNames().then((opts) => {
-    if (opts.indexOf(st.current) < 0) { st.current = DEFAULT_PRESET; syncToConfig(node); }
+    if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
     presetSel.innerHTML = '';
     opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; presetSel.appendChild(o); });
   });
@@ -753,7 +782,7 @@ function refreshUI(node) {
 
 // ===== 挂载 =====
 function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
   const w = configWidget(node); if (!w || node._ezParamCfgHid) return; node._ezParamCfgHid = true;
   try {
@@ -778,7 +807,7 @@ function setupNode(node) {
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
     installResizeHandles(node, root);
-    try { node.setSize([430, Math.max(140, node.size ? node.size[1] : 140)]); } catch (_) {} // 初始宽度收窄 30px
+    try { ezApplyDefaultSize(node, 430, 140); } catch (_) {} // 初始宽度收窄 30px
     updatePorts(node, true);
     // 黑框标签：输出端口 = 参数组卡片的自定义名（改名后 updatePorts 会重绘，标签每帧按 groups 现取 → 实时跟随）
     installEdgeLabels(node, {
@@ -795,8 +824,8 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__ezParamHooked) return; nt.__ezParamHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); return r; };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezParamSetup = false; return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { this.__ezSizeRestored = true; const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezParamSyncTimer) { clearTimeout(this._ezParamSyncTimer); this._ezParamSyncTimer = null; } } catch (_) {} try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezParamSetup = false; try { (this._ezpcKeys || []).forEach((f) => document.removeEventListener('keydown', f)); this._ezpcKeys = []; } catch (_) {} return r; }
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }
 // 语言切换后重画同类型节点的面板（ezT 在渲染时求值，重画即换语言）

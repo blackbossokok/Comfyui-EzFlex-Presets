@@ -1,19 +1,20 @@
+// 面板：FreeLatent 面板：比例 / 像素值 / 对齐 / 画布 limit，最终宽高写进 config
 // EzFlex-FreeLatent 节点内嵌控件（canvas 分辨率选择器，参考「分辨率选择器 独立预设版」）。
 // 直接在 FreeLatent 节点里渲染 canvas 面板：拖拽尺寸 / 比例算法 / MP / 对齐 / 预设。
 // 状态实时写回 config 输入框，由 config 进 prompt、驱动 Python 节点创建 Latent。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezPanelState } from "./ezflex_service.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit, ezThemeColor, ezThemeAlpha, onThemeChange } from "./ezflex_theme.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import {ezBindHooks, ezApplyDefaultSize, makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezPanelState, ezfxGraphToScreen, ezfxLabelOffX , ezDropInput , ezScheduleNodeRedraw, uiConfirm } from "../core/ezflex_service.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit, ezThemeColor, ezThemeAlpha, onThemeChange } from "../core/ezflex_theme.js";
 
 // ===== 样式：颜色全部走主题变量（web/ezflex_theme.js），换主题即时生效 =====
 const FL_CSS = `
 .fl-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
 .fl-shell .fl-root{pointer-events:auto;}
-.fl-root{font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:10px;padding:8px 10px 10px;display:flex;flex-direction:column;gap:6px;width:auto;min-width:0;min-height:0;height:100%;box-sizing:border-box;user-select:none;-webkit-user-select:none;margin:0 12px;overflow:hidden;}
+.fl-root{position:absolute;inset:0 12px 12px 12px;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:var(--ez-fg);background:var(--ez-bg);border-radius:10px;padding:8px 10px 10px;display:flex;flex-direction:column;gap:6px;min-width:0;min-height:0;box-sizing:border-box;user-select:none;-webkit-user-select:none;overflow-y:auto;overflow-x:hidden;}
 .fl-root *{user-select:none;-webkit-user-select:none;}
-.fl-row{display:flex;gap:4px;align-items:center;flex-wrap:nowrap;}
+.fl-row{display:flex;gap:4px;align-items:center;flex-wrap:nowrap;overflow:hidden;}
 .fl-row.wrap{flex-wrap:wrap;}
 .fl-row label,.fl-top label{font-size:9px;color:var(--ez-fg-3);font-weight:500;letter-spacing:.2px;text-transform:uppercase;white-space:nowrap;user-select:none;-webkit-user-select:none;}
 .fl-row select,.fl-row input,.fl-top select,.fl-top input{font-family:inherit;font-size:12px;padding:4px 7px;border:1px solid var(--ez-border);border-radius:7px;background:var(--ez-bg);color:var(--ez-fg);outline:none;transition:.15s ease;box-sizing:border-box;text-align:center;}
@@ -57,7 +58,7 @@ const FL_CSS = `
 .fl-handle--both:active,.fl-handle--width:active,.fl-handle--height:active{background:var(--ez-accent);transform:scale(1.15);}
 .fl-handle--width:active{transform:translateY(-50%) scale(1.15);}
 .fl-handle--height:active{transform:translateX(-50%) scale(1.15);}
-.fl-info{position:absolute;bottom:6px;left:6px;background:var(--ez-surface);backdrop-filter:blur(8px);padding:6px 10px;border-radius:8px;border:1px solid var(--ez-border);box-shadow:0 2px 10px rgba(0,0,0,.06);font-size:9px;color:var(--ez-fg-3);display:flex;flex-direction:column;gap:3px;pointer-events:none;font-variant-numeric:tabular-nums;z-index:10;line-height:1.5;user-select:none;-webkit-user-select:none;min-width:60px;width:max-content;max-width:calc(100% - 12px);}
+.fl-info{position:absolute;bottom:6px;left:6px;background:var(--ez-surface);padding:6px 10px;border-radius:8px;border:1px solid var(--ez-border);box-shadow:0 2px 10px rgba(0,0,0,.06);font-size:9px;color:var(--ez-fg-3);display:flex;flex-direction:column;gap:3px;pointer-events:none;font-variant-numeric:tabular-nums;z-index:10;line-height:1.5;user-select:none;-webkit-user-select:none;min-width:60px;width:max-content;max-width:calc(100% - 12px);}
 .fl-info .rl{display:flex;gap:6px;align-items:baseline;white-space:nowrap;}
 .fl-info .rl .k{color:var(--ez-fg-muted);font-weight:400;font-size:7px;text-transform:uppercase;letter-spacing:.2px;min-width:24px;}
 .fl-info .rl .v{color:var(--ez-fg);font-weight:600;font-size:10px;}
@@ -238,22 +239,22 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     return best;
   }
 
+  // 只按「对齐值」取整；limit 是画布参数，**不参与**宽高的计算（不缩放）。
+  // 对齐值必须是 8 的倍数（与后端 _freelatent_align 同一条规则）
+  function snap8(a) { return Math.max(8, Math.round(a / 8) * 8); }
+
   function applyAlignLimit(w, h, st) {
     const mult = st.align || 8;
-    const limit = st.limit || DEFAULT_LIMIT;
-    let cw = Math.max(1, Math.round(w / mult) * mult);
-    let ch = Math.max(1, Math.round(h / mult) * mult);
-    if (cw > limit || ch > limit) {
-      const s = Math.min(limit / cw, limit / ch);
-      cw = Math.round(cw * s); ch = Math.round(ch * s);
-      cw = Math.max(1, Math.round(cw / mult) * mult);
-      ch = Math.max(1, Math.round(ch / mult) * mult);
-      if (cw > limit) { cw = limit; ch = Math.round(limit * (h / w) / mult) * mult; }
-      if (ch > limit) { ch = limit; cw = Math.round(limit * (w / h) / mult) * mult; }
-      cw = Math.max(1, Math.round(cw / mult) * mult);
-      ch = Math.max(1, Math.round(ch / mult) * mult);
-    }
-    return { w: Math.max(1, Math.min(limit, cw)), h: Math.max(1, Math.min(limit, ch)) };
+    const cw = Math.max(8, Math.round(w / mult) * mult);
+    const ch = Math.max(8, Math.round(h / mult) * mult);
+    return { w: cw, h: ch };
+  }
+
+  // 画布最大边只允许 >= 当前实际宽高（缩到装不下就拒绝并还原控件）。
+  function limitFits(st) {
+    if (Math.max(64, st.limit) < Math.max(st.width, st.height)) { syncLimitUI(st); return false; }
+    st.limit = Math.max(64, st.limit);
+    return true;
   }
 
   // ===== 配置读写 =====
@@ -266,8 +267,10 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     st.width = int(cfg.width, 1024);
     st.height = int(cfg.height, 1024);
     st.batchSize = int(cfg.batch_size, 1);
-    st.align = int(cfg.align, 8);
+    st.align = snap8(int(cfg.align, 8));
     st.limit = int(cfg.limit, DEFAULT_LIMIT);
+    // 载入的 limit 必须装得下当前宽高（老工作流/手改 config 可能存了更小的值）
+    if (Math.max(64, st.limit) < Math.max(st.width, st.height)) applyBestLimit(st.width, st.height, st);
     st.useOptimized = cfg.algorithm !== 'standard';
     st.selectedRatioLabel = cfg.aspect || calcAspect(st.width, st.height);
     st.customRatios = Array.isArray(cfg.customRatios) ? cfg.customRatios.filter((r) => r && FIXED_RATIOS.indexOf(r) < 0) : [];
@@ -288,6 +291,8 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     w.value = json;
     if (typeof w.callback === 'function') w.callback(json);
     if (node.graph) node.graph.setDirtyCanvas(true, true);
+    // 让 MainControl / 其它联动面板立即回读当前预设（FreeLatent 不走 service.writeConfig）
+    try { window.dispatchEvent(new CustomEvent('ezflex:config-changed', { detail: { node: node } })); } catch (_) {}
   }
 
   // ===== 预设（server user_data）=====
@@ -391,7 +396,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       const item = el('div', 'fl-pmenu-item');
       const lab = el('span', 'fl-pmenu-lab'); lab.textContent = o.textContent || ezT('— Preset —');
       const star = el('span', 'fl-defstar'); star.textContent = '★';
-      star.title = 'Set this preset as the default for new nodes (click again to clear)';
+      star.title = ezT('Favorite / default preset (click again to clear)');
       if (node._ezDefaultPreset && o.value === node._ezDefaultPreset.name) star.classList.add('on');
       item.addEventListener('mouseenter', () => {
         if (!o.value || star.classList.contains('on')) return;
@@ -404,13 +409,33 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       star.addEventListener('click', (e) => {
         e.stopPropagation(); e.preventDefault();
         const isDef = !!(node._ezDefaultPreset && node._ezDefaultPreset.name === o.value);
-        setDefaultPresetByName(node, o.value, isDef);
+        setDefaultPresetByName(node, o.value, isDef).then(() => {
+          if (isDef || !o.value) return;
+          els.presetSel.value = o.value;
+          syncPresetTrigger(node);
+          closePresetMenu();
+          applyPresetByName(node, o.value).then(() => {
+            // 异步初始化/刷新可能在应用过程中把下拉重置回空，应用完再确认一次选中态。
+            if (els.presetSel.value !== o.value) els.presetSel.value = o.value;
+            syncPresetTrigger(node);
+          });
+        });
       });
       item.addEventListener('click', () => {
-        els.presetSel.value = o.value;
+        // 点占位项「— 预设 —」= 快速套用星标收藏的默认预设（以前的行为）。
+        let pick = o.value;
+        if (!pick) {
+          const def = node._ezDefaultPreset;
+          if (!def || !def.name) { closePresetMenu(); return; }
+          pick = def.name;
+        }
+        els.presetSel.value = pick;
         syncPresetTrigger(node);
         closePresetMenu();
-        if (o.value) els.presetSel.dispatchEvent(new Event('change', { bubbles: true }));
+        applyPresetByName(node, pick).then(() => {
+          if (els.presetSel.value !== pick) els.presetSel.value = pick;
+          syncPresetTrigger(node);
+        });
       });
       item.appendChild(lab); item.appendChild(star);
       menu.appendChild(item);
@@ -540,7 +565,12 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
   async function loadCustomRatios(node) {
     const st = stateFor(node);
     let server = [];
-    try { const r = await apiFetch(RATIO_API); if (r && r.ok) server = Array.isArray(await r.json()) ? await r.json() : []; } catch (_) { server = []; }
+    try {
+      const r = await apiFetch(RATIO_API);
+      // 只能读一次 body：以前写成 Array.isArray(await r.json()) ? await r.json() : []，
+      // 第二次 json() 必抛（body 已消费）→ 整块掉进 catch → 服务端比例永远是空。
+      if (r && r.ok) { const arr = await r.json(); server = Array.isArray(arr) ? arr : []; }
+    } catch (_) { server = []; }
     const merged = Array.isArray(server) ? [...server] : [];
     (st.customRatios || []).forEach((r) => { if (r && merged.indexOf(r) < 0) merged.push(r); });
     st.customRatios = merged.filter((r) => r && FIXED_RATIOS.indexOf(r) < 0);
@@ -663,19 +693,17 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         try { pos = node.getConnectionPos(item.in, item.i, [0, 0]); } catch (_) { pos = null; }
         if ((!pos || !pos.length) ) { try { pos = item.in ? node.getInputPos(item.i) : node.getOutputPos(item.i); } catch (_2) { pos = null; } }
         if (!pos || !pos.length) { item.el.style.display = 'none'; return; }
-        const np = node.pos || [0, 0];
-        const nodeRelX = (Number(pos[0]) || 0) - (Number(np[0]) || 0);
-        const nodeRelY = (Number(pos[1]) || 0) - (Number(np[1]) || 0);
-        const cx = rect.left + nodeRelX * sx;
-        const cy = rect.top + nodeRelY * sy;
+        // ★ 用画布变换换算（跟画布画圆点同一套口径）
+        const pt = ezfxGraphToScreen(node, pos, rect);
+        const cx = pt.x, cy = pt.y;
         item.el.style.display = 'inline-flex';
         item.el.style.zIndex = '20';
-        const zoom = Math.max(0.5, sx);
+        const zoom = Math.max(0.5, pt.zoom);
         item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px';
         item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
         const tw = item.el.offsetWidth;
         const th = item.el.offsetHeight || 16;
-        const offX = 10 * zoom;
+        const offX = ezfxLabelOffX(item.in, zoom);
         item.el.style.left = (item.in ? cx - tw - offX : cx + offX) + 'px';
         item.el.style.top = (cy - th / 2) + 'px';
       });
@@ -690,9 +718,9 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍
         update();
       };
-      scheduleOnRedraw(update);
-      onLocaleChange(update);
-      onThemeChange(() => { try { drawCanvas(node); } catch (_) { /* 忽略 */ } });   // 画布颜色也跟着主题重画
+      ezScheduleNodeRedraw(node, update);
+      ezBindHooks(node, onLocaleChange(update));
+      ezBindHooks(node, onThemeChange(() => { try { drawCanvas(node); } catch (_) { /* 忽略 */ } }));   // 画布颜色也跟着主题重画
       schedule();
     }
   }
@@ -758,7 +786,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
     ctrl.appendChild(aspectSel);
 
     // 预设行（选中即自动生效，无加载按钮）+ 自定义比例输入（放预设删除按钮之后）
-    const presetRow = el('div', 'fl-row wrap');
+    const presetRow = el('div', 'fl-row');   // 预设行固定一行，不换行（窄了就横向滚动）
     const presetSel = el('select', 'fl-sel'); presetSel.style.display = 'none';
     const presetBtn = el('button', 'fl-btn fl-preset-btn'); presetBtn.textContent = ezT('— Preset —');
     presetBtn.title = 'Open the preset list';
@@ -1015,6 +1043,12 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
   }
 
   function applyPresetByName(node, name) {
+    const st0 = stateFor(node);
+    // 守卫下沉到这里：以前只有「普通点击」路径检查，星标收藏会绕过它直接套用预设。
+    if (st0.externalWH && !st0.force) {
+      uiConfirm(ezT('External width/height is connected; turn on Force to apply presets'));
+      return Promise.resolve();
+    }
     return loadPresetList().then((list) => {
       const p = list.find((x) => x.name === name);
       if (!p) return;
@@ -1085,13 +1119,13 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         els.limitCustom.style.display = 'none';
         st.limit = int(els.limitSel.value, DEFAULT_LIMIT);
       }
-      st.limit = Math.max(64, st.limit);
+      if (!limitFits(st)) return;
       const aligned = applyAlignLimit(st.width, st.height, st);
       st.width = aligned.w; st.height = aligned.h;
       syncToConfig(node); refresh(node);
     });
     els.limitCustom.addEventListener('input', () => {
-      st.limit = Math.max(64, int(els.limitCustom.value, DEFAULT_LIMIT));
+      st.limit = int(els.limitCustom.value, DEFAULT_LIMIT); if (!limitFits(st)) return;
       const aligned = applyAlignLimit(st.width, st.height, st);
       st.width = aligned.w; st.height = aligned.h;
       syncToConfig(node); refresh(node);
@@ -1113,7 +1147,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
 
     // 对齐
     els.alignInput.addEventListener('change', () => {
-      st.align = Math.max(1, int(els.alignInput.value, 8));
+      st.align = snap8(int(els.alignInput.value, 8));
       const aligned = applyAlignLimit(st.width, st.height, st);
       st.width = aligned.w; st.height = aligned.h;
       syncToConfig(node); refresh(node);
@@ -1266,7 +1300,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
   }
 
   function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
     const w = configWidget(node);
     if (!w || node._flCfgHid) return;
@@ -1306,6 +1340,21 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
   }
 
   function setupNode(node) {
+    // 运行后把「实际生效的宽高」写回面板：等同于用户手动输入了这组值
+    // （外部宽高接线时，面板拿不到运行期值，只能等节点把 ui 回传过来）
+    node.onExecuted = function (msg) {
+      try {
+        const sz = msg && msg.fl_size && msg.fl_size[0];
+        if (!sz || sz.length < 3) return;
+        const st = stateFor(node);
+        st.width = Math.max(8, int(sz[0], st.width));
+        st.height = Math.max(8, int(sz[1], st.height));
+        st.batchSize = Math.max(1, int(sz[2], st.batchSize));
+        applyBestLimit(st.width, st.height, st);
+        syncToConfig(node);
+        refresh(node);
+      } catch (_) { /* 忽略 */ }
+    };
     if (!node || node._flSetup) return;
     try {
       if (typeof node.addDOMWidget !== 'function') {
@@ -1318,7 +1367,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       // 供 EzFlex-MainControl 读取/套用本节点宽高预设
       if (!node._ezLatentAPI) node._ezLatentAPI = {
         presetNames: () => loadPresetList().then((list) => seedPresets(list)).then((l) => l.map((p) => p.name)),
-        current: () => { const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) return s.value; return ezPanelState(node, 'FlatPreset') || ''; },
+        current: () => { const s = stateFor(node)._els && stateFor(node)._els.presetSel; const v = s && s.value; return v || ezPanelState(node, 'FlatPreset') || ''; },
         setCurrent: async (name) => {
           if (!name) { ezPanelState(node, 'FlatPreset', ''); const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s) s.value = ''; syncPresetTrigger(node); return; }
           const list = await loadPresetList();
@@ -1326,6 +1375,16 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
           ezPanelState(node, 'FlatPreset', name); await applyPresetByName(node, name);
           const s = stateFor(node)._els && stateFor(node)._els.presetSel; if (s && s.value !== name) { s.value = name; }
           syncPresetTrigger(node);
+          try { window.dispatchEvent(new CustomEvent('ezflex:config-changed', { detail: { node: node } })); } catch (_) {}
+        },
+        applyDefault: async () => {
+          const d = await loadDefaultPreset(node);
+          if (!d || !d.name) return;
+          await applyPresetByName(node, d.name);
+          const s = stateFor(node)._els && stateFor(node)._els.presetSel;
+          if (s) s.value = d.name;
+          syncPresetTrigger(node);
+          try { window.dispatchEvent(new CustomEvent('ezflex:config-changed', { detail: { node: node } })); } catch (_) {}
         },
         refresh: () => refresh(node),
       };
@@ -1340,7 +1399,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
         hideOnZoom: false,
         canvasOnly: !window.__ezflexIsVueNodes(),
         margin: 4,
-        getMinHeight: () => 340,
+        getMinHeight: () => 120,
         getValue: () => '{}',
         setValue: () => {}
       });
@@ -1352,15 +1411,13 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       node.__flPanelH = panelH;
       const desired = [MIN_WIDTH, panelH()];
       node.__flSize = desired;
-      if (typeof node.setSize === 'function') node.setSize([...desired]);
-      try { node.min_size = [0, minH]; } catch (_) { /* 忽略 */ }
+      ezApplyDefaultSize(node, desired[0], desired[1]);
+      try { node.min_size = [0, 120]; } catch (_) { /* 忽略 */ }
       const _vueH = () => (window.__ezflexIsVueNodes && window.__ezflexIsVueNodes()) ? 30 : 0; // Vue 下节点高度 = 内容高 + 标题偏移
-      widget.computeSize = function () {
-        const s = node.size || node.__flSize || desired;
-        return [Math.max(MIN_WIDTH, s[0]), panelH() + _vueH()];
-      };
+      // widget 高度 = 节点高度 - 标题偏移（Vue 下 30）：保证面板正好填满节点主体，不往下溢出
+      // 不写 computeSize：它跟着 node.size 走会和前端布局互相喂，导致每次重绘 +30
       widget.options = widget.options || {};
-      widget.options.getMinHeight = () => Math.max(minH, panelH() + _vueH());
+      widget.options.getMinHeight = () => 120;
       widget.options.getMaxHeight = () => 2000;
       try { widget.y = 0; widget.last_y = 0; } catch (_) { /* 忽略 */ }
 
@@ -1407,7 +1464,7 @@ console.info('[FreeLatent] freelatent_node.js loaded (addDOMWidget canvas picker
       return r;
     };
     const prevCfg = nodeType.prototype.onConfigure;
-    nodeType.prototype.onConfigure = function () {
+    nodeType.prototype.onConfigure = function () { this.__ezSizeRestored = true;
       const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
       loadFromConfig(this);
       convertPrimitiveToSocket(this);

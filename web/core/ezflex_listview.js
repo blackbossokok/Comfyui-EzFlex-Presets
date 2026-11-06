@@ -1,7 +1,9 @@
+// 模块：媒体条目元素（ezMediaItemEl）+ 列表/灯箱预览（openEzListPreview）：横向滚动条、滚轮横移
 // EzFlex 通用「媒体列表预览」弹窗：MediaLoader 式外壳（固定尺寸），PreviewAny 的列表视窗与
 // TimeLine 的素材库弹窗共用同一份实现（以前三处各写一遍）。壳负责：遮罩 / 标题 / 计数 / 关闭 /
 // 主区 / 底部缩略图条 + 悬停左右箭头 / ←→Esc（document 捕获阶段，不带动画布）/ 弹窗栈。
 // 调用方只给 items + 渲染回调，媒体怎么画由回调或 ezMediaItemEl 决定。
+import { api } from "../../../scripts/api.js";
 import { ezT } from "./ezflex_i18n.js";
 import { ezPushModal, ezPopModal, ezIsTopModal, makeAudioPlayer } from "./ezflex_service.js";
 import { ezThemeInit } from "./ezflex_theme.js";
@@ -67,7 +69,7 @@ export function ezMediaItemEl(it, onOpen3D) {
   if (it && it.text != null) tx.textContent = it.text;
   else if (url) {
     tx.textContent = ezT('Loading…');
-    fetch(url).then((r) => r.text()).then((t) => { if (tx.isConnected) tx.textContent = (t || ezT('(empty file)')).slice(0, 60000); }).catch(() => { if (tx.isConnected) tx.textContent = ezT('Cannot preview content'); });
+    (api && typeof api.fetchApi === 'function' ? api.fetchApi(url) : fetch(url)).then((r) => r.text()).then((t) => { if (tx.isConnected) tx.textContent = (t || ezT('(empty file)')).slice(0, 60000); }).catch(() => { if (tx.isConnected) tx.textContent = ezT('Cannot preview content'); });
   } else tx.textContent = (it && it.name) || '';
   return tx;
 }
@@ -139,7 +141,6 @@ export function openEzListPreview(opts) {
       strip.appendChild(th);
     });
   };
-  if (opts.actions) { try { const a = opts.actions(api); if (a) act.appendChild(a); } catch (_) {} }
   const close = () => {
     try { main.querySelectorAll('video,audio').forEach((m) => { try { m.pause(); } catch (_) {} }); } catch (_) {}
     try { ov.remove(); } catch (_) {}
@@ -147,6 +148,17 @@ export function openEzListPreview(opts) {
     if (tok) ezPopModal(tok);
     if (opts.onClose) { try { opts.onClose(); } catch (_) {} }
   };
+  // ★ 必须在 opts.actions(api) 之前定义：以前 actions 在 api 的 const 之前调用，碰到 TDZ 直接抛，
+  //   被外层 try 吞掉 → 自定义动作按钮永远不出现。
+  const api = {
+    index: () => idx,
+    items: () => items,
+    redraw: () => draw(),
+    setIndex: (i) => { idx = Math.max(0, Math.min(items.length - 1, i | 0)); draw(); },
+    setItems: (list) => { items.length = 0; (list || []).forEach((v) => items.push(v)); idx = Math.min(idx, Math.max(0, items.length - 1)); buildStrip(); draw(); },
+    close: () => close(),
+  };
+  if (opts.actions) { try { const a = opts.actions(api); if (a) act.appendChild(a); } catch (_) {} }
   const onKey = (e) => {
     if (!ov.isConnected) { document.removeEventListener('keydown', onKey, true); return; }
     if (!ezIsTopModal(tok)) return;   // 上面还有弹窗时不动
@@ -155,14 +167,6 @@ export function openEzListPreview(opts) {
     if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopImmediatePropagation(); go(-1); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); e.stopImmediatePropagation(); go(1); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); }
-  };
-  const api = {
-    index: () => idx,
-    items: () => items,
-    redraw: () => draw(),
-    setIndex: (i) => { idx = Math.max(0, Math.min(items.length - 1, i | 0)); draw(); },
-    setItems: (list) => { items.length = 0; (list || []).forEach((v) => items.push(v)); idx = Math.min(idx, Math.max(0, items.length - 1)); buildStrip(); draw(); },
-    close: () => close(),
   };
   x.addEventListener('click', close);
   ov.addEventListener('mousedown', (e) => { if (e.target === ov) close(); });

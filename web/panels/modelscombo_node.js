@@ -1,15 +1,93 @@
+// 面板：ModelsCombo 面板：模型/LoRA 列表、预设、动态输出口与端口同步
 // ModelsCombo 节点内嵌控件（参考 comfyui-aaalice-nodes 的 addDOMWidget 做法）。
 // 直接在 ModelsComboLoader 节点里渲染配置器 HTML/CSS/JS，状态实时写回 config 输入框，
 // 由 config 输入框进 prompt、驱动 Python 节点 → 不再依赖会被缓存的独立 HTML 页面。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezSanitizeHtml, ezPanelState } from "./ezflex_service.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+// 预设存档的请求统一走 api.fetchApi（反代子路径部署时裸 fetch('/…') 会 404）。
+const ezFetch = (p, o) => (api && typeof api.fetchApi === 'function') ? api.fetchApi(p, o) : fetch(p, o);
+import {ezBindHooks, ezDropOutput, makeDomWidgetHitThrough, scheduleOnRedraw, pumpFrames, ezSanitizeHtml, ezSafeUrl, ezPanelState, ezfxGraphToScreen, ezfxLabelOffX, ezCaptureSocketLinks, ezApplySocketLinks , ezDropInput , ezScheduleNodeRedraw } from "../core/ezflex_service.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
 
 // javascript:/vbscript:/data:text/html 这类 URL 不落到 href/src/window.open（模型元数据来自外部文件）
-const _UNSAFE_URL_RE = /^\s*(javascript|vbscript|data:text\/html)/i;
-function isUnsafeUrl(u) { return _UNSAFE_URL_RE.test(String(u || '')); }
+// 用 ezflex_service 的统一白名单（同源绝对路径 / http(s) / blob / data:image|video|audio），
+// 本地那份只挡三种前缀，漏了 `//host` 与 `file:`。
+
+// ===== 自定义预设名（选中预设后自动填入 ⇒ 改原预设不用重打名字）=====
+// 三个状态都存 node.properties（LiteGraph 随工作流序列化 ⇒ 刷新页面 / 切工作台 / 重启后端都会恢复）：
+//   ezComboPreset            当前在下拉里选中的预设名（原有）
+//   ezComboPresetName        自定义名输入框里的内容
+//   ezComboPresetNameEdited  这个名字是不是用户**手打的**
+// 规则：
+//   · 在下拉里选一个预设 ⇒ 名字自动变成那个预设名（点「保存」就是覆盖它）；
+//   · 用户自己改过名字 ⇒ 以后一律以他打的那个为准（刷新/重启也不会被选中的预设盖掉）；
+//   · 两条都写进 properties ⇒ 刷新/重启后照旧。
+// 纯函数放模块顶层（不在 IIFE 里）⇒ 测试可以直接喂 properties 验语义，不用搭 DOM。
+export function mcPresetNameView(props) {
+  const p = props || {};
+  const typed = (typeof p.ezComboPresetName === 'string') ? p.ezComboPresetName : '';
+  const sel = (typeof p.ezComboPreset === 'string') ? p.ezComboPreset : '';
+  if (p.ezComboPresetNameEdited) return typed;   // 手打过 ⇒ 用户说了算
+  return sel || typed;                           // 否则跟随选中的预设（一个都没选 ⇒ 用手打残留）
+}
+// 写 properties 时用的补丁（edited = 这次写入算不算「手打」）
+export function mcPresetNamePatch(name, edited) {
+  return { ezComboPresetName: String(name == null ? '' : name), ezComboPresetNameEdited: !!edited };
+}
+
+// 最近一次拉到的预设表（保存按钮靠它判「这一下是覆盖还是新建」）
+let _presetList = [];
+export function mcPresetSetList(list) { _presetList = Array.isArray(list) ? list : []; }
+export function mcPresetGetList() { return _presetList; }
+
+// ---- 输入框读写（提到模块顶层 ⇒ 测试可以拿个假节点真跑，不用搭 DOM）----
+export function mcPresetNameEl(node) {
+  const e = node && node._mcPresetEls;
+  return (e && e.name) ? e.name : null;
+}
+// 保存按钮的提示跟着名字变：撞上已有预设 ⇒ 明说「这一下会覆盖」，避免误覆盖
+export function mcPaintSaveBtn(node) {
+  const e = node && node._mcPresetEls;
+  if (!e || !e.save) return;
+  const nm = String((e.name && e.name.value) || '').trim();
+  const hit = !!nm && _presetList.some((p) => p && p.name === nm);
+  try { e.save.title = hit ? (ezT('Overwrite preset') + '「' + nm + '」') : ezT('Save as preset'); } catch (_) { /* 忽略 */ }
+  try { if (e.name && e.name.classList && e.name.classList.toggle) e.name.classList.toggle('mc-overwrite', hit); } catch (_) { /* 忽略 */ }
+}
+// 把名字写进输入框 + properties。fromSel = 由「选中预设」触发 ⇒ 名字就是那个预设名，
+// 所以顺手把 ezComboPreset 也写掉 + 清掉「手打过」标记（**不依赖调用方先写**，否则
+// 「选中 A 却显示 B」这种不一致会静默存在）。
+export function mcApplyPresetName(node, name, fromSel) {
+  const patch = mcPresetNamePatch(name, false);
+  ezPanelState(node, 'ComboPresetName', patch.ezComboPresetName);
+  if (fromSel) {
+    ezPanelState(node, 'ComboPreset', patch.ezComboPresetName);
+    ezPanelState(node, 'ComboPresetNameEdited', false);
+  }
+  const inp = mcPresetNameEl(node);
+  if (inp && inp.value !== patch.ezComboPresetName) inp.value = patch.ezComboPresetName;
+  mcPaintSaveBtn(node);
+}
+// 从 properties 恢复（刷新/切工作台/重启后；onConfigure 也会调）
+export function mcRestorePresetName(node) {
+  const inp = mcPresetNameEl(node);
+  if (!inp) return;
+  // 正在这个框里打字就别抢（undo/redo 也会走 onConfigure）
+  if (typeof document !== 'undefined' && document.activeElement === inp) { mcPaintSaveBtn(node); return; }
+  const want = mcPresetNameView(node.properties || {});
+  if (inp.value !== want) inp.value = want;
+  mcPaintSaveBtn(node);
+}
+// 用户手打：记下来（刷新/重启后仍然显示他打的那个）
+export function mcOnPresetNameInput(node) {
+  const inp = mcPresetNameEl(node);
+  if (!inp) return;
+  const patch = mcPresetNamePatch(inp.value, true);
+  ezPanelState(node, 'ComboPresetName', patch.ezComboPresetName);
+  ezPanelState(node, 'ComboPresetNameEdited', true);
+  mcPaintSaveBtn(node);
+}
 
 // ===== 现代乳白风样式（ModelsCombo 内嵌面板同套观感）=====
 const MC_CSS = `
@@ -63,6 +141,7 @@ const MC_CSS = `
 .mc-preset-name{flex:0.3 0 84px;min-width:58px;height:26px;padding:4px 8px;font-size:10px;border:1px solid var(--ez-border);border-radius:5px;background:var(--ez-bg);outline:none;font-family:inherit;box-sizing:border-box;}
 .mc-preset-btn{height:25px;padding:4px 12px;font-size:10px;font-weight:600;border:1px solid var(--ez-strong);border-radius:5px;background:var(--ez-strong);color:var(--ez-on-strong);cursor:pointer;white-space:nowrap;font-family:inherit;transition:.15s ease;box-sizing:border-box;}
 .mc-preset-btn:hover{background:var(--ez-strong);border-color:var(--ez-strong);box-shadow:0 4px 10px rgba(43,58,74,.18);}
+.mc-preset-name.mc-overwrite{border-color:var(--ez-strong);box-shadow:inset 0 0 0 1px var(--ez-strong);}
 .mc-preset-sel{flex:0 0 92px;min-width:64px;height:26px;padding:4px 6px;font-size:10px;border:1px solid var(--ez-border);border-radius:5px;background:var(--ez-bg);outline:none;cursor:pointer;font-family:inherit;box-sizing:border-box;}
 .mc-combo{position:relative;flex:1.5 1 0;min-width:0;}
 .mc-combo-trigger{width:100%;height:26px;padding:4px 6px;font-size:10px;border:1px solid var(--ez-border);border-radius:5px;background:var(--ez-bg);outline:none;cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:4px;box-sizing:border-box;}
@@ -143,14 +222,14 @@ const MC_CSS = `
 .mc-b-thumb{position:relative;aspect-ratio:3/4;background:var(--ez-surface-4);overflow:hidden;}
 .mc-b-thumb img,.mc-b-thumb video{width:100%;height:100%;object-fit:cover;display:block;}
 .mc-b-noph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--ez-fg-muted);font-size:11px;background:var(--ez-surface-4);}
-.mc-b-type{position:absolute;top:8px;left:8px;padding:2px 8px;font-size:10px;font-weight:600;border-radius:6px;background:var(--ez-strong);color:var(--ez-on-strong);backdrop-filter:blur(2px);}
+.mc-b-type{position:absolute;top:8px;left:8px;padding:2px 8px;font-size:10px;font-weight:600;border-radius:6px;background:var(--ez-strong);color:var(--ez-on-strong);}
 .mc-b-type.checkpoint{background:rgba(74,127,168,.85);}
 .mc-b-type.unet{background:rgba(58,138,106,.85);}
 .mc-b-type.lora{background:rgba(168,90,106,.85);}
-.mc-b-info{position:absolute;left:0;right:0;bottom:0;padding:10px 10px 8px;display:flex;flex-direction:column;gap:3px;background:linear-gradient(180deg,rgba(0,0,0,0) 0%,rgba(0,0,0,.42) 55%,rgba(0,0,0,.62) 100%);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);}
+.mc-b-info{position:absolute;left:0;right:0;bottom:0;padding:10px 10px 8px;display:flex;flex-direction:column;gap:3px;background:linear-gradient(180deg,rgba(0,0,0,0) 0%,rgba(0,0,0,.42) 55%,rgba(0,0,0,.62) 100%);}
 .mc-b-name{font-size:12px;font-weight:700;color:var(--ez-on-strong);line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;text-shadow:0 1px 2px rgba(0,0,0,.45);}
-.mc-b-version{display:inline-flex;align-self:flex-start;padding:1px 8px;font-size:10px;font-weight:600;color:var(--ez-on-strong);border:1px solid rgba(255,255,255,.5);border-radius:5px;background:var(--ez-strong);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);}
-.mc-b-add{position:absolute;top:8px;right:8px;z-index:3;width:30px;height:30px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:var(--ez-surface);color:var(--ez-fg);font-size:18px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;}
+.mc-b-version{display:inline-flex;align-self:flex-start;padding:1px 8px;font-size:10px;font-weight:600;color:var(--ez-on-strong);border:1px solid rgba(255,255,255,.5);border-radius:5px;background:var(--ez-strong);}
+.mc-b-add{position:absolute;top:8px;right:8px;z-index:3;width:30px;height:30px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:var(--ez-surface);color:var(--ez-fg);font-size:18px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;}
 .mc-b-add:hover{background:var(--ez-surface-3);transform:scale(1.05);}
 .mc-b-add.added{background:var(--ez-ok);border-color:rgba(74,106,90,.9);color:var(--ez-on-strong);}
 .mc-b-add.added:hover{background:rgba(61,90,77,.95);}
@@ -351,7 +430,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     // 空节点（默认口没有连线）不受影响，照常收敛成常驻的 trigger_words。
     if (!st.loaders.length && (node.outputs || []).some((o) => (Array.isArray(o.links) && o.links.length > 0) || o.link != null)) return false;
     const mains = st.loaders.filter((l) => ['checkpoint', 'unet', 'clip', 'vae'].indexOf(l.type) >= 0);
-    const sr = (nm) => String(nm || '').split('.').pop() || '';
+    // 端口名 = 加载器名原样，只剥模型文件扩展名（名字里的点要保留：wan2.2 不能变成 2.2）。
+    // Python 的 _mc_port_name 用同一条规则 —— 两边必须一致，否则画布端口名和 /object_info 对不上。
+    const sr = (nm) => String(nm || '').replace(/\.(safetensors|ckpt|pt|pth|bin|sft)$/i, '');
     // 输出顺序 = 加载器顺序：每个主加载器按自身类型依次产出 model/clip/vae（checkpoint 三者相邻），与 Python load_combo 一致
     const want = [];
     mains.forEach((l) => {
@@ -365,6 +446,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     // 快照旧输出：优先按「名称」复用（拖拽排序时连接跟随同名 socket）。
     // 名称变了但「类型+位置」没变（如 anima→krea2 都是 checkpoint）时按位置+类型复用该 socket（保留连接，只改名）。
     const old = (node.outputs || []).slice();
+    const cap = ezCaptureSocketLinks(node);   // 重排前按 socket 拍连线快照（新版前端 socket.links 按下标变）
     const used = new Set();
     const byName = {};
     old.forEach((o, i) => { if (o && o.name) byName[o.name] = i; });
@@ -387,7 +469,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     old.forEach((o, i) => {
       if (!used.has(i)) {
         const idx = node.outputs.indexOf(o);
-        if (idx >= 0) { node.removeOutput(idx); changed = true; }
+        if (idx >= 0) { if (ezDropOutput(node, idx)) changed = true; }
       }
     });
     // 3) 原地重排 node.outputs 成 want 顺序（保持数组引用不变），并把每个输出 link 的 origin_slot 改成它在新数组里的下标
@@ -396,18 +478,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       node.outputs.length = seq.length;
       changed = true;
     }
-    // 连接存的是 o.links（数组，兼容旧版 o.link）。重排后把每个 link 的 origin_slot 改成它在新数组里的下标，
+    // 重排后把每个 link 的 origin_slot 改成它 socket 在新数组里的下标（按快照算，不读搬完后的 socket.links），
     // 这样下游实际接的是哪个输出才对得上（不重排的话视觉对但真实连接错）。
-    node.outputs.forEach((o, i) => {
-      const ids = [];
-      if (Array.isArray(o.links)) ids.push(...o.links);
-      if (o.link != null) ids.push(o.link);
-      ids.forEach((lid) => {
-        if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) {
-          try { node.graph.links[lid].origin_slot = i; } catch (_) { /* 忽略 */ }
-        }
-      });
-    });
+    ezApplySocketLinks(node, cap);
     // 清理残留的 model_in/clip_in/vae_in 输入口（本节点只输出不输入）
     (node.inputs || []).slice().forEach((x) => {
       if (x && x.name && /^(model_in|clip_in|vae_in)_/.test(x.name)) { node.removeInput(node.inputs.indexOf(x)); changed = true; }
@@ -423,13 +496,17 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   }
 
   // 把模型组合的 config 交给后端，让 ModelsComboLoader.RETURN_TYPES/RETURN_NAMES 与前端 socket 保持一致。
-  // 立即 POST（不防抖）：拖动/编辑一旦提交（updatePorts 只在 commit 时调用），类 RETURN_TYPES/RETURN_NAMES
-  // 必须立刻跟上 socket 顺序，否则其它依赖这些类属性判定端口类型/名称的节点（如读模型名）会读到旧值而报「不兼容」。
+  // ★ 防抖 150ms：改名输入框每个字符都会走 updatePorts → 这里，以前是「每键一次 POST」。
+  //   口类型全是 "*"（_DynamicOutputTypes），校验不依赖这份表；只影响端口名，晚 150ms 没有副作用。
   function syncOutputTypes(node) {
-    try {
-      const fetcher = api && typeof api.fetchApi === 'function' ? (p, o) => api.fetchApi(p, o) : (p, o) => fetch(p, o);
-      fetcher('/models_combo/outputs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: JSON.stringify(stateFor(node).loaders) }) }).catch(() => {});
-    } catch (_) { /* 忽略 */ }
+    if (node._mcOutT) clearTimeout(node._mcOutT);
+    node._mcOutT = setTimeout(() => {
+      node._mcOutT = null;
+      try {
+        const fetcher = api && typeof api.fetchApi === 'function' ? (p, o) => api.fetchApi(p, o) : (p, o) => fetch(p, o);
+        fetcher('/models_combo/outputs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: JSON.stringify(stateFor(node).loaders) }) }).catch(() => {});
+      } catch (_) { /* 忽略 */ }
+    }, 150);
   }
 
   // 诊断：列出每个输出 socket 挂载的加载器（名称/主索引/是其第几个端口），用于验证拖动后输出是否随加载器顺序变化。
@@ -660,6 +737,10 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     bar.appendChild(savePresetBtn);
     bar.appendChild(presetSel);
     bar.appendChild(delPresetBtn);
+    // ★ 自定义预设名的引用挂在节点上（刷新后 onConfigure / refreshPresetSel 靠它恢复）
+    node._mcPresetEls = { name: presetName, sel: presetSel, save: savePresetBtn, del: delPresetBtn };
+    presetName.addEventListener('input', () => mcOnPresetNameInput(node));
+    mcRestorePresetName(node);       // properties 若已还原就立刻显示；否则 onConfigure / refreshPresetSel 再补
     refreshPresetSel(presetSel, node);
 
     const list = el('div', 'mc-list');
@@ -1044,7 +1125,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     const loader = {
       id,
       type,
-      name: (LABEL[type] || type) + '_' + st.loaders.filter((l) => l.type === type).length,
+      name: _uniqueLoaderName(node, type, (LABEL[type] || type) + '_' + st.loaders.filter((l) => l.type === type).length),
       file: files.length ? files[0] : '',
       extra: defaultExtra(type),
       targetId: null
@@ -1120,32 +1201,42 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     d.textContent = ezT('—Preset—');
     sel.appendChild(d);
     let list = [];
-    try { const r = await fetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
+    try { const r = await ezFetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
+    if (!Array.isArray(list)) list = [];
+    mcPresetSetList(list);
     list.forEach((p) => { const o = el('option', null, { value: p.name }); o.textContent = p.name; sel.appendChild(o); });
     // 选中态存 node.properties（随工作流序列化/还原）：刷新、切工作台、重启都能恢复，且不用反查预设表
     const name = ezPanelState(node, 'ComboPreset') || '';
     if (name && list.some((p) => p.name === name)) sel.value = name;
+    mcRestorePresetName(node);   // ★ 自定义名一起恢复（此刻 properties 已还原）
   }
   async function savePreset(node, sel, name) {
     name = (name || '').trim();
     if (!name) { showWarn(node, ezT('Enter preset name')); return; }
     if (!stateFor(node).loaders.length) { showWarn(node, ezT('No loaders to save')); return; }
+    // 保存前先判：同名已存在 ⇒ 这一下是「覆盖」，提示要说清（别让用户以为新建了）
+    const overwrite = _presetList.some((p) => p.name === name);
     const cur = { name, loaders: JSON.parse(JSON.stringify(stateFor(node).loaders)) };
     try {
-      await fetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cur) });
+      await ezFetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cur) });
     } catch (_) { /* 忽略 */ }
     ezPanelState(node, 'ComboPreset', name);
+    // 名字已和预设对齐 ⇒ 不再算「手打」，刷新后跟着这个预设走
+    mcApplyPresetName(node, name, true);
     await refreshPresetSel(sel, node);
-    sel.value = name;
-    showWarn(node, ezT('Saved preset ') + name);
+    if (sel) sel.value = name;
+    showWarn(node, (overwrite ? ezT('Overwrote preset ') : ezT('Saved preset ')) + name);
   }
   async function loadPreset(node, sel, name) {
     if (!name) { showWarn(node, ezT('Select a preset')); return; }
     let list = [];
-    try { const r = await fetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
+    try { const r = await ezFetch(PRESET_API); list = await r.json(); } catch (_) { list = []; }
     const p = list.find((x) => x.name === name);
     if (!p) { showWarn(node, ezT('Preset does not exist')); return; }
     ezPanelState(node, 'ComboPreset', name);
+    // ★ 自动把「自定义预设名」改成该预设名 ⇒ 改完参数直接点保存就是覆盖原预设
+    mcApplyPresetName(node, name, true);
+    if (sel && sel.value !== name) sel.value = name;
     stateFor(node).loaders = parseLoaders(JSON.stringify(p.loaders));
     let mx = 0;
     stateFor(node).loaders.forEach((l) => { if (typeof l.id === 'number' && l.id > mx) mx = l.id; });
@@ -1156,10 +1247,12 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   async function deletePreset(node, sel) {
     const name = sel && sel.value;
     if (!name) { showWarn(node, ezT('Select a preset')); return; }
-    try { await fetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); } catch (_) { /* 忽略 */ }
+    try { await ezFetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); } catch (_) { /* 忽略 */ }
     await refreshPresetSel(sel, node);
-    sel.value = '';
+    if (sel) sel.value = '';
     ezPanelState(node, 'ComboPreset', '');
+    // ★ 自定义名**故意不清**：刚删掉的名字还留在框里，点保存就能原样存回来（防误删）
+    mcPaintSaveBtn(node);
     showWarn(node, ezT('Deleted preset ') + name);
   }
 
@@ -1823,7 +1916,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       link.target = '_blank'; link.rel = 'noopener';
       link.textContent = civ.modelId ? ('civitai.com/models/' + civ.modelId + (civ.id ? '?modelVersionId=' + civ.id : '')) : (civ.downloadUrl || '');
       const srcUrl = civ.modelId ? ('https://civitai.com/models/' + civ.modelId + (civ.id ? '?modelVersionId=' + civ.id : '')) : (civ.downloadUrl || '');
-      link.href = (!srcUrl || isUnsafeUrl(srcUrl)) ? '#' : srcUrl;
+      link.href = (!srcUrl || !ezSafeUrl(srcUrl)) ? '#' : srcUrl;
       sec.appendChild(link);
       if (civ.creator) { const c = el('div', 'mc-bd-text'); c.textContent = ezT('Author: ') + civ.creator; sec.appendChild(c); }
       if (civ.stats) {
@@ -1843,9 +1936,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       civ.images.slice(0, 12).forEach((im) => {
         if (!im.url) return;
         const g = document.createElement('img');
-        g.className = 'mc-bd-gal'; g.src = isUnsafeUrl(im.url) ? '' : im.url; g.alt = '';
+        g.className = 'mc-bd-gal'; g.src = !ezSafeUrl(im.url) ? '' : im.url; g.alt = '';
         g.loading = 'lazy';
-        g.onclick = () => { if (isUnsafeUrl(im.url)) return; try { window.open(im.url, '_blank'); } catch (_) { /* 忽略 */ } };
+        g.onclick = () => { if (!ezSafeUrl(im.url)) return; try { window.open(im.url, '_blank'); } catch (_) { /* 忽略 */ } };
         gal.appendChild(g);
       });
       sec.appendChild(gal); body.appendChild(sec);
@@ -1926,25 +2019,25 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
           try { pos = item.in ? node.getInputPos(item.i) : node.getOutputPos(item.i); } catch (_2) { pos = null; }
         }
         if (!pos || !pos.length) { item.el.style.display = 'none'; return; }
-        // 标签对齐【原生 socket 圆点】：用节点 DOM rect + socket 相对坐标（位置最准）
-        const nodeW = (node.size && node.size[0]) || 1;
-        const sx = rect.width / nodeW;
-        const gx = (pos && pos[0]) || 0;
-        const gy = (pos && pos[1]) || 0;
-        const np = node.pos || [0, 0];
-        const nodeRelX = gx - (np[0] || 0);
-        const nodeRelY = gy - (np[1] || 0);
-        const cx = rect.left + nodeRelX * sx;
-        const cy = rect.top + nodeRelY * sy;
+        // 标签对齐【原生 socket 圆点】：★ 用画布变换换算（跟画布画圆点同一套口径）
+        const pt = ezfxGraphToScreen(node, pos, rect);
+        const cx = pt.x, cy = pt.y;
         item.el.style.display = 'inline-flex';
         item.el.style.zIndex = '20';
-        const zoom = Math.max(0.5, sx);
+        const zoom = Math.max(0.5, pt.zoom);
         // 黑框字号/内边距随画布缩放（放大后文字+框一起变大，匹配圆点）
         item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px';
         item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
-        const tw = item.el.offsetWidth;
-        const th = item.el.offsetHeight || 16;
-        const offX = 10 * zoom;
+        // 尺寸缓存：上面刚改过 fontSize/padding，直接读 offsetWidth 会强制同步布局（每个口每帧一次）；
+        // 只有缩放/文字变化时才重量，静止时不读布局。
+        const sig = ((zoom * 100) | 0) + '|' + item.el.textContent;
+        if (item._twSig !== sig) {
+          const w = item.el.offsetWidth, h = item.el.offsetHeight || 16;
+          if (w > 0) { item._tw = w; item._th = h; item._twSig = sig; }
+        }
+        const tw = item._tw > 0 ? item._tw : item.el.offsetWidth;
+        const th = item._tw > 0 ? item._th : (item.el.offsetHeight || 16);
+        const offX = ezfxLabelOffX(item.in, zoom);
         item.el.style.left = (item.in ? cx - tw - offX : cx + offX) + 'px';
         item.el.style.top = (cy - th / 2) + 'px';
         node._mcOutPosLogged = true;
@@ -1960,15 +2053,15 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
         // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍
         update();
       };
-      scheduleOnRedraw(update);
-      onLocaleChange(() => { try { render(node); } catch (_) {} update(); });   // 语言切换即时重画
+      ezScheduleNodeRedraw(node, update);
+      ezBindHooks(node, onLocaleChange(() => { try { render(node); } catch (_) {} update(); }));   // 语言切换即时重画
       schedule();
     }
   }
 
   // 隐藏 Python 端暴露的 config 文本框（完全归零，像 WebUI-Prompt-Bridge 那样，让面板从顶部填充）
   function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
     const w = configWidget(node);
     if (!w || node._mcCfgHid) return;
@@ -2031,8 +2124,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       loadFromConfig(node);
       // 供 EzFlex-MainControl 读取/套用本节点预设
       if (!node._ezComboAPI) node._ezComboAPI = {
-        presetNames: async () => { try { const r = await fetch(PRESET_API); return (await r.json()).map((p) => p.name); } catch (_) { return []; } },
-        current: () => { const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); if (s) return s.value; return ezPanelState(node, 'ComboPreset') || ''; },
+        presetNames: async () => { try { const r = await ezFetch(PRESET_API); return (await r.json()).map((p) => p.name); } catch (_) { return []; } },
+        current: () => { const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); const v = s && s.value; return v || ezPanelState(node, 'ComboPreset') || ''; },
         setCurrent: async (name) => {
           if (!name) {
             ezPanelState(node, 'ComboPreset', '');
@@ -2040,10 +2133,11 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
             const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); if (s) s.value = '';
             return;
           }
-          const list = await (async () => { try { const r = await fetch(PRESET_API); return await r.json(); } catch (_) { return []; } })();
+          const list = await (async () => { try { const r = await ezFetch(PRESET_API); return await r.json(); } catch (_) { return []; } })();
           if (!list.some((p) => p.name === name)) return; // 预设不存在则不动
           ezPanelState(node, 'ComboPreset', name); await loadPreset(node, null, name);
           const s = node._mcRoot && node._mcRoot.querySelector('.mc-preset-sel'); if (s && s.value !== name) { s.value = name; }
+          try { window.dispatchEvent(new CustomEvent('ezflex:config-changed', { detail: { node: node } })); } catch (_) {}
         },
         refresh: () => render(node),
       };
@@ -2081,14 +2175,10 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       const GUTTER = { x: 72, y: 20 };
       node._mcGutter = GUTTER;
       const _vueH = () => (window.__ezflexIsVueNodes && window.__ezflexIsVueNodes()) ? 30 : 0; // Vue 下节点高度 = 内容高 + 标题偏移
-      widget.computeSize = function () {
-        // widget 最小宽 = max(600, 内容行宽)，不随节点当前宽变——避免「widget=节点宽」反馈导致拉不回去
-        const s = node.size || node.__mcSize || desired;
-        const cw = Math.max(MIN_WIDTH, estimateRowWidth(node));
-        return [Math.max(200, cw), panelH() + _vueH()];
-      };
+      // 不写 computeSize：本前端只要看到 computeSize 就把 widget 固定成那么高（节点拉高后下面就是空白）；
+      // 交给 computeLayoutSize + distributeSpace，widget 会自动吃掉节点剩余高度，getMinHeight 负责下限。
       widget.options = widget.options || {};
-      widget.options.getMinHeight = () => Math.max(minH, panelH() + _vueH());
+      widget.options.getMinHeight = () => Math.max(minH, panelH());   // 只算内容高，不要再加标题偏移
       widget.options.getMaxHeight = () => 2000;
       // webui-prompt-bridge：清 y + 贴顶
       try { widget.y = 0; widget.last_y = 0; } catch (_) { /* 忽略 */ }
@@ -2138,7 +2228,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
       setTimeout(hideConfigWidget, 60, node);
       void fetchFiles(node);
       // 延迟再读一次 config（等 ComfyUI 恢复工作流里的 config 值后），否则自定义名会丢
-      setTimeout(() => { try { loadFromConfig(node); render(node); updatePorts(node, true); syncOutputTypes(node); } catch (_) { /* 忽略 */ } }, 400);
+      setTimeout(() => { try { loadFromConfig(node); mcRestorePresetName(node); render(node); updatePorts(node, true); syncOutputTypes(node); } catch (_) { /* 忽略 */ } }, 400);
     } catch (e) {
       console.error('[ModelsCombo] widget init failed:', e);
     }
@@ -2157,6 +2247,9 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     nodeType.prototype.onConfigure = function () {
       const r = prevConfig ? prevConfig.apply(this, arguments) : undefined;
       loadFromConfig(this);
+      // ★ configure 一定在 onNodeCreated 之后、且此时 properties 已还原 ⇒ 这里恢复自定义预设名最可靠
+      //   （onNodeCreated 时 properties 还是空的，见 MEMORY 0.1 生命周期）
+      try { mcRestorePresetName(this); } catch (_) { /* 忽略 */ }
       render(this);
       return r;
     };
@@ -2175,6 +2268,7 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     node._mcOutEls = [];
     try { if (node._mcRoot) node._mcRoot.remove(); } catch (_) { /* 忽略 */ }
     try { if (_bbNode === node) closeLoraBrowser(); } catch (_) { /* 忽略 */ }
+    node._mcPresetEls = null;
     node._mcSetup = false;
   }
 

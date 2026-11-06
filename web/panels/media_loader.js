@@ -1,18 +1,33 @@
+// 面板：MediaLoader 面板：素材网格、分组/卡片、上传与浏览、固定槽位
 // EzFlex-MediaLoader 素材加载器（内嵌 addDOMWidget 面板）。
 // 数据模型（config widget JSON）：{ groups:[{id,name,cards:[{id,name,items:[{id,files:[{id,name,path,subfolder,dir,type}]}]}]}],
 //   currentGroupId, currentPreset }。
 // 面板结构仿 ModelsCombo/PreviewAny：透明外壳 .eml-shell 撑满节点，内层 .eml-root 带 margin 内缩露 socket。
 // 每张「素材卡片」对应一个深红 * 输出端口，标签 = 分组名_卡片名，带半透明黑框标签叠加层。
 // 文件来源：服务器 input 目录（/media_loader/files），非浏览器本地文件（无法拿到服务器路径）。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { ezPruneDanglingLinks } from "./ezflex_service.js";
-import { NODE_TYPES, nodeTypeOf, configWidget, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText, uiPrompt, uiConfirm, makeAudioPlayer, notifyConfigChanged, scheduleOnRedraw, pumpFrames, EZ_PERF, ezPushModal, ezPopModal, ezIsTopModal, TYPE_ICONS } from "./ezflex_service.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import {ezBindHooks, ezApplyDefaultSize, ezPruneDanglingLinks , ezDropInput , ezScheduleNodeRedraw } from "../core/ezflex_service.js";
+import { NODE_TYPES, nodeTypeOf, configWidget, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText, uiPrompt, uiConfirm, uiToast, ezLocalOnlyNotice, makeAudioPlayer, notifyConfigChanged, scheduleOnRedraw, pumpFrames, EZ_PERF, ezPushModal, ezPopModal, ezIsTopModal, TYPE_ICONS, ezfxGraphToScreen, ezfxLabelOffX, ezCaptureSocketLinks, ezApplySocketLinks, ezSafeUrl } from "../core/ezflex_service.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezPickLoopIndices } from "../core/ezflex_loop_picker.js";
+import { tlPlan } from "../core/loop_nodes.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
 
 const NODE = NODE_TYPES.MEDIA_LOADER;
 const PRESET_API = "/media_loader/presets";
+// 所有请求都走 api.fetchApi：反代把 ComfyUI 挂在子路径下时，裸 fetch('/…') 会打到站点根而 404。
+const ezFetch = (p, o) => (api && typeof api.fetchApi === 'function') ? api.fetchApi(p, o) : fetch(p, o);
+// 预设下拉：点空白处收起。监听只装一次 —— 以前写在 render() 里，每次重绘都往 document 上加一个闭包，
+// 旧菜单和它那棵 DOM 还被闭包留住（切卡片/改设置都会重绘）。
+let _emlPresetCloserWired = false;
+function emlWirePresetCloser() {
+  if (_emlPresetCloserWired) return;
+  _emlPresetCloserWired = true;
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.eml-preset-menu.open').forEach((m) => { try { m.classList.remove('open'); } catch (_) {} });
+  });
+}
 // 固定模式：槽位类型（顺序 = 下拉顺序）+ 内置预设 minimaxH3（对应 H3 的 ref_images / ref_videos / ref_video_audios / ref_audios）
 const FIXED_TYPES = [['image', 'Image'], ['video', 'Video'], ['audio', 'Audio'], ['text', 'Text'], ['model3d', 'Model'], ['other', 'Other']];
 const FIXED_DEFAULT_SLOTS = [{ type: 'image', n: 9 }, { type: 'video', n: 3 }, { type: 'audio', n: 3 }, { type: 'text', n: 0 }, { type: 'model3d', n: 0 }, { type: 'other', n: 0 }];
@@ -32,7 +47,7 @@ function mlLabelsSet(on) {
   document.querySelectorAll('.eml-lblbtn').forEach((b) => { b.style.background = _mlLabels ? 'var(--ez-ok-bg)' : ''; b.style.borderColor = _mlLabels ? 'var(--ez-ok-border)' : ''; b.style.color = _mlLabels ? 'var(--ez-ok-fg)' : ''; });
   try { if (app && app.graph) app.graph.setDirtyCanvas(true, true); } catch (_) {}
 }
-const MIN_WIDTH = 680;
+const MIN_WIDTH = 720;
 
 const CSS = `
 .eml-shell{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;pointer-events:none;overflow:hidden;}
@@ -80,6 +95,11 @@ const CSS = `
 .eml-media.drop-target{box-shadow:0 0 0 3px rgba(34,197,94,.72);background:rgba(34,197,94,.16);}
 .eml-media.dragging{opacity:.5;}
 .eml-tab.mgr-sel{background:rgba(59,130,246,.2);border-color:rgba(59,130,246,.7);color:var(--ez-info-fg);}
+.eml-card .cloop{font-size:10px;font-weight:700;color:var(--ez-ok-fg);border:1px solid var(--ez-ok-border);background:var(--ez-ok-bg);border-radius:5px;padding:0 4px;line-height:14px;flex:0 0 auto;cursor:pointer;}
+.eml-card .cloop-warn{font-size:11px;font-weight:700;color:var(--ez-bad-fg);border:1px solid var(--ez-bad-border);background:var(--ez-bad-bg);border-radius:5px;padding:0 4px;line-height:14px;flex:0 0 auto;cursor:help;}
+.eml-slot.drop-ok{outline:2px solid var(--ez-ok-border);background:var(--ez-ok-bg);}
+.eml-media.dragging{opacity:.35;}
+.eml-slotno{position:absolute;top:4px;left:6px;z-index:2;font-size:10px;font-weight:600;color:var(--ez-fg-3);background:var(--ez-bg);border:1px solid var(--ez-border-2);border-radius:5px;padding:0 4px;line-height:14px;pointer-events:none;}
 .eml-managerbar{display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--ez-surface-3);border:1px solid var(--ez-border);border-radius:9px;font-size:12px;color:var(--ez-fg);flex-shrink:0;position:sticky;top:0;z-index:8;flex-wrap:wrap;}
 .eml-bb-item.sel{background:rgba(59,130,246,.16);border-color:rgba(59,130,246,.65);box-shadow:0 0 0 2px rgba(59,130,246,.5);}
 .eml-bbtrow{display:flex;align-items:center;gap:4px;padding:6px 10px;cursor:pointer;border-left:3px solid transparent;font-size:12px;color:var(--ez-fg);white-space:nowrap;}
@@ -116,7 +136,7 @@ const CSS = `
 .eml-media:hover .rm{opacity:1;}
 .eml-media .rm:hover{background:var(--ez-bad-bg);color:var(--ez-bad-fg);}
 .eml-media .stack-badge{position:absolute;bottom:5px;right:5px;background:var(--ez-strong);color:var(--ez-on-strong);font-size:10px;padding:1px 8px;border-radius:20px;pointer-events:none;z-index:5;}
-.eml-media .info{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:2px;padding:5px 8px 6px;background:var(--ez-surface);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-top:1px solid rgba(255,255,255,.5);border-radius:0 0 8px 8px;opacity:0;transform:translateY(4px);transition:.15s;pointer-events:none;z-index:5;}
+.eml-media .info{position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:2px;padding:5px 8px 6px;background:var(--ez-surface);border-top:1px solid rgba(255,255,255,.5);border-radius:0 0 8px 8px;opacity:0;transform:translateY(4px);transition:.15s;pointer-events:none;z-index:5;}
 .eml-media:hover .info{opacity:1;transform:none;}
 .eml-media.playing .info{opacity:0;transform:translateY(4px);pointer-events:none;}
 .eml-media.playing:hover .info{opacity:0;}
@@ -152,18 +172,15 @@ function nextWidgetType() { _widgetSeq += 1; return 'eml-config__' + _widgetSeq.
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 function genId() { return 'id' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function deepClone(o) { return JSON.parse(JSON.stringify(o)); }
-function uiToast(msg) {
-  const t = el('div');
-  t.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--ez-strong);color:var(--ez-on-strong);padding:8px 20px;border-radius:30px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.2);z-index:10000;opacity:0;transition:opacity .3s;pointer-events:none;';
-  t.textContent = msg; document.body.appendChild(t);
-  requestAnimationFrame(() => { t.style.opacity = '1'; });
-  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 2000);
-}
 
 // ===== 状态 / config =====
 function stateFor(node) { if (!node._eml) node._eml = { groups: [], currentGroupId: null, currentPreset: 'default', gridCols: 3, gridRowH: 1, mode: 'card', merge: false, mergeScope: 'card', mergeTypes: { image: true, audio: true, other: true }, mergeFit: { size: 'first', fit: 'crop', cap: 0, start: 0 }, fixed: { on: false, current: 'minimaxH3', slots: FIXED_DEFAULT_SLOTS.map((s) => ({ type: s.type, n: s.n })) } }; return node._eml; }
 function configWidgetOf(node) { return configWidget(node); }
 function syncToConfig(node) {
+  if (node && node._ezCfgBroken) {
+    try { uiToast(ezT('Config is broken (invalid JSON); not overwriting')); } catch (_) {}
+    return;
+  }
   const st = stateFor(node); const w = configWidgetOf(node); if (!w) return;
   const json = JSON.stringify({ groups: st.groups, currentGroupId: st.currentGroupId, currentPreset: st.currentPreset, gridCols: st.gridCols || 3, gridRowH: (st.gridRowH == null ? 1 : st.gridRowH), mode: st.mode || 'card', merge: !!st.merge, mergeScope: st.mergeScope || 'card', mergeTypes: st.mergeTypes || { image: true, audio: true, other: true }, mergeFit: st.mergeFit || { size: 'first', fit: 'crop', cap: 0, start: 0 }, fixed: { on: !!(st.fixed && st.fixed.on), current: (st.fixed && st.fixed.current) || 'minimaxH3', slots: (st.fixed && st.fixed.slots) || [] } });
   w.value = json; if (typeof w.callback === 'function') w.callback(json);
@@ -181,8 +198,18 @@ function loadFromConfig(node) {
     try { const p = node.properties && node.properties.ezMediaConfig; if (typeof p === 'string' && p.length > wv.length) return p; } catch (_) {}
     return wv;
   })();
-  try { data = JSON.parse(raw || '{}') || {}; } catch (_) { data = {}; }
+  try { data = JSON.parse(raw || '{}') || {}; node._ezCfgBroken = false; }
+  catch (err) {
+    data = {};
+    // 坏 config：标住 + 告警；保存时拒绝覆盖（否则会把「有救的坏文本」清成空）
+    if (!node._ezCfgBroken) {
+      node._ezCfgBroken = true;
+      try { console.warn('[EzFlex-MediaLoader] config 不是合法 JSON，已按 0 张卡处理；本次不会自动保存覆盖原内容', String(raw).slice(0, 80)); } catch (_) {}
+    }
+  }
   st.groups = Array.isArray(data.groups) ? data.groups : [];
+  // 旧版曾把 loop 标在分组上：迁移到卡片组，再清掉分组标记。
+  st.groups.forEach((g) => { if (g && g.loop) { (g.cards || []).forEach((c) => { c.loop = true; }); delete g.loop; } });
   // 文件类型以扩展名为准：卡片里存的 type 可能是旧值/猜错的，会让预览、端口类型、编号都跑偏。
   st.groups.forEach((g) => (g.cards || []).forEach((c) => (c.items || []).forEach((it) => (it.files || []).forEach((f) => { const k = mediaKind(f.name || f.path); if (k !== 'other') f.type = k; }))));
   st.currentPreset = data.currentPreset || 'default';
@@ -210,23 +237,46 @@ function loadFromConfig(node) {
   };
   if (!st.groups.length) { st.groups = [{ id: genId(), name: ezT('Group'), cards: [{ id: genId(), name: ezT('Card group 1'), items: [] }] }]; }
   st.currentGroupId = data.currentGroupId != null && st.groups.some((g) => g.id === data.currentGroupId) ? data.currentGroupId : st.groups[0].id;
+  node._ezConflictSig = '';
+  node._ezConflictMap = null;
 }
 function currentGroup(node) { const st = stateFor(node); return st.groups.find((g) => g.id === st.currentGroupId) || st.groups[0] || null; }
 
 // ===== 媒体辅助 =====
 function mediaKind(name) {
   const ext = (name || '').split('.').pop().toLowerCase();
-  if (/^(png|jpe?g|webp|gif|bmp|tif?f|heic|avif|psd)$/.test(ext)) return 'image';
+  // 与后端 _MEDIA_IMG_EXTS（preview_nodes.py）严格一致：heic/avif/psd 后端既不列表也传不上去，
+  // 这里再判成 image 只会让卡片 type 与真实能力不符（MediaOut 会照 type 宣告 IMAGE）。
+  if (/^(png|jpe?g|webp|gif|bmp|tif?f)$/.test(ext)) return 'image';
   if (/^(mp4|avi|mkv|mov|webm|flv|wmv|m4v|mpg|mpeg|3gp|ts|m2ts|vob)$/.test(ext)) return 'video';
   if (/^(mp3|wav|flac|aac|ogg|m4a|wma|opus|aiff|aif|mka|ac3|amr)$/.test(ext)) return 'audio';
   if (/^(gltf|glb|obj|fbx|stl|ply|spz|splat|ksplat|3ds|dae|blend|vrm|usdz|x3d|lwo|abc)$/.test(ext)) return 'model_3d';
   return 'other';
 }
-function mediaUrl(f) { return (f && (f.url || ('/media_loader/serve?path=' + encodeURIComponent((f && f.path) || '')))) || ''; }
+function mediaUrl(f) {
+  // 工作流里存的 url 不可信（可能是被改过的 javascript:/外部地址）⇒ 只放行安全协议/同源路径
+  const u = ezSafeUrl(f && f.url);
+  if (u) return u;
+  return (f && f.path) ? ('/media_loader/serve?path=' + encodeURIComponent(f.path)) : '';
+}
 function chevSvg(left, size) { const s = size || 18; return '<svg viewBox="0 0 24 24" width="' + s + '" height="' + s + '" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">' + (left ? '<path d="M15 5l-7 7 7 7"/>' : '<path d="M9 5l7 7-7 7"/>') + '</svg>'; }
 function typeShort(c) { return ({ image: ezT('Image'), video: ezT('Video'), audio: ezT('Audio'), model_3d: ezT('Model'), other: ezT('File') })[c] || ezT('File'); }
 function suffix(name) { const p = (name || '').split('.'); return p.length > 1 ? '.' + p.pop().toLowerCase() : ''; }
 function formatSize(b) { if (b == null) return ''; if (b < 1024) return b + ' B'; if (b < 1048576) return (b / 1024).toFixed(1) + ' KB'; return (b / 1048576).toFixed(1) + ' MB'; }
+// ===== 宽×高（图像 / 视频）=====
+// 只在素材真被显示时量一次：图像读 <img> 的 naturalWidth/Height，视频读 <video preload=metadata> 的
+// videoWidth/Height（只取元数据，不解码画面）。按「路径 + 大小 + 修改时间」缓存 —— 同名文件被替换后
+// 大小/时间变了会自动重量，避免显示旧尺寸。
+const _mlDims = new Map();
+function dimKey(f) { return String((f && (f.path || f.name)) || '') + '|' + String((f && f.size != null) ? f.size : '') + '|' + String((f && f.mtime) || ''); }
+function dimsOf(f) { return f ? (_mlDims.get(dimKey(f)) || '') : ''; }
+function setDims(f, w, h) {
+  w = Number(w) || 0; h = Number(h) || 0;
+  if (!f || w <= 0 || h <= 0) return '';
+  const k = dimKey(f);
+  if (!_mlDims.has(k)) _mlDims.set(k, w + '×' + h);
+  return _mlDims.get(k);
+}
 
 // ===== 面板渲染 =====
 function mkManagerBar(cfg) {
@@ -237,10 +287,12 @@ function mkManagerBar(cfg) {
   const clear = el('button', 'eml-btn', { type: 'button' }); clear.textContent = ezT('Clear selection');
   const invert = el('button', 'eml-btn', { type: 'button' }); invert.textContent = ezT('Invert');
   const exit = el('button', 'eml-btn', { type: 'button' }); exit.textContent = ezT('Exit manager');
+  const del = el('button', 'eml-btn danger', { type: 'button' }); del.textContent = ezT('Delete selected');
   merge.addEventListener('click', cfg.onMerge);
   all.addEventListener('click', cfg.onAll); clear.addEventListener('click', cfg.onClear); invert.addEventListener('click', cfg.onInvert);
   exit.addEventListener('click', cfg.onExit);
-  bar.appendChild(cnt); bar.appendChild(merge); bar.appendChild(all); bar.appendChild(clear); bar.appendChild(invert); bar.appendChild(exit);
+  if (cfg.onDelete) del.addEventListener('click', cfg.onDelete); else del.style.display = 'none';
+  bar.appendChild(cnt); bar.appendChild(merge); bar.appendChild(all); bar.appendChild(clear); bar.appendChild(invert); bar.appendChild(del); bar.appendChild(exit);
   return bar;
 }
 // ===== 设置弹窗：左侧分栏（拼接 / 固定）+ 顶部固定槽位预设 =====
@@ -331,13 +383,13 @@ function fixedSettingsBody(node) {
   const loadP = async () => {
     psel.innerHTML = '';
     Object.keys(FIXED_BUILTIN).forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; psel.appendChild(o); });
-    try { const list = await (await fetch(PRESET_API)).json(); (Array.isArray(list) ? list : []).forEach((p) => { if (p && p.kind === 'fixed' && !FIXED_BUILTIN[p.name]) { const o = el('option'); o.value = p.name; o.textContent = p.name; psel.appendChild(o); } }); } catch (_) {}
+    try { const list = await (await ezFetch(PRESET_API)).json(); (Array.isArray(list) ? list : []).forEach((p) => { if (p && p.kind === 'fixed' && !FIXED_BUILTIN[p.name]) { const o = el('option'); o.value = p.name; o.textContent = p.name; psel.appendChild(o); } }); } catch (_) {}
     psel.value = st.fixed.current || 'minimaxH3';
   };
   const applyP = async (name) => {
     let slots = FIXED_BUILTIN[name] || FIXED_DEFAULT_SLOTS;
     if (!FIXED_BUILTIN[name]) {
-      try { const list = await (await fetch(PRESET_API)).json(); const p = (list || []).find((x) => x.name === name && x.kind === 'fixed'); if (p && Array.isArray(p.slots)) slots = p.slots; } catch (_) {}
+      try { const list = await (await ezFetch(PRESET_API)).json(); const p = (list || []).find((x) => x.name === name && x.kind === 'fixed'); if (p && Array.isArray(p.slots)) slots = p.slots; } catch (_) {}
     }
     const m = {}; (slots || []).forEach((s) => { if (s && s.type) m[s.type] = Math.max(0, parseInt(s.n, 10) || 0); });
     FIXED_TYPES.forEach((t) => { counts[t[0]] = m[t[0]] || 0; });
@@ -351,12 +403,12 @@ function fixedSettingsBody(node) {
     const name = nm.trim();
     if (FIXED_BUILTIN[name]) { uiToast(ezT('That name is reserved for a built-in preset')); return; }
     save();
-    try { await fetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, kind: 'fixed', slots: st.fixed.slots }) }); st.fixed.current = name; await loadP(); uiToast(ezT('Preset saved')); } catch (_) { uiToast(ezT('Save failed')); }
+    try { await ezFetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, kind: 'fixed', slots: st.fixed.slots }) }); st.fixed.current = name; await loadP(); uiToast(ezT('Preset saved')); } catch (_) { uiToast(ezT('Save failed')); }
   });
   pDel.addEventListener('click', async () => {
     const name = psel.value;
     if (FIXED_BUILTIN[name]) { uiToast(ezT('The built-in preset cannot be deleted')); return; }
-    try { await fetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); st.fixed.current = 'minimaxH3'; await applyP('minimaxH3'); await loadP(); uiToast(ezT('Preset deleted')); } catch (_) { uiToast(ezT('Delete failed')); }
+    try { await ezFetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); st.fixed.current = 'minimaxH3'; await applyP('minimaxH3'); await loadP(); uiToast(ezT('Preset deleted')); } catch (_) { uiToast(ezT('Delete failed')); }
   });
   loadP();
   return { el: body, save };
@@ -398,7 +450,9 @@ async function openLoaderSettings(node, tab) {
 function openMergeSettings(node) { openLoaderSettings(node, 'merge'); }
 function render(node) {
   const root = node._emlRoot; if (!root) return;
+  try { prunePreviewCache(); } catch (_) {}
   const st = stateFor(node); const g = currentGroup(node);
+  try { precomputeLoopConflicts(node); } catch (_) {}
   const panel = root;
   // 顶部预设
   const top = panel.querySelector('.eml-top'); top.innerHTML = '';
@@ -411,7 +465,7 @@ function render(node) {
   presetSel._dd = { btn: presetBtn, menu: presetMenu };
   presetBtn.addEventListener('click', (e) => { e.stopPropagation(); presetMenu.classList.toggle('open'); });
   presetMenu.addEventListener('click', (e) => { const it = e.target.closest('.eml-preset-item'); if (!it) return; presetSel.value = it.dataset.v; presetMenu.classList.remove('open'); presetSel.dispatchEvent(new Event('change')); });
-  document.addEventListener('click', () => { if (presetMenu.classList.contains('open')) presetMenu.classList.remove('open'); });
+  emlWirePresetCloser();
   presetBtn.style.maxWidth = '96px'; presetBtn.style.minWidth = '64px';   // 预设下拉收窄，给输出模式/拼接腾位置
   const saveBtn = el('button', 'eml-btn primary', { type: 'button' }); saveBtn.textContent = ezT('Save');
   const delBtn = el('button', 'eml-btn danger', { type: 'button' }); delBtn.textContent = ezT('Delete');
@@ -481,9 +535,9 @@ function render(node) {
 
   // 卡片列表
   const cards = panel.querySelector('.eml-cards'); cards.innerHTML = '';
-  if (node._ezMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage: ') + (node._ezMgrSel ? node._ezMgrSel.size : 0) + ezT(' card groups selected'), merge: ezT('Merge selected'), onMerge: () => mergeSelected(node, g), onAll: () => selectAllCards(node, g), onClear: () => clearCards(node, g), onInvert: () => invertCards(node, g), onExit: () => toggleManager(node) }));
-  if (node._ezItemMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage cards: ') + (node._ezItemSel ? node._ezItemSel.size : 0) + ezT(' cards selected'), merge: ezT('Merge into batch card'), onMerge: () => { const cc = currentGroup(node); if (cc) mergeSelectedItems(node, cc); }, onAll: () => selectAllItems(node, g), onClear: () => clearItems(node, g), onInvert: () => invertItems(node, g), onExit: () => toggleItemManager(node) }));
-  if (node._ezGrpMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage groups: ') + (node._ezGrpSel ? node._ezGrpSel.size : 0) + ezT(' groups selected'), merge: ezT('Merge groups'), onMerge: () => mergeGroups(node), onAll: () => selectAllGroups(node), onClear: () => clearGroups(node), onInvert: () => invertGroups(node), onExit: () => toggleGroupManager(node) }));
+  if (node._ezMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage: ') + (node._ezMgrSel ? node._ezMgrSel.size : 0) + ezT(' card groups selected'), merge: ezT('Merge selected'), onMerge: () => mergeSelected(node, g), onAll: () => selectAllCards(node, g), onClear: () => clearCards(node, g), onInvert: () => invertCards(node, g), onDelete: () => deleteSelectedCards(node, g), onExit: () => toggleManager(node) }));
+  if (node._ezItemMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage cards: ') + (node._ezItemSel ? node._ezItemSel.size : 0) + ezT(' cards selected'), merge: ezT('Merge into batch card'), onMerge: () => { const cc = currentGroup(node); if (cc) mergeSelectedItems(node, cc); }, onAll: () => selectAllItems(node, g), onClear: () => clearItems(node, g), onInvert: () => invertItems(node, g), onDelete: () => deleteSelectedItems(node, g), onExit: () => toggleItemManager(node) }));
+  if (node._ezGrpMgr) cards.appendChild(mkManagerBar({ label: ezT('Manage groups: ') + (node._ezGrpSel ? node._ezGrpSel.size : 0) + ezT(' groups selected'), merge: ezT('Merge groups'), onMerge: () => mergeGroups(node), onAll: () => selectAllGroups(node), onClear: () => clearGroups(node), onInvert: () => invertGroups(node), onDelete: () => deleteSelectedGroups(node), onExit: () => toggleGroupManager(node) }));
   if (!g) { const e = el('div', 'eml-empty'); e.textContent = ezT('No editable group'); cards.appendChild(e); }
   else g.cards.forEach((card) => cards.appendChild(buildCard(node, g, card)));
   updatePorts(node, true);   // 端口跟随输出模式/拼接/文件变化
@@ -516,15 +570,181 @@ function entryKind(f) {
   return k !== 'other' ? k : String((f && f.type) || 'other').toLowerCase();
 }
 function itemKindOf(item) { return entryKind(((item && item.files) || [])[0] || {}); }
-function fixedCells(node, card) {
-  const pool = {};
-  (card.items || []).forEach((it) => { const k = itemKindOf(it); (pool[k] = pool[k] || []).push(it); });
-  const used = {}; const cells = [];
+function fixedCardCounts(card) {
+  const out = {};
+  (card && card.items || []).forEach((it) => {
+    if ((it.files || []).length) { const k = itemKindOf(it); out[k] = (out[k] || 0) + 1; }
+  });
+  return out;
+}
+function slotPositionsOf(card) { return Array.isArray(card && card.slotPositions) ? card.slotPositions : []; }
+function maxLoopRounds(node) {
+  let max = 0;
+  const nodes = ((app && app.graph && app.graph._nodes) || []);
+  nodes.forEach((n) => {
+    try {
+      const t = String((n && n.type) || '');
+      if (t === NODE_TYPES.TIME_PLAN) {
+        const p = tlPlan(n);
+        if (p && Array.isArray(p.segs)) max = Math.max(max, p.segs.length);
+      } else if (t === 'EzFlex-LoopEnd') {
+        const w = (n.widgets || []).find((x) => x && x.name === 'rounds');
+        const v = parseInt(w && w.value, 10);
+        if (v > 0) max = Math.max(max, v);
+      }
+    } catch (_) {}
+  });
+  return Math.max(1, max || 20);
+}
+async function editLoopIndices(node, card) {
+  const max = maxLoopRounds(node);
+  const selected = Array.isArray(card.loopIndices) ? card.loopIndices : null;
+  const picked = await ezPickLoopIndices({ max, selected, follow: !!card.loopAll, title: ezT('Loop rounds for this card group') });
+  if (picked === null) return;
+  card.loopAll = !!picked.follow;
+  card.loopIndices = picked.indices;
+  syncToConfig(node); updatePorts(node, true); render(node);
+}
+function loopCardsOf(node) {
+  const out = [];
+  (stateFor(node).groups || []).forEach((g) => (g.cards || []).forEach((c) => { if (c.loop) out.push(c); }));
+  return out;
+}
+function cardGroupLabel(node, card) {
+  const st = stateFor(node);
+  for (let gi = 0; gi < (st.groups || []).length; gi++) {
+    const g = st.groups[gi];
+    for (let ci = 0; ci < (g.cards || []).length; ci++) {
+      const c = g.cards[ci];
+      if (c === card || String(c.id) === String(card && card.id)) {
+        const gn = (!g.name || g.name === ezT('Group')) ? ('分组' + (gi + 1)) : g.name;
+        const cn = (!c.name || /^Card group(\s|$)/i.test(c.name) || /^卡片组/.test(c.name)) ? ('卡片组' + (ci + 1)) : c.name;
+        return (c.loop ? '循环' : '') + gn + '-' + cn;
+      }
+    }
+  }
+  return (card && card.loop ? '循环' : '') + (card && card.name ? card.name : ezT('Card group'));
+}
+function normalCardsOf(node) {
+  const out = [];
+  (stateFor(node).groups || []).forEach((g) => (g.cards || []).forEach((c) => { if (!c.loop) out.push(c); }));
+  return out;
+}
+function loopRoundsOf(card, maxRound) {
+  if (card && card.loopAll) return Array.from({ length: Math.max(1, maxRound) }, (_, i) => i + 1);
+  const arr = Array.isArray(card && card.loopIndices) ? card.loopIndices : null;
+  if (!arr) return Array.from({ length: Math.max(1, maxRound) }, (_, i) => i + 1);
+  return Array.from(new Set(arr.map((x) => parseInt(x, 10)).filter((x) => x > 0)));
+}
+function loopActiveOn(card, round) {
+  if (card && card.loopAll) return true;
+  const arr = card && card.loopIndices;
+  if (!Array.isArray(arr)) return true;
+  return arr.some((x) => parseInt(x, 10) === round);
+}
+function loopSlotConflictRaw(node, card) {
+  if (!stateFor(node).fixed.on) return "";   // 普通/拼接模式没有固定槽位，不参与冲突统计
+  const slots = fixedLayout(node);
+  if (!slots.length) return "";
+  const loops = loopCardsOf(node);
+  const cap = {}; slots.forEach((s) => { const k = FIXED_POOL[s.type] || "other"; cap[k] = (cap[k] || 0) + s.n; });
+  const normals = normalCardsOf(node);
+  const normalRound = card && !card.loop ? (normals.indexOf(card) + 1) : 0;
+  const activeLoops = card && card.loop ? loops : loops.filter((c) => loopActiveOn(c, normalRound));
+  const loopRounds = card && card.loop ? loopRoundsOf(card, normals.length) : [];
+  const posLoops = card && card.loop ? loops.filter((c) => loopRounds.some((r) => loopActiveOn(c, r))) : activeLoops;
+  const posNormals = card && card.loop ? normals.filter((c, i) => loopRounds.includes(i + 1)) : [card];
+  const capParts = (card && card.loop) ? activeLoops : [card].concat(activeLoops);
+  const parts = (card && card.loop) ? posLoops.concat(posNormals) : [card].concat(activeLoops);
+  const total = {}; const owners = {};
+  capParts.forEach((c) => {
+    if (!c) return;
+    const cc = fixedCardCounts(c);
+    Object.keys(cc).forEach((k) => {
+      total[k] = (total[k] || 0) + cc[k];
+      if (cc[k] > 0) { owners[k] = owners[k] || []; owners[k].push(cardGroupLabel(node, c)); }
+    });
+  });
+  const hits = [];
+  Object.keys(total).forEach((k) => {
+    const n = cap[k] || 0;
+    if (n > 0 && total[k] > n) hits.push(k + ' ' + total[k] + '/' + n + '：' + Array.from(new Set(owners[k] || [])).join('、'));
+  });
+  // 显式槽位：重复/越界时列出具体是哪些卡片/素材。
+  const totalSlots = slots.reduce((a, s) => a + Math.max(0, s.n || 0), 0);
+  const at = {};
+  parts.forEach((c) => {
+    if (!c) return;
+    const cardName = cardGroupLabel(node, c);
+    const positions = [];
+    (c.items || []).forEach((it) => {
+      const p = parseInt(it.slotPos, 10);
+      if (p) {
+        const f = ((it.files || [])[0] || {});
+        positions.push([p, (f.name || '') ? cardName + ' · ' + f.name : cardName]);
+      }
+    });
+    if (!positions.length) slotPositionsOf(c).forEach((p) => positions.push([p, cardName]));
+    positions.forEach(([p, owner]) => {
+      p = parseInt(p, 10);
+      if (!p || p < 1 || p > totalSlots) { hits.push('#' + p + '：' + owner + ' 越界'); return; }
+      at[p] = at[p] || [];
+      at[p].push(owner);
+    });
+  });
+  Object.keys(at).forEach((p) => {
+    if (at[p].length > 1) hits.push('#' + p + '：' + Array.from(new Set(at[p])).join(' 与 '));
+  });
+  return hits.length ? '？槽位冲突：' + Array.from(new Set(hits)).join('；') : "";
+}
+function loopSlotConflict(node, card) {
+  const map = node && node._ezConflictMap;
+  if (map && card && String(card.id) in map) return map[String(card.id)];
+  return loopSlotConflictRaw(node, card);
+}
+function precomputeLoopConflicts(node) {
+  const st = stateFor(node);
+  if (!st.fixed || !st.fixed.on) { node._ezConflictMap = {}; node._ezConflictSig = ""; return; }
+  const sig = JSON.stringify({ g: st.groups, f: st.fixed });
+  if (node._ezConflictSig === sig && node._ezConflictMap) return;
+  node._ezConflictSig = sig;
+  const map = {};
+  (st.groups || []).forEach((g) => (g.cards || []).forEach((c) => { map[String(c.id)] = loopSlotConflictRaw(node, c); }));
+  node._ezConflictMap = map;
+}
+function fixedSlotList(node) {
+  const out = [];
   fixedLayout(node).forEach((s) => {
-    const k = FIXED_POOL[s.type] || 'other'; const list = pool[k] || [];
-    for (let i = 0; i < s.n; i++) { const idx = used[k] || 0; cells.push({ type: s.type, item: list[idx] || null }); used[k] = idx + 1; }
+    for (let i = 0; i < s.n; i++) out.push({ type: s.type, kind: FIXED_POOL[s.type] || 'other', pos: out.length + 1 });
+  });
+  return out;
+}
+function fixedCells(node, card) {
+  const slots = fixedSlotList(node);
+  const cells = slots.map((s) => ({ type: s.type, kind: s.kind, pos: s.pos, item: null }));
+  const used = new Set();
+  const pending = [];
+  (card.items || []).forEach((it) => {
+    const kind = itemKindOf(it);
+    let sp = parseInt(it.slotPos, 10) || 0;
+    if (sp > 0 && sp <= cells.length && !used.has(sp) && cells[sp - 1].kind === kind) {
+      cells[sp - 1].item = it; used.add(sp);
+    } else {
+      pending.push({ it, kind });
+    }
+  });
+  pending.forEach(({ it, kind }) => {
+    const c = cells.find((x) => !x.item && x.kind === kind);
+    if (c) { c.item = it; used.add(c.pos); }
   });
   return cells;
+}
+// 删除/重排前把当前自动排位固化成 slotPos，避免删掉一格后后面的素材整体前移。
+function freezeFixedPositions(node, card) {
+  if (!stateFor(node).fixed.on) return;
+  fixedCells(node, card).forEach((c) => {
+    if (c.item && !(parseInt(c.item.slotPos, 10) > 0)) c.item.slotPos = c.pos;
+  });
 }
 // 固定模式下再加文件：每种类型的容量 = 它的槽位数，超出的不收
 function fixedTake(node, card, list) {
@@ -536,8 +756,10 @@ function fixedTake(node, card, list) {
   return { ok, full };
 }
 // 空位格子：和「添加素材」一个用法（点它开浏览器），只是位置/类型是预设死的
-function buildSlotCard(node, g, card, type) {
+function buildSlotCard(node, g, card, type, pos) {
   const d = el('div', 'eml-media eml-slot');
+  d.dataset.slotPos = String(pos || ''); d.dataset.slotType = String(type || '');
+  if (pos) { const pn = el('span', 'eml-slotno'); pn.textContent = '#' + pos; d.appendChild(pn); }
   const rhs = stateFor(node).gridRowH;
   if (rhs > 0) d.style.minHeight = Math.max(48, rhs * 192) + 'px';   // 槽位要放图标+文字，给个下限
   d.title = ezT('Empty slot: click to add') + ' — ' + ezT(fixedTypeLabel(type));
@@ -559,6 +781,18 @@ function buildCard(node, g, card) {
   const title = el('span', 'ctitle'); title.textContent = card.name; title.spellcheck = false;
   title.addEventListener('dblclick', (e) => { e.stopPropagation(); editInline(title, (v) => { card.name = v || ezT('Unnamed card group'); syncToConfig(node); updatePorts(node, true); render(node); }); });
   head.appendChild(title);
+  if (card.loop) {
+    const lk = el('span', 'cloop'); lk.textContent = '↻'; lk.title = ezT('Loop card group: click to choose participating rounds');
+    lk.style.cursor = 'pointer';
+    lk.addEventListener('click', (e) => { e.stopPropagation(); editLoopIndices(node, card); });
+    head.appendChild(lk);
+  }
+  const _cf = loopSlotConflict(node, card);
+  if (_cf) {
+    const wb = el('span', 'cloop-warn'); wb.textContent = '⚠';
+    wb.title = _cf + '（多余素材会被丢弃，可拖动卡片组调整槽位）';
+    head.appendChild(wb);
+  }
   const del = el('button', 'cdel', { type: 'button', title: ezT('Delete this card group') }); del.textContent = '✕';
   del.addEventListener('click', (e) => { e.stopPropagation(); if (g.cards.length <= 1) { uiToast(ezT('Each group must keep at least one card group')); return; } g.cards = g.cards.filter((c) => c.id !== card.id); syncToConfig(node); updatePorts(node, true); render(node); });
   head.appendChild(del);
@@ -570,7 +804,7 @@ function buildCard(node, g, card) {
   const gridRh = stateFor(node).gridRowH;
   if (gridRh > 0) grid.style.minHeight = Math.max(24, gridRh * 192) + 'px';   // 卡片组外框跟着高度倍率收（原固定 80px 会卡住）
   if (stateFor(node).fixed.on) {
-    fixedCells(node, card).forEach((c) => grid.appendChild(c.item ? buildMediaCard(node, g, card, c.item) : buildSlotCard(node, g, card, c.type)));   // 固定面板：只有预设的槽位，没有自由添加位
+    fixedCells(node, card).forEach((c) => grid.appendChild(c.item ? buildMediaCard(node, g, card, c.item, c.pos) : buildSlotCard(node, g, card, c.type, c.pos)));   // 固定面板：只有预设的槽位，没有自由添加位
   } else {
     card.items.forEach((item) => grid.appendChild(buildMediaCard(node, g, card, item)));
     grid.appendChild(buildEmptyCard(node, g, card));
@@ -585,6 +819,24 @@ function buildCard(node, g, card) {
 }
 
 const _mlPreview = {};
+// 3D 预览图是模块级缓存（item.id → JPEG data URL）。卡片/素材删掉后要跟着回收，
+// 否则反复添加再删除 3D 素材，dataURL 会一直留在内存里。
+function prunePreviewCache() {
+  const live = new Set();
+  try {
+    ((app && app.graph && app.graph._nodes) || []).forEach((n) => {
+      if (nodeTypeOf(n) !== NODE) return;
+      const st = stateFor(n);
+      (st.groups || []).forEach((g) => (g.cards || []).forEach((c) => (c.items || []).forEach((it) => {
+        if (it && it.id != null) live.add(String(it.id));
+      })));
+    });
+  } catch (_) { return; }   // 画布状态不对时宁可少回收，也别误删
+  Object.keys(_mlPreview).forEach((k) => { if (!live.has(String(k))) delete _mlPreview[k]; });
+}
+// 文本预览的在途请求（item.id → Promise）。不能挂在文件对象上：那份对象会进 node config，
+// 保存工作流时 Promise 会被序列化成 {}，重开后再 .then 就抛。只在本会话有效。
+const _mlTextP = new Map();
 // 只把这张卡片的缩略图换掉：render(node) 会重建整个面板（卡片多时很慢），生成 3D 预览图后应该立刻就看得见。
 function setCardThumb(node, itemId, url) {
   try {
@@ -599,23 +851,80 @@ function setCardThumb(node, itemId, url) {
     return true;
   } catch (_) { return false; }
 }
-function buildMediaCard(node, g, card, item) {
+function buildMediaCard(node, g, card, item, slotPos) {
   const isItemMgr = node._ezItemMgr;
   const m = el('div', 'eml-media' + (isItemMgr && node._ezItemSel && node._ezItemSel.has(String(item.id)) ? ' mgr-sel' : ''));
   m.dataset.itemId = item.id; m.dataset.cid = card.id;
-  m.draggable = false; m.addEventListener('dragstart', (e) => e.preventDefault());   // 别让浏览器原生拖图片/视频
+  if (slotPos) {
+    m.dataset.slotPos = String(slotPos); m.draggable = false;
+    const pn = el('span', 'eml-slotno'); pn.textContent = '#' + slotPos; m.appendChild(pn);
+    // pointer 拖拽：不触发浏览器原生 drag，就不会有跟着鼠标的快照/残影。
+    let pd = null;
+    const endDrag = () => {
+      if (pd && pd.slot) { try { pd.slot.classList.remove('drop-ok'); } catch (_) {} }
+      m.style.visibility = '';
+      m.style.opacity = '';
+      pd = null;
+    };
+    m.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || (e.target && e.target.closest && e.target.closest('button,.rm'))) return;
+      pd = { x: e.clientX, y: e.clientY, moved: false, slot: null, pid: e.pointerId };
+      try { m.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    m.addEventListener('pointermove', (e) => {
+      if (!pd) return;
+      if (!pd.moved) {
+        if (Math.hypot(e.clientX - pd.x, e.clientY - pd.y) < 6) return;
+        pd.moved = true;
+        m.style.visibility = 'hidden';
+      }
+      e.preventDefault();
+      const under = document.elementFromPoint(e.clientX, e.clientY);
+      const slot = under && under.closest ? under.closest('.eml-slot') : null;
+      if (pd.slot && pd.slot !== slot) { try { pd.slot.classList.remove('drop-ok'); } catch (_) {} }
+      pd.slot = slot;
+      if (slot) slot.classList.add('drop-ok');
+    });
+    m.addEventListener('pointerup', (e) => {
+      if (!pd) return;
+      const moved = pd.moved; const slot = pd.slot;
+      endDrag();
+      if (!moved) return;
+      m._slotDragged = true; setTimeout(() => { m._slotDragged = false; }, 0);
+      const want = slot && slot.dataset ? slot.dataset.slotType : '';
+      if (!slot || (want && want !== itemKindOf(item))) return;
+      const p = parseInt(slot.dataset.slotPos, 10);
+      if (p > 0) {
+        item.slotPos = p;
+        syncToConfig(node); updatePorts(node, true);
+        setTimeout(() => { try { render(node); } catch (_) {} }, 0);
+        const cf = loopSlotConflict(node, card); if (cf) uiToast(cf);
+      }
+    });
+    m.addEventListener('pointercancel', endDrag);
+  } else {
+    m.draggable = false; m.addEventListener('dragstart', (e) => e.preventDefault());   // 别让浏览器原生拖图片/视频
+  }
   const files = item.files || []; const first = files[0] || {};
   m.title = (first.name || '') + (files.length > 1 ? ' (×' + files.length + ')' : '') + ' — ' + ezT('Click to preview');
+  let dimEl = null;   // 宽×高（meta 行里；元数据是异步到的，到了直接写这里，不重建卡片）
   const pv = el('div', 'pv');
   const rowH = stateFor(node).gridRowH;
   if (rowH > 0) { const h = rowH * 192; pv.style.aspectRatio = 'auto'; pv.style.height = h + 'px'; m.style.height = h + 'px'; m.style.minHeight = h + 'px'; }
   else { m.style.height = ''; m.style.minHeight = '0'; }
   const rm = el('button', 'rm', { type: 'button', title: ezT('Remove media') }); rm.textContent = '✕';
-  rm.addEventListener('click', (e) => { e.stopPropagation(); card.items = card.items.filter((x) => x.id !== item.id); syncToConfig(node); render(node); });
+  rm.addEventListener('click', (e) => { e.stopPropagation(); freezeFixedPositions(node, card); card.items = card.items.filter((x) => x.id !== item.id); syncToConfig(node); updatePorts(node, true); render(node); });
   pv.appendChild(rm);
-  if (first.type === 'image') { const img = el('img'); img.src = first.url || ''; img.alt = first.name || ''; img.draggable = false; img.style.cssText = 'width:100%;height:100%;object-fit:contain;'; pv.appendChild(img); }
+  // 老数据 / 根外素材可能只有 mediaUrl 没有 url：退回 /media_loader/serve，否则缩略图空白。
+  const firstUrl = (first && (first.url || (first.path ? '/media_loader/serve?path=' + encodeURIComponent(first.path) : ''))) || '';
+  if (first.type === 'image') {
+    const img = el('img'); img.src = firstUrl; img.alt = first.name || ''; img.draggable = false; img.style.cssText = 'width:100%;height:100%;object-fit:contain;';
+    img.addEventListener('load', () => { const t = setDims(first, img.naturalWidth, img.naturalHeight); if (t && dimEl) dimEl.textContent = t; });
+    pv.appendChild(img);
+  }
   else if (first.type === 'video') {
-    const v = el('video'); v.src = first.url || ''; v.muted = true; v.preload = 'metadata'; v.draggable = false; v.style.cssText = 'width:100%;height:100%;object-fit:contain;'; pv.appendChild(v);
+    const v = el('video'); v.src = firstUrl; v.muted = true; v.preload = 'metadata'; v.draggable = false; v.style.cssText = 'width:100%;height:100%;object-fit:contain;'; pv.appendChild(v);
+    v.addEventListener('loadedmetadata', () => { const t = setDims(first, v.videoWidth, v.videoHeight); if (t && dimEl) dimEl.textContent = t; });
     const play = el('button', 'eml-play', { type: 'button' }); play.textContent = '▶'; play.title = ezT('Play preview');
     play.addEventListener('click', (e) => { e.stopPropagation(); try { v.muted = false; v.controls = true; v.play(); m.classList.add('playing'); } catch (_) {} });
     v.addEventListener('play', () => m.classList.add('playing'));
@@ -626,9 +935,22 @@ function buildMediaCard(node, g, card, item) {
   else if (first.type === 'model_3d') { const pvUrl = _mlPreview[item.id]; if (pvUrl) { const im = el('img'); im.src = pvUrl; im.draggable = false; im.style.cssText = 'width:100%;height:100%;object-fit:contain;'; pv.appendChild(im); } else { const ph = el('span', 'ph'); ph.textContent = '🧊'; pv.appendChild(ph); } }
   else {
     const tx = el('div'); tx.style.cssText = 'width:100%;height:100%;overflow:hidden;padding:8px 10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;line-height:1.5;color:var(--ez-fg-2);white-space:pre-wrap;word-break:break-word;text-align:left;';
-    if (first._text != null) tx.textContent = first._text;
-    else if (first._text === null) tx.textContent = ezT('Loading…');
-    else { first._text = null; tx.textContent = ezT('Loading…'); fetch(mediaUrl(first)).then((r) => r.text()).then((t) => { first._text = (t || '').slice(0, 2000); if (tx.isConnected) tx.textContent = first._text || ezT('(empty file)'); }).catch(() => { first._text = ''; if (tx.isConnected) tx.textContent = ezT('Cannot preview content'); }); }
+    if (first._text != null) tx.textContent = first._text || (first._textFail ? ezT('Cannot preview content') : ezT('(empty file)'));
+    else {
+      tx.textContent = ezT('Loading…');
+      // 同一张卡会被重画很多次：共用同一个请求，响应回来时把**每个**还挂着的节点都更新掉。
+      // 以前只有发起请求那一次的 tx 会更新，之后重画的卡就永远停在「Loading…」；失败态也记下来，重画不再显空白。
+      let p = _mlTextP.get(item.id);
+      if (!p) {
+        first._text = null;
+        p = ezFetch(mediaUrl(first)).then((r) => r.text())
+          .then((t) => { first._text = (t || '').slice(0, 2000); first._textFail = false; return first._text || ezT('(empty file)'); })
+          .catch(() => { first._text = ''; first._textFail = true; return ezT('Cannot preview content'); })
+          .then((msg) => { _mlTextP.delete(item.id); return msg; });
+        _mlTextP.set(item.id, p);
+      }
+      p.then((msg) => { if (tx.isConnected) tx.textContent = msg; });
+    }
     pv.appendChild(tx);
   }
   if (files.length > 1) { const b = el('span', 'stack-badge'); b.textContent = '×' + files.length; pv.appendChild(b); }
@@ -638,13 +960,15 @@ function buildMediaCard(node, g, card, item) {
   const tb = el('span'); tb.textContent = typeShort(first.type); tb.style.cssText = 'flex:0 0 auto;background:var(--ez-surface);border:1px solid rgba(255,255,255,.6);color:var(--ez-fg);border-radius:30px;padding:0 8px;font-size:10px;font-weight:600;line-height:18px;'; row1.appendChild(tb);
   const fn = el('div', 'fname'); fn.textContent = first.name || ''; fn.style.cssText = 'flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'; row1.appendChild(fn);
   info.appendChild(row1);
-  const meta = el('div', 'fmeta'); const sz = el('span'); sz.textContent = formatSize(first.size); meta.appendChild(sz);
+  const meta = el('div', 'fmeta');
+  const sz = el('span'); sz.textContent = formatSize(first.size); meta.appendChild(sz);
+  dimEl = el('span'); dimEl.textContent = dimsOf(first); meta.appendChild(dimEl);   // 宽×高（还没量到时是空的）
   const sf = el('span', 'suffix'); sf.textContent = suffix(first.name); meta.appendChild(sf); info.appendChild(meta);
   m.appendChild(info);
   m.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); openItemMenu(e, node, g, card, item); });
   m.addEventListener('mousedown', (e) => mediaLongPress(e, node, g, card, item, m));
   m.addEventListener('click', (e) => {
-    if (m._longDrag) { m._longDrag = false; return; }
+    if (m._longDrag || m._slotDragged) { m._longDrag = false; m._slotDragged = false; return; }
     if (e.target.closest('button') || e.target.closest('audio') || e.target.closest('.ez-ap')) return;
     const vid = m.querySelector('video'); if (vid && !vid.paused) return;   // 播放中不打开大图
     if (isItemMgr) { itemMgrClick(node, g, card, item); return; }
@@ -666,7 +990,11 @@ function buildEmptyCard(node, g, card) {
 
 function addGroup(node) {
   const st = stateFor(node);
-  const g = { id: genId(), name: ezT('Group') + (st.groups.length + 1), cards: [{ id: genId(), name: ezT('Card group 1'), items: [] }] };
+  // 自动名字按「已有名字」避开：删过组再加会用回同一个名字，同名组在后端按名字合并 → 端口错位。
+  const used = new Set((st.groups || []).map((x) => String(x.name || '')));
+  let n = (st.groups || []).length + 1;
+  while (used.has(ezT('Group') + n)) n += 1;
+  const g = { id: genId(), name: ezT('Group') + n, cards: [{ id: genId(), name: ezT('Card group 1'), items: [] }] };
   st.groups.push(g); st.currentGroupId = g.id; syncToConfig(node); render(node);
 }
 function deleteGroup(node, gid) {
@@ -687,7 +1015,7 @@ async function uploadAndAddFiles(files, node, g, card) {
   const fd = new FormData();
   files.forEach((f) => fd.append('files', f));
   try {
-    const r = await fetch('/media_loader/upload', { method: 'POST', body: fd });
+    const r = await ezFetch('/media_loader/upload', { method: 'POST', body: fd });
     if (r.status === 413) { uiToast(ezT('File too large for upload — raise ComfyUI --max-upload-size (default 100 MB)')); return; }
     const d = await r.json();
     const ups = d.files || [];
@@ -695,7 +1023,13 @@ async function uploadAndAddFiles(files, node, g, card) {
     const take = fixedTake(node, card, ups);
     if (!take.ok.length) { uiToast(ezT('Fixed layout: no empty slot for these files')); return; }
     // path 必须落下来：下游（PromptHelper 引用媒体 / MediaOut / 编号表）都靠它出缩略图，缺了 url 还能由 mediaUrl 回落 /media_loader/serve
-    card.items.push({ id: genId(), files: take.ok.map((f) => ({ id: genId(), name: f.name, path: f.path || f.name, subfolder: f.subfolder || '', dir: 'input', type: f.type || mediaKind(f.name), url: f.url || undefined, size: f.size, mtime: f.mtime })) });
+    const entries = take.ok.map((f) => ({ id: genId(), name: f.name, path: f.path || f.name, subfolder: f.subfolder || '', dir: 'input', type: f.type || mediaKind(f.name), url: f.url || undefined, size: f.size, mtime: f.mtime }));
+    if (stateFor(node).fixed.on) {
+      // 固定模式：一个 item = 一个槽位，后端每 item 只取第一个文件 → 多文件必须拆成多个 item，否则只落第一个。
+      entries.forEach((e) => card.items.push({ id: genId(), files: [e] }));
+    } else {
+      card.items.push({ id: genId(), files: entries });
+    }
     syncToConfig(node); render(node);
     uiToast(take.full ? ezT('Fixed layout: only the empty slots were filled') : (ezT('Dropped ') + take.ok.length + ezT(' media files')));
   } catch (_) { uiToast(ezT('Upload failed')); }
@@ -721,7 +1055,7 @@ function buildMenu(e, items) {
 // 单个卡片右键
 function openItemMenu(e, node, g, card, item) {
   buildMenu(e, [
-    { label: ezT('Merge'), fn: () => toggleItemManager(node) },
+    { label: ezT('Batch mode'), fn: () => toggleItemManager(node) },
     { label: ezT('Split'), fn: () => splitItem(node, g, card, item) },
     { label: ezT('Open card location'), fn: () => openFileLocation(card) },
     { label: ezT('Save as…'), fn: () => saveAsCard(card) },
@@ -730,13 +1064,15 @@ function openItemMenu(e, node, g, card, item) {
 // 素材卡片组右键
 function openRowMenu(e, node, g, card) {
   buildMenu(e, [
+    { label: card.loop ? ezT('Stop loop card group') : ezT('Convert to loop card group'), fn: () => { card.loop = !card.loop; syncToConfig(node); updatePorts(node, true); render(node); const cf = card.loop ? loopSlotConflict(node, card) : ''; uiToast(card.loop ? (cf || ezT('Converted to loop card group')) : ezT('Loop card group disabled')); } },
+    ...(card.loop ? [{ label: ezT('Choose loop rounds…'), fn: () => editLoopIndices(node, card) }] : []),
     { label: ezT('Split into multiple card groups'), fn: () => splitCardGroup(node, g, card) },
-    { label: ezT('Merge card groups'), fn: () => toggleManager(node) },
+    { label: ezT('Batch mode'), fn: () => toggleManager(node) },
   ]);
 }
 // 分组右键
 function openGroupMenu(e, node, gi) {
-  buildMenu(e, [{ label: ezT('Merge groups'), fn: () => toggleGroupManager(node) }]);
+  buildMenu(e, [{ label: ezT('Batch mode'), fn: () => toggleGroupManager(node) }]);
 }
 function cardFiles(card) {
   const out = [];
@@ -766,16 +1102,16 @@ function splitItem(node, g, card, item) {
 function openFileLocation(card) {
   const files = cardFiles(card);
   if (!files.length) return;
-  try { fetch('/media_loader/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: files[0].path }) }); } catch (_) {}
+  try { ezFetch('/media_loader/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: files[0].path }) }); } catch (_) {}
 }
 async function saveAsCard(card) {
   const files = cardFiles(card);
   if (!files.length) return;
   try {
-    const d = await fetch('/media_loader/pick_folder', { method: 'POST' });
+    const d = await ezFetch('/media_loader/pick_folder', { method: 'POST' });
     const j = await d.json();
     if (!j.ok || !j.path) { uiToast(j.error ? (ezT('Failed to pick folder: ') + j.error) : ezT('No folder selected')); return; }
-    const r = await fetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: files[0].path, dest: j.path }) });
+    const r = await ezFetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: files[0].path, dest: j.path }) });
     const res = await r.json();
     uiToast(res.ok ? (ezT('Saved as ') + res.dest) : (ezT('Save failed: ') + (res.error || '')));
   } catch (_) { uiToast(ezT('Save failed')); }
@@ -805,6 +1141,16 @@ function managerCardClick(node, g, card) {
 function selectAllCards(node, g) { g.cards.forEach((c) => node._ezMgrSel.add(String(c.id))); node._ezMgrSel = node._ezMgrSel || new Set(); render(node); }
 function clearCards(node, g) { node._ezMgrSel.clear(); render(node); }
 function invertCards(node, g) { const sel = node._ezMgrSel || new Set(); const ids = new Set(g.cards.map((c) => String(c.id))); ids.forEach((id) => { if (sel.has(id)) sel.delete(id); else sel.add(id); }); render(node); }
+async function deleteSelectedCards(node, g) {
+  const sel = node._ezMgrSel || new Set();
+  const hit = (g.cards || []).filter((c) => sel.has(String(c.id)));
+  if (!hit.length) { uiToast(ezT('Select card groups to delete first')); return; }
+  if (!(await uiConfirm(ezT('Delete selected card groups?') + ' (' + hit.length + ')'))) return;
+  g.cards = g.cards.filter((c) => !sel.has(String(c.id)));
+  node._ezMgrSel.clear();
+  if (!g.cards.length) g.cards.push({ id: genId(), name: ezT('Card group 1'), items: [] });
+  syncToConfig(node); updatePorts(node, true); render(node);
+}
 function mergeSelected(node, g) {
   const sel = node._ezMgrSel || new Set();
   const cards = g.cards.filter((c) => sel.has(String(c.id)));
@@ -832,6 +1178,19 @@ function itemMgrClick(node, g, card, item) {
 function selectAllItems(node, g) { (g.cards || []).forEach((c) => (c.items || []).forEach((it) => node._ezItemSel.add(String(it.id)))); node._ezItemSel = node._ezItemSel || new Set(); render(node); }
 function clearItems(node, g) { node._ezItemSel.clear(); render(node); }
 function invertItems(node, g) { const sel = node._ezItemSel || new Set(); const ids = new Set(); (g.cards || []).forEach((c) => (c.items || []).forEach((it) => ids.add(String(it.id)))); ids.forEach((id) => { if (sel.has(id)) sel.delete(id); else sel.add(id); }); render(node); }
+async function deleteSelectedItems(node, g) {
+  const sel = node._ezItemSel || new Set();
+  let n = 0;
+  (g.cards || []).forEach((c) => {
+    n += (c.items || []).filter((it) => sel.has(String(it.id))).length;
+  });
+  if (!n) { uiToast(ezT('Select cards to delete first')); return; }
+  if (!(await uiConfirm(ezT('Delete selected cards?') + ' (' + n + ')'))) return;
+  (g.cards || []).forEach((c) => {
+    c.items = (c.items || []).filter((it) => !sel.has(String(it.id)));
+  });
+  node._ezItemSel.clear(); syncToConfig(node); updatePorts(node, true); render(node);
+}
 function mergeSelectedItems(node, g) {
   const sel = node._ezItemSel || new Set();
   const found = [];
@@ -860,6 +1219,17 @@ function groupMgrClick(node, gi) {
 function selectAllGroups(node) { const st = stateFor(node); st.groups.forEach((gr) => node._ezGrpSel.add(String(gr.id))); node._ezGrpSel = node._ezGrpSel || new Set(); render(node); }
 function clearGroups(node) { node._ezGrpSel.clear(); render(node); }
 function invertGroups(node) { const st = stateFor(node); const sel = node._ezGrpSel || new Set(); st.groups.forEach((gr) => { const id = String(gr.id); if (sel.has(id)) sel.delete(id); else sel.add(id); }); render(node); }
+async function deleteSelectedGroups(node) {
+  const sel = node._ezGrpSel || new Set();
+  const st = stateFor(node);
+  const hit = (st.groups || []).filter((g) => sel.has(String(g.id)));
+  if (!hit.length) { uiToast(ezT('Select groups to delete first')); return; }
+  if (!(await uiConfirm(ezT('Delete selected groups?') + ' (' + hit.length + ')'))) return;
+  st.groups = st.groups.filter((g) => !sel.has(String(g.id)));
+  node._ezGrpSel.clear();
+  if (!st.groups.some((g) => String(g.id) === String(st.currentGroupId))) st.currentGroupId = st.groups[0] && st.groups[0].id;
+  syncToConfig(node); updatePorts(node, true); render(node);
+}
 function mergeGroups(node) {
   const st = stateFor(node); const sel = node._ezGrpSel || new Set();
   const groups = st.groups.filter((gr) => sel.has(String(gr.id)));
@@ -1106,11 +1476,21 @@ function beginGroupDrag(e, node, gi, tab) {
 // ===== 预设 =====
 async function loadPresetsInto(sel) {
   try {
-    const r = await fetch(PRESET_API); const list = await r.json();
+    const r = await ezFetch(PRESET_API); const list = await r.json();
+    const _arr = Array.isArray(list) ? list : null;
     const st = sel._node ? stateFor(sel._node) : null; sel.innerHTML = '';
     const dOpt = el('option'); dOpt.value = 'default'; dOpt.textContent = 'default'; if (st && st.currentPreset === 'default') dOpt.selected = true; sel.appendChild(dOpt);
-    (Array.isArray(list) ? list : []).forEach((p) => { if (p && (p.name === 'default' || p.kind === 'fixed')) return; const o = el('option'); o.value = p.name; o.textContent = p.name; if (st && p.name === st.currentPreset) o.selected = true; sel.appendChild(o); });
-    if (st && st.currentPreset && st.currentPreset !== 'default' && ![...sel.options].some((o) => o.value === st.currentPreset)) { const o = el('option'); o.value = st.currentPreset; o.textContent = st.currentPreset; sel.appendChild(o); }
+    (_arr || []).forEach((p) => { if (p && (p.name === 'default' || p.kind === 'fixed')) return; const o = el('option'); o.value = p.name; o.textContent = p.name; if (st && p.name === st.currentPreset) o.selected = true; sel.appendChild(o); });
+    if (st && st.currentPreset && st.currentPreset !== 'default' && ![...sel.options].some((o) => o.value === st.currentPreset)) {
+      if (_arr) {
+        // 服务端确实没有这个预设（被删 / 换了机器）→ 回到 default；以前会补一个点了没反应的幽灵项
+        st.currentPreset = 'default';
+        try { syncToConfig(sel._node); } catch (_) {}
+      } else {
+        // 拉取失败（离线/403）：保留原选择，避免一次抖动把用户的预设名清掉
+        const o = el('option'); o.value = st.currentPreset; o.textContent = st.currentPreset; sel.appendChild(o);
+      }
+    }
     const dd = sel._dd;
     if (dd) {
       const cur = st ? st.currentPreset : (sel.value || 'default');
@@ -1124,13 +1504,14 @@ async function loadPresetsInto(sel) {
 }
 async function saveCurrentPreset(node) {
   let dft = ezT('Preset 1');
-  try { const l = await (await fetch(PRESET_API)).json(); dft = ezT('Preset') + ((l || []).length + 1); } catch (_) {}
+  try { const l = await (await ezFetch(PRESET_API)).json(); dft = ezT('Preset') + ((l || []).length + 1); } catch (_) {}
   const name = await uiPrompt(ezT('Enter preset name:'), dft);
   if (!name || !name.trim()) return;
   if (name.trim() === 'default') { uiToast(ezT('That name is reserved for a built-in preset')); return; }   // default 是前端合成的内置项，同名存档不会显示
   const st = stateFor(node);
   try {
-    await fetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), groups: deepClone(st.groups), currentGroupId: st.currentGroupId }) });
+    const r = await ezFetch(PRESET_API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim(), groups: deepClone(st.groups), currentGroupId: st.currentGroupId }) });
+    if (!r || r.ok === false) throw new Error('preset save failed');   // 403/500 不能当成功（否则会把不存在的名字写进工作流）
     st.currentPreset = name.trim(); syncToConfig(node);
     const sel = node._emlRoot && node._emlRoot.querySelector('.eml-preset'); if (sel) { sel._node = node; loadPresetsInto(sel); }
     uiToast(ezT('Preset saved'));
@@ -1146,7 +1527,7 @@ function applyPreset(node, name) {
         syncToConfig(node); updatePorts(node, true); render(node);
         return;
       }
-      const list = await (await fetch(PRESET_API)).json();
+      const list = await (await ezFetch(PRESET_API)).json();
       const p = (list || []).find((x) => x.name === name); if (!p) return;
       st.groups = deepClone(p.groups || []); st.currentPreset = name;
       st.currentGroupId = p.currentGroupId && st.groups.some((g) => g.id === p.currentGroupId) ? p.currentGroupId : (st.groups[0] && st.groups[0].id);
@@ -1159,13 +1540,13 @@ async function deletePreset(node) {
   const sel = node._emlRoot && node._emlRoot.querySelector('.eml-preset'); const name = sel && sel.value;
   if (!name) { uiToast(ezT('No preset to delete')); return; }
   if (name === 'default') { uiToast(ezT('The default preset cannot be deleted')); return; }
-  try { await fetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); stateFor(node).currentPreset = 'default'; syncToConfig(node); if (sel) { sel._node = node; loadPresetsInto(sel); } uiToast(ezT('Preset deleted')); } catch (_) { uiToast(ezT('Delete failed')); }
+  try { await ezFetch(PRESET_API + '/' + encodeURIComponent(name), { method: 'DELETE' }); stateFor(node).currentPreset = 'default'; syncToConfig(node); if (sel) { sel._node = node; loadPresetsInto(sel); } uiToast(ezT('Preset deleted')); } catch (_) { uiToast(ezT('Delete failed')); }
 }
 
 // ===== 文件浏览（可导航任意路径：path bar + 左侧目录 + 底部图标工具栏 + ctrl/shift 多选）=====
 async function fetchBrowse(path) {
-  try { const r = await fetch('/media_loader/browse?path=' + encodeURIComponent(path || '')); const d = await r.json(); if (d && d.error) uiToast(ezT('Browse failed: ') + d.error); if (d && ((d.files && d.files.length) || (d.dirs && d.dirs.length) || d.path)) return { path: d.path || '', parent: d.parent || '', name: d.name || '', dirs: d.dirs || [], files: d.files || [], roots: d.roots || [], mine: d.mine || [] }; } catch (_) {}
-  try { const r = await fetch('/media_loader/files'); const d = await r.json(); const fl = d.files || []; return { path: '', parent: '', name: 'input', dirs: [], files: fl, _legacy: true }; } catch (_) {}
+  try { const r = await ezFetch('/media_loader/browse?path=' + encodeURIComponent(path || '')); const d = await r.json(); if (d && d.error) uiToast(ezT('Browse failed: ') + d.error); if (d && ((d.files && d.files.length) || (d.dirs && d.dirs.length) || d.path)) return { path: d.path || '', parent: d.parent || '', name: d.name || '', dirs: d.dirs || [], files: d.files || [], roots: d.roots || [], mine: d.mine || [] }; } catch (_) {}
+  try { const r = await ezFetch('/media_loader/files'); const d = await r.json(); const fl = d.files || []; return { path: '', parent: '', name: 'input', dirs: [], files: fl, _legacy: true }; } catch (_) {}
   return { path: '', parent: '', name: '', dirs: [], files: [] };
 }
 function openBrowse(node, g, card) {
@@ -1196,6 +1577,22 @@ function openBrowse(node, g, card) {
     else if (el.scrollWidth > el.clientWidth + 1) el.scrollLeft += e.deltaY * mult;
     e.preventDefault(); e.stopPropagation();
   }, { passive: false });
+  let rootBtn = null, rootMenu = null, rootSub = null, lastRootGroups = [], lastRootItems = [], lastRootCat = {};
+  const bucketOpen = { default: false, node: false, custom: false };
+  let rootsHydrated = false;
+  const OWNER_LABEL = { medialoader: 'MediaLoader', previewany: 'PreviewAny', prompthelper: 'PromptHelper', segmentpanel: 'SegmentPanel', custom: ezT('Custom') };
+  const SHOW_KEY = 'ezflex.rootShow';
+  let shownRoots = null;
+  try { const raw = localStorage.getItem(SHOW_KEY); if (raw) shownRoots = new Set(JSON.parse(raw)); } catch (_) { shownRoots = null; }
+  const saveShown = () => { try { localStorage.setItem(SHOW_KEY, JSON.stringify(Array.from(shownRoots || []))); } catch (_) {} };
+  const isShown = (p, def) => (shownRoots ? shownRoots.has(String(p)) : !!def);
+  const toggleShown = (p, def) => {
+    if (!shownRoots) shownRoots = new Set(lastRootItems.filter((x) => x.def).map((x) => String(x.path)));
+    const s = String(p);
+    if (isShown(s, def)) shownRoots.delete(s); else shownRoots.add(s);
+    saveShown();
+    try { drawTree(); } catch (_) {}
+  };
   // 「＋根」：把输入框/当前目录登记为「可浏览根目录」（后端只允许本机登记；浏览器只能在根目录内导航）
   try {
     const pb = ov.querySelector('.eml-path');
@@ -1208,7 +1605,7 @@ function openBrowse(node, g, card) {
         const v = (pb.value || '').trim() || cur;
         if (!v) { uiToast(ezT('Enter a folder in the path field first')); return; }
         try {
-          const r = await fetch('/media_loader/roots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: v }) });
+          const r = await ezFetch('/media_loader/roots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: v }) });
           const d = await r.json().catch(() => ({}));
           if (d && d.ok) { uiToast((d.note ? ezT('Already a root: ') : ezT('Added as browsable root: ')) + v); await refreshRoots(v); navigate(v, false); }
           else uiToast(ezT('Failed to add root: ') + ((d && d.error) || ('HTTP ' + r.status)));
@@ -1228,19 +1625,46 @@ function openBrowse(node, g, card) {
         const v = (rs.value || '').trim() || (pb.value || '').trim() || cur;
         if (!v) return;
         try {
-          const r = await fetch('/media_loader/roots', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remove: v }) });
+          // 一次点击 = 真删：整行移除（read/write/scan 一起），后端还会把它记进「别再自动发现」的黑名单。
+          // 以前发现它在 saveRoots 里就改调 /preview_any/save_roots（只清 write 位、不删行）→ 看着删了其实还在，
+          // 而"从预设自动发现"的目录更是删不掉（没有登记行），只能掉到「默认根目录」里再删一次。
+          const r = await ezFetch('/media_loader/roots', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ remove: v }),
+          });
           const d = await r.json().catch(() => ({}));
-          uiToast((d && d.ok) ? (ezT('Removed from browsable roots: ') + v) : (ezT('Failed to remove root: ') + ((d && d.error) || ('HTTP ' + r.status))));
+          uiToast((d && d.ok)
+            ? ezT('Removed from browsable roots: ') + v
+            : (ezT('Failed to remove root: ') + ((d && d.error) || ('HTTP ' + r.status))));
           if (d && d.ok) await refreshRoots('');
           navigate(cur || '', false);
         } catch (err) { uiToast(ezT('Failed to remove root: ') + (err && err.message || err)); }
       });
       host.insertBefore(rs, pb);
+      // 原生下拉只显示 basename（LLM / unet / clip 重名时完全分不清）→ 隐藏它，换成
+      // 「组名 + 悬停右展开完整路径」的菜单（和 PromptHelper 的分类菜单同款交互）。
+      rs.style.display = 'none';
+      rootBtn = el('button', 'eml-rootbtn');
+      rootBtn.type = 'button';
+      rootBtn.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:7px;padding:6px 10px;font-size:12px;line-height:16px;color:var(--ez-fg-2);max-width:260px;min-width:130px;flex:0 0 auto;text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+      rootBtn.title = ezT('Browsable roots: click to pick one');
+      rootMenu = el('div', 'eml-rmenu');
+      rootMenu.style.cssText = 'position:absolute;z-index:30;display:none;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;padding:4px;min-width:230px;max-width:340px;max-height:60vh;overflow:auto;box-shadow:0 12px 36px rgba(0,0,0,.28);';
+      ov.appendChild(rootMenu);
+      rootSub = el('div', 'eml-rsub');
+      rootSub.style.cssText = 'position:absolute;z-index:31;display:none;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:8px;padding:4px;min-width:260px;max-width:62vw;max-height:52vh;overflow:auto;box-shadow:0 14px 40px rgba(0,0,0,.26);';
+      ov.appendChild(rootSub);
       host.insertBefore(rb, pb.nextSibling);
       host.insertBefore(rx, rb.nextSibling);
+      host.insertBefore(rootBtn, pb);
     }
   } catch (_) {}
-  const closeBrowse = () => { document.removeEventListener('mousedown', onDown); if (ov.parentNode) ov.parentNode.removeChild(ov); };
+  const closeBrowse = () => {
+    document.removeEventListener('mousedown', onDown);
+    if (ov._emlRootDown) document.removeEventListener('mousedown', ov._emlRootDown);
+    if (ov._emlRootKey) document.removeEventListener('keydown', ov._emlRootKey);
+    if (ov.parentNode) ov.parentNode.removeChild(ov);
+  };
   const onDown = (e) => { if (!ov.contains(e.target)) closeBrowse(); };
   document.addEventListener('mousedown', onDown);
   ov.querySelector('.eml-bbclose').addEventListener('click', closeBrowse);
@@ -1252,37 +1676,312 @@ function openBrowse(node, g, card) {
   let cur = ''; let curData = { files: [], dirs: [], parent: '', path: '' };
   let selFolder = ''; let paneFiles = [];
   let selected = new Set(); let lastAnchor = -1; let view = 'big';
-  let hist = []; let histIdx = -1; let mineRoots = []; let pinnedRoot = '';
+  let hist = []; let histIdx = -1; let mineRoots = []; let saveRoots = []; let pinnedRoot = '';
+  let deletableRoots = new Set();   // 可删的根（自己登记的 / 自动发现的）；默认目录与模型目录不可删
   const fileUrl = (f) => { if (f.url) return f.url; return '/media_loader/serve?path=' + encodeURIComponent(f.path || ''); };
   // 用后端刚返回的 roots 立刻重建下拉（保存/删除根目录后不用再手点一次）
+  // 分组 = 内置 → 各节点登记的根（来源）→ 模型目录 → 自动发现；根名后面标能力（可写 / 扫描）
   const rootLabel = (p) => { const s = String(p || ''); const parts = s.split(s.indexOf('\\') >= 0 ? '\\' : '/').filter(Boolean); return parts.pop() || s; };
-  const applyRoots = (roots, pick, mine) => {
+  const SRC_LABEL = {
+    medialoader: 'MediaLoader',
+    previewany: 'PreviewAny',
+    prompthelper: 'PromptHelper',
+    segmentpanel: 'SegmentPanel',
+  };
+  const capSuffix = (row) => {
+    const caps = [];
+    if (row.write) caps.push(ezT('writable'));
+    if (row.scan) caps.push(ezT('scan'));
+    return caps.length ? ' · ' + caps.join(' · ') : '';
+  };
+  const applyRoots = (roots, pick, mine, save, rows, builtin, model) => {
     const rs = ov.querySelector('.eml-roots');
     if (!rs) return;
-    if (Array.isArray(mine)) mineRoots = mine;
+    // 只有真的带了内容才更新：浏览接口有时不带 mine/save，空数组不能把已有列表冲掉
+    if (Array.isArray(mine) && mine.length) mineRoots = mine;
+    if (Array.isArray(save) && save.length) saveRoots = save;
     const list = roots || [];
-    const sig = list.join('|');
+    // 归一化后再比：大小写、斜杠方向、结尾斜杠在不同来源里可能不一致，否则会全部落进「自动发现」
+    const norm = (x) => String(x || '').replace(/[\\/]+/g, '\\').replace(/\\+$/, '').toLowerCase();
+    const byPath = {};
+    (rows || []).forEach((r) => { if (r && r.path) byPath[norm(r.path)] = r; });
+    const builtinSet = new Set((builtin || []).map(norm));
+    const modelSet = new Set((model || []).map(norm));
+    const nodeOnly = new Set();   // 节点派生目录（output\EzFlex_Segments 这类）：只导航、不可删
+    // 兜底：后端给的路径/名单万一和 roots 的写法对不上（junction、盘符大小写、extra_model_paths），
+    // 就按目录名再判一次，免得全部落进「默认根目录」。
+    const baseOf = (x) => String(x || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop().toLowerCase();
+    const MODEL_DIRS = new Set(['checkpoints', 'vae', 'loras', 'clip', 'clip_vision', 'text_encoders', 'diffusion_models',
+      'unet', 'controlnet', 'embeddings', 'llm', 'gligen', 'upscale_models', 'style_models', 'photomaker', 'hypernetworks', 'vae_approx']);
+    // 目录名 → [分组键, 分组标题]：让「模型目录」这一级直接说明服务于哪个节点
+    const MODEL_USE = {
+      unet: ['main', 'Model folders · main model (Models combo)'],
+      diffusion_models: ['main', 'Model folders · main model (Models combo)'],
+      checkpoints: ['main', 'Model folders · main model (Models combo)'],
+      text_encoders: ['text', 'Model folders · text encoders (Models combo / PromptHelper)'],
+      clip: ['text', 'Model folders · text encoders (Models combo / PromptHelper)'],
+      clip_vision: ['text', 'Model folders · text encoders (Models combo / PromptHelper)'],
+      vae: ['vae', 'Model folders · VAE / LoRA (Models combo)'],
+      loras: ['vae', 'Model folders · VAE / LoRA (Models combo)'],
+      controlnet: ['ctrl', 'Model folders · ControlNet (Controlnet preprocessor)'],
+    };
+    // 分组键 → { label, items }；顺序即展示顺序
+    const groups = [];
+    const gmap = {};
+    const ORDER = (k) => (k === 'builtin' ? 0 : (k.indexOf('model:') === 0 ? 1 : ((k.indexOf('own:') === 0 || k.indexOf('src:') === 0) ? 2 : 3)));
+    const push = (key, label, p) => {
+      if (!gmap[key]) { gmap[key] = { label, items: [], key }; groups.push(gmap[key]); }
+      gmap[key].items.push(p);
+    };
+    const reppush = push;
+    const finishGroups = () => {
+      groups.sort((a, b) => (ORDER(a.key) - ORDER(b.key)) || String(a.label).localeCompare(String(b.label)));
+    };
+    list.slice().sort((a, b) => String(a).toLowerCase().localeCompare(String(b).toLowerCase())).forEach((p) => {
+      const s = String(p);
+      const row = byPath[norm(s)];
+      const bn = baseOf(s);
+      if (builtinSet.has(norm(s)) || bn === 'input' || bn === 'output') reppush('builtin', ezT('Built-in (input / output)'), s, true);
+else if (modelSet.has(norm(s)) || /[\\/]models[\\/]/i.test(s)) {   // 后端名单 + 路径兜底（名单为空时也能分组）
+        const g = MODEL_USE[bn];
+        const cat = g ? g[0] : 'other';
+        lastRootCat[norm(s)] = cat;
+        if (cat === 'ctrl') reppush('model:ctrl', 'ControlnetPreprocessor', s, true);
+        else reppush('model', 'ModelsCombo', s, true);
+      } else if (saveRoots.some((x) => norm(x) === norm(s))) reppush('own:previewany', 'PreviewAny', s, false);   // PreviewAny 的保存根优先
+      else if (row) {
+        const src = (row.src && row.src[0]) || '';
+        const own = String(src || 'medialoader').toLowerCase();   // 只看登记来源，owner 不再参与（下拉已移除）
+        lastRootCat[norm(s)] = src;
+        reppush('own:' + own, OWNER_LABEL[own] || OWNER_LABEL.medialoader, s, false);
+      }
+      else reppush('auto', ezT('Default roots'), s, false);
+    });
+    // ★ 各节点默认：即使和 input/output 重合也单独列出来，按节点看更清楚
+    {
+      // 用已经分好组的结果来派生，避免依赖这次请求有没有带 builtin/model
+      const itemsOf = (k) => (groups.find((g) => g.key === k) || { items: [] }).items;
+      const builtinItems = itemsOf('builtin');
+      const modelItems = groups.filter((g) => String(g.key).indexOf('model') === 0).reduce((a, g) => a.concat(g.items), []);
+      const isOut = (x) => /[\\/]output$/i.test(String(x));
+      const outP = builtinItems.find(isOut) || '';
+      // 这些是「读 ComfyUI storage 推出来的」默认目录：只做导航，不许删（删了菜单里也还在）。
+      const pushDerived = (key, label, p) => { push(key, label, p); nodeOnly.add(norm(p)); };
+      if (outP) {
+        pushDerived('node:PreviewAny', 'PreviewAny', outP);
+        pushDerived('node:SegmentPanel', 'SegmentPanel', outP + '\\EzFlex_Segments');
+      }
+      builtinItems.forEach((x) => pushDerived('node:MediaLoader', 'MediaLoader', x));
+      modelItems.forEach((x) => pushDerived('node:PromptHelper', 'PromptHelper', x));
+    }
+    // 可删的根 = 自己登记的 / 从预设里自动发现的；不是 ComfyUI 默认目录、不是模型目录、不是节点派生目录。
+    // 内置 input/output 与模型目录来自 folder_paths（storage），删掉只是把登记行（连同 write 能力）摘了，
+    // 菜单里照样还在 —— 所以按钮必须灰掉，而不是点了没反应。
+    deletableRoots = new Set();
+    list.forEach((p) => {
+      const s = String(p), k = norm(s), bn = baseOf(s);
+      if (builtinSet.has(k) || modelSet.has(k) || bn === 'input' || bn === 'output') return;
+      if (nodeOnly.has(k) || /[\\/]models[\\/]/i.test(s)) return;
+      deletableRoots.add(s);
+    });
+    // 自定义：固定列出可归属的节点，没有内容就是 0（占位，方便以后把根挪过去）
+    ['medialoader', 'previewany', 'prompthelper', 'segmentpanel'].forEach((o) => {
+      const k = 'own:' + o;
+      if (!gmap[k]) { gmap[k] = { label: OWNER_LABEL[o], items: [], key: k }; groups.push(gmap[k]); }
+    });
+    finishGroups();
+    lastRootGroups = groups;
+    lastRootItems = [];
+    groups.forEach((g) => g.items.forEach((p) => lastRootItems.push({ path: p, def: (g.key === 'builtin' || g.key.indexOf('model:') === 0) })));
+    syncRootBtn();
+    // ★ 有的接口只回 roots（rows/save/builtin/model 都缺）⇒ 菜单会全部落到「默认根目录」。
+    //   这里检测到缺数据就补拉一次完整版再重算（只补一次，避免循环）。
+    if (!rootsHydrated && (!saveRoots.length || !Object.keys(byPath).length)) {
+      rootsHydrated = true;
+      ezFetch('/media_loader/roots').then((r) => r.json()).then((d) => {
+        if (d && Array.isArray(d.roots)) applyRoots(d.roots, '', d.mine || [], d.save || [], d.rows || [], d.builtin || [], d.model || []);
+      }).catch(() => {});
+    }
+    const sig = list.join('|') + '||' + saveRoots.join('|') + '||'
+      + (rows || []).map((r) => String(r.path) + (r.write ? ':w' : '') + (r.scan ? ':s' : '') + ':' + ((r.src || []).join('+'))).join(',');
     if (rs.dataset.sig !== sig) {
       rs.dataset.sig = sig;
       rs.innerHTML = '';
       if (!list.length) { const ph = el('option'); ph.value = ''; ph.textContent = ezT('— Root (backend not ready) —'); rs.appendChild(ph); }
-      list.forEach((p) => { const o = el('option'); o.value = p; o.textContent = rootLabel(p); o.title = p; rs.appendChild(o); });
+      groups.forEach((g) => {
+        const grp = el('optgroup');
+        grp.label = g.label;
+        g.items.forEach((p) => {
+          const row = byPath[String(p)] || {};
+          const o = el('option');
+          o.value = p;
+          o.textContent = rootLabel(p) + capSuffix(row);
+          o.title = p + (row.write ? '\n' + ezT('writable (save target)') : '');
+          grp.appendChild(o);
+        });
+        rs.appendChild(grp);
+      });
     }
     if (pick) rs.value = pick;
     syncDelBtn();
   };
-  // 删除按钮只对「自己登记的根」可用：内置 input/output 与扫描目录不可删（灰掉而不是点了没反应）
+  // 删除按钮只对「可删的根」可用：自己登记的 / 从预设自动发现的。
+  // ComfyUI 的内置 input/output 与模型目录来自 folder_paths（storage），各节点默认目录也由它们派生 ——
+  // 删掉只会摘掉登记行（连 write 能力一起），菜单里照样还在，所以必须灰掉而不是点了没反应。
   const syncDelBtn = () => {
     const rs = ov.querySelector('.eml-roots'), rx = ov.querySelector('.eml-rmroot');
     if (!rs || !rx) return;
-    const on = mineRoots.indexOf(String(rs.value || '')) >= 0;
+    const on = deletableRoots.has(String(rs.value || ''));
     rx.disabled = !on;
     rx.style.opacity = on ? '' : '.45';
     rx.style.cursor = on ? 'pointer' : 'default';
     rx.style.color = on ? 'var(--ez-bad-fg)' : 'var(--ez-fg-muted)';
+    rx.title = on
+      ? ezT('Delete the selected root')
+      : ezT('Built-in and model folders come from ComfyUI storage and cannot be deleted; only roots you added can be removed.');
   };
+  // 当前根按钮文字（只显示目录名；完整路径在 title 和悬停子菜单里）
+  const rootSel = () => ov.querySelector('.eml-roots');
+  function syncRootBtn() {
+    if (!rootBtn) return;
+    const sel = rootSel();
+    const p = String((sel && sel.value) || '');
+    rootBtn.textContent = p ? rootLabel(p) : ezT('\u2014 Root \u2014');
+    rootBtn.title = p || ezT('Browsable roots: click to pick one');
+  }
+  function closeRootMenu() { if (rootMenu) rootMenu.style.display = 'none'; if (rootSub) rootSub.style.display = 'none'; }
+  function hideSub() { if (rootSub) rootSub.style.display = 'none'; }
+  function pickRoot(p) {
+    closeRootMenu();
+    const sel = rootSel();
+    if (sel) {
+      let hit = false;
+      for (let i = 0; i < sel.options.length; i++) { if (String(sel.options[i].value) === String(p)) { hit = true; break; } }
+      if (!hit) { const o = document.createElement('option'); o.value = p; o.textContent = p; sel.appendChild(o); }
+      sel.value = p;
+    }
+    pinnedRoot = p;
+    syncRootBtn(); syncDelBtn();
+    if (p) navigate(p, false);
+  }
+  // 右侧弹出：某个来源下所有根的完整路径
+  function showSub(g, rowEl) {
+    if (!rootSub) return;
+    const selNow = String((rootSel() && rootSel().value) || '');
+    const rr = rowEl.getBoundingClientRect(), orc = ov.getBoundingClientRect();
+    rootSub.innerHTML = '';
+    if (!g.items.length) {
+      const em = el('div'); em.textContent = ezT('(empty)');
+      em.style.cssText = 'padding:6px 8px;font-size:11px;color:var(--ez-fg-muted);';
+      rootSub.appendChild(em);
+    }
+    g.items.forEach((p) => {
+      const it = el('div');
+      const isCur = String(p) === selNow || String(p) === String(pinnedRoot || '');
+      it.textContent = p;
+      it.title = p;
+      if (isCur) { it.style.color = 'var(--ez-ok-fg)'; it.style.fontWeight = '600'; }
+      it.style.cssText = 'padding:5px 8px;border-radius:6px;cursor:pointer;font-size:11px;line-height:1.35;font-family:ui-monospace,Menlo,Consolas,monospace;color:var(--ez-fg-2);word-break:break-all;';
+      if (g.def) {
+        const tag = el('span'); tag.textContent = ezT('Default');
+        tag.style.cssText = 'margin-left:8px;font-size:10px;color:var(--ez-fg-muted);border:1px solid var(--ez-border);border-radius:4px;padding:0 4px;';
+        it.appendChild(tag);
+      }
+      it.addEventListener('mouseenter', () => { it.style.background = 'var(--ez-surface-2)'; });
+      it.addEventListener('mouseleave', () => { it.style.background = ''; });
+      it.addEventListener('click', (e) => {
+        e.stopPropagation();
+        try { const pb = ov.querySelector('.eml-path'); if (pb) pb.value = p; } catch (_) {}   // 填进输入框，方便保存/删除这个根
+        pickRoot(p);
+      });
+      rootSub.appendChild(it);
+    });
+    const left = rr.right - orc.left + 6;
+    rootSub.style.left = Math.min(left, Math.max(4, orc.width - 300)) + 'px';
+    rootSub.style.top = Math.max(4, rr.top - orc.top) + 'px';
+    rootSub.style.display = 'block';
+  }
+  function openRootMenu() {
+    if (!rootMenu || !rootBtn) return;
+    const br = rootBtn.getBoundingClientRect(), orc = ov.getBoundingClientRect();
+    rootMenu.style.left = Math.max(4, br.left - orc.left) + 'px';
+    rootMenu.style.top = Math.max(4, br.bottom - orc.top + 4) + 'px';
+    rootMenu.innerHTML = '';
+    hideSub();
+    if (!lastRootGroups.length) {
+      const em = el('div'); em.textContent = ezT('No roots');
+      em.style.cssText = 'padding:8px;font-size:12px;color:var(--ez-fg-muted);';
+      rootMenu.appendChild(em);
+    }
+    const selNow = String((rootSel() && rootSel().value) || '');
+    // ★ 三个大类：默认（input/output）/ 各节点默认 / 自定义；大类下面才是各节点分组
+    const BUCKET = (k) => (k === 'builtin' ? 'default'
+      : ((String(k).indexOf('model') === 0 || String(k).indexOf('node:') === 0) ? 'node' : 'custom'));
+    const BUCKET_LABEL = { default: ezT('Default (input / output)'), node: ezT('Per-node defaults'), custom: ezT('Custom') };
+    const bucketOrder = ['default', 'node', 'custom'];
+    // ★ 第一层=三个大类，点击展开第二层（各节点），再点节点才出第三层（完整路径）
+    bucketOrder.forEach((bk) => {
+      const inBucket = lastRootGroups.filter((g) => BUCKET(g.key) === bk);
+      if (!inBucket.length) return;
+      const open = !!bucketOpen[bk];
+      const bh = el('div');
+      bh.style.cssText = 'display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;color:var(--ez-fg);';
+      const bt = el('span'); bt.textContent = BUCKET_LABEL[bk] || bk;
+      bt.style.cssText = 'flex:1 1 auto;';
+      const bc = el('span'); bc.textContent = String(inBucket.length);
+      bc.style.cssText = 'flex:0 0 auto;font-size:10px;color:var(--ez-fg-muted);';
+      const ba = el('span'); ba.textContent = open ? '\u25be' : '\u25b8';
+      ba.style.cssText = 'flex:0 0 auto;color:var(--ez-fg-muted);';
+      bh.appendChild(bt); bh.appendChild(bc); bh.appendChild(ba);
+      bh.addEventListener('mouseenter', () => { bh.style.background = 'var(--ez-surface-2)'; });
+      bh.addEventListener('mouseleave', () => { bh.style.background = ''; });
+      bh.addEventListener('click', (e) => { e.stopPropagation(); bucketOpen[bk] = !open; hideSub(); openRootMenu(); });
+      rootMenu.appendChild(bh);
+      if (!open) return;
+      inBucket.forEach((g) => {
+        const hasCur = g.items.some((p) => String(p) === selNow);
+        const row = el('div');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 8px 6px 22px;border-radius:6px;cursor:pointer;font-size:12px;color:var(--ez-fg);white-space:nowrap;'
+          + (hasCur ? 'background:var(--ez-surface-2);' : '');
+        const nm = el('span'); nm.textContent = g.label;
+        nm.style.cssText = 'flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;';
+        const cnt = el('span'); cnt.textContent = String(g.items.length);
+        cnt.style.cssText = 'flex:0 0 auto;font-size:10px;color:var(--ez-fg-muted);';
+        const ar = el('span'); ar.textContent = '\u25b8';
+        ar.style.cssText = 'flex:0 0 auto;color:var(--ez-fg-muted);';
+        row.appendChild(nm); row.appendChild(cnt); row.appendChild(ar);
+        row.addEventListener('mouseenter', () => { row.style.background = 'var(--ez-surface-2)'; });
+        row.addEventListener('mouseleave', () => { if (!hasCur) row.style.background = ''; });
+        row.addEventListener('click', (e) => { e.stopPropagation(); showSub(g, row); });
+        rootMenu.appendChild(row);
+      });
+    });
+
+    rootMenu.style.display = 'block';
+  }
+  if (rootBtn) {
+    rootBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (rootMenu.style.display === 'block') closeRootMenu(); else openRootMenu();
+    });
+    // 句柄存到弹窗元素上：closeBrowse() 要能摘掉，否则每开一次浏览弹窗就多两个 document 监听
+    ov._emlRootDown = (e) => {
+      if (!rootMenu || rootMenu.style.display !== 'block') return;
+      if (rootMenu.contains(e.target) || (rootSub && rootSub.contains(e.target)) || e.target === rootBtn) return;
+      closeRootMenu();
+    };
+    ov._emlRootKey = (e) => { if (e.key === 'Escape') closeRootMenu(); };
+    document.addEventListener('mousedown', ov._emlRootDown);
+    document.addEventListener('keydown', ov._emlRootKey);
+  }
+
   const refreshRoots = async (pick) => {
-    try { const r = await fetch('/media_loader/roots'); const d = await r.json(); applyRoots(d.roots || [], pick || '', d.mine || []); } catch (_) {}
+    try {
+      const r = await ezFetch('/media_loader/roots');
+      const d = await r.json();
+      if (r.status === 403 || (d && d.local_only)) ezLocalOnlyNotice('ml.roots');   // 远端：讲清楚是"仅本机"，不是配置丢了
+      applyRoots(d.roots || [], pick || '', d.mine || [], d.save || [], d.rows || [], d.builtin || [], d.model || []);
+    } catch (_) {}
   };
   const navigate = async (path, push = true) => {
     if (push && path !== cur) { hist = hist.slice(0, histIdx + 1); hist.push(path); histIdx = hist.length - 1; }
@@ -1296,7 +1995,8 @@ function openBrowse(node, g, card) {
       const rp = String(d.path || '');
     const inPin = !!pinnedRoot && (rp === pinnedRoot || (rp.indexOf(pinnedRoot) === 0 && (rp[pinnedRoot.length] === '\\' || rp[pinnedRoot.length] === '/')));
     if (!inPin) pinnedRoot = '';
-    applyRoots(d.roots || [], inPin ? pinnedRoot : (d.root || (d.roots || [])[0] || ''), d.mine || []);
+    applyRoots(d.roots || [], inPin ? pinnedRoot : (d.root || (d.roots || [])[0] || ''), d.mine || [], d.save || [],
+               d.rows || [], d.builtin || [], d.model || []);
       const up = ov.querySelector('.eml-navup');
       if (up) { up.style.opacity = d.parent ? '' : '.45'; up.title = d.parent ? ezT('Parent directory') : ezT('Already at the root (to go to a parent folder, click "Add as root")'); }
     } catch (_) {}
@@ -1345,7 +2045,7 @@ function openBrowse(node, g, card) {
   };
   const mkAddBtn = (f) => {
     const b = el('button'); b.type = 'button';
-    b.style.cssText = 'position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:var(--ez-surface);color:var(--ez-fg);font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px);transition:.15s;font-family:inherit;padding:0;';
+    b.style.cssText = 'position:absolute;top:6px;right:6px;z-index:3;width:26px;height:26px;border-radius:50%;border:1px solid rgba(255,255,255,.5);background:var(--ez-surface);color:var(--ez-fg);font-size:16px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.15s;font-family:inherit;padding:0;';
     const refresh = () => { const on = cardHasFile(f); b.textContent = on ? '−' : '+'; b.title = on ? ezT('Remove from card group') : ezT('Add to card group'); b.style.background = on ? 'rgba(74,106,90,.85)' : 'rgba(255,255,255,.55)'; b.style.color = on ? 'var(--ez-on-strong)' : 'var(--ez-fg)'; };
     refresh();
     b.addEventListener('mouseenter', () => { b.style.transform = 'scale(1.05)'; });
@@ -1411,14 +2111,28 @@ function openBrowse(node, g, card) {
     const fl = e.dataTransfer && e.dataTransfer.files;
     if (!fl || !fl.length) return;
     const fd = new FormData(); Array.from(fl).forEach((f) => fd.append('files', f));
-    try { await fetch('/media_loader/upload', { method: 'POST', body: fd }); await navigate(cur, false); uiToast(ezT('Uploaded ') + fl.length + ezT(' files to the input folder')); } catch (_) { uiToast(ezT('Upload failed')); }
+    try {
+      const r = await ezFetch('/media_loader/upload', { method: 'POST', body: fd });
+      if (r.status === 413) { uiToast(ezT('File too large for upload — raise ComfyUI --max-upload-size (default 100 MB)')); return; }
+      if (!r.ok) { uiToast(ezT('Upload failed')); return; }
+      const d = await r.json().catch(() => ({}));
+      const n = (d.files || []).length;
+      if (!n) { uiToast(ezT('Upload failed')); return; }   // 服务端拒收时不能谎报成功
+      await navigate(cur, false);
+      uiToast(ezT('Uploaded ') + n + ezT(' files to the input folder'));
+    } catch (_) { uiToast(ezT('Upload failed')); }
   });
   ov.querySelector('.eml-bbadd').addEventListener('click', () => {
     const picked = (paneFiles||[]).filter((f) => selected.has(f.path || f.name));
     if (!picked.length) { uiToast(ezT('Select files first')); return; }
     const take = fixedTake(node, card, picked);
     if (!take.ok.length) { uiToast(ezT('Fixed layout: no empty slot for these files')); return; }
-    card.items.push({ id: genId(), files: take.ok.map((f) => fileEntryOf(f)) });
+    const entries = take.ok.map((f) => fileEntryOf(f));
+    if (stateFor(node).fixed.on) {
+      entries.forEach((e) => card.items.push({ id: genId(), files: [e] }));
+    } else {
+      card.items.push({ id: genId(), files: entries });
+    }
     syncToConfig(node); render(node); closeBrowse();
     uiToast(take.full ? ezT('Fixed layout: only the empty slots were filled') : (ezT('Added ') + take.ok.length + ezT(' media files')));
   });
@@ -1461,8 +2175,8 @@ function openPreview(node, item, card) {
   aR._hit.addEventListener('click', () => { if (files.length > 1) { idx = (idx + 1) % files.length; draw(); } });
   const prev = () => { if (files.length > 1) idx = (idx - 1 + files.length) % files.length; draw(); };
   const next = () => { if (files.length > 1) idx = (idx + 1) % files.length; draw(); };
-  const openLoc = (f) => { try { fetch('/media_loader/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path }) }); } catch (_) {} };
-  const openSave = async (f) => { if (!f) return; try { const d = await fetch('/media_loader/pick_folder', { method: 'POST' }); const j = await d.json(); if (!j.ok || !j.path) { uiToast(j.error || ezT('No folder selected')); return; } const r = await fetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path, dest: j.path }) }); const res = await r.json(); uiToast(res.ok ? (ezT('Saved as ') + res.dest) : (ezT('Save failed: ') + (res.error || ''))); } catch (_) { uiToast(ezT('Save failed')); } };
+  const openLoc = (f) => { try { ezFetch('/media_loader/open', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path }) }); } catch (_) {} };
+  const openSave = async (f) => { if (!f) return; try { const d = await ezFetch('/media_loader/pick_folder', { method: 'POST' }); const j = await d.json(); if (!j.ok || !j.path) { uiToast(j.error || ezT('No folder selected')); return; } const r = await ezFetch('/media_loader/save_as', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: f.path, dest: j.path }) }); const res = await r.json(); uiToast(res.ok ? (ezT('Saved as ') + res.dest) : (ezT('Save failed: ') + (res.error || ''))); } catch (_) { uiToast(ezT('Save failed')); } };
   const buildMenu = (e, f, i) => {
     const menu = el('div'); menu.style.cssText = 'position:fixed;z-index:10000;background:var(--ez-bg);border:1px solid var(--ez-border);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.16);padding:4px;min-width:170px;';
     const mk = (label, fn) => { const b = el('button'); b.textContent = label; b.style.cssText = 'display:block;width:100%;text-align:left;background:none;border:none;padding:6px 12px;font-size:12px;color:var(--ez-fg);cursor:pointer;border-radius:6px;font-family:inherit;'; b.addEventListener('click', () => { menu.remove(); fn(); }); menu.appendChild(b); };
@@ -1510,6 +2224,11 @@ function openPreview(node, item, card) {
     aR.style.display = showArrows ? 'flex' : 'none';
     const d = files[idx]; if (!d) return;
     const t = d.type || 'other';
+    // 底部信息：大小 + 宽×高 + 类型（宽高随元数据异步到达，到了再刷这一行）
+    const updFoot = () => {
+      const dm = dimsOf(d);
+      foot.textContent = [d.size ? (ezT('Size: ') + formatSize(d.size)) : '', dm, ezT('Type: ') + typeShort(d.type)].filter(Boolean).join('   ');
+    };
     const mk = () => {
       if (t === 'image') { const m = el('img'); m.src = d.url; m.style.cssText = 'max-width:100%;max-height:52vh;object-fit:contain;background:var(--ez-bg);'; return m; }
       if (t === 'video') { const m = el('video'); m.src = d.url; m.controls = true; m.style.cssText = 'max-width:100%;max-height:52vh;background:var(--ez-bg);'; return m; }
@@ -1522,7 +2241,7 @@ function openPreview(node, item, card) {
         m.appendChild(b); return m;
       }
       const m = el('div'); m.style.cssText = 'width:100%;min-height:120px;max-height:52vh;overflow:auto;background:var(--ez-bg);border-radius:8px;padding:12px 14px;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--ez-fg);'; m.textContent = ezT('Loading…');
-      fetch(mediaUrl(d)).then((r) => { if (!r.ok) throw new Error('bad'); return r.text(); }).then((txt) => { if (m.isConnected) m.textContent = (txt || ezT('(empty file)')).slice(0, 60000); }).catch(() => { if (m.isConnected) m.textContent = ezT('Cannot preview content'); });
+      ezFetch(mediaUrl(d)).then((r) => { if (!r.ok) throw new Error('bad'); return r.text(); }).then((txt) => { if (m.isConnected) m.textContent = (txt || ezT('(empty file)')).slice(0, 60000); }).catch(() => { if (m.isConnected) m.textContent = ezT('Cannot preview content'); });
       return m;
     };
     const same = _pvMedia && _pvMedia.parentNode && (_pvType === t) && (t === 'image' || t === 'video');
@@ -1535,7 +2254,16 @@ function openPreview(node, item, card) {
       _pvMedia.src = d.url; main.style.paddingLeft = main.style.paddingRight = '0';
     }
     tt.textContent = d.name || ezT('Preview');
-    foot.textContent = [d.size ? (ezT('Size: ') + formatSize(d.size)) : '', ezT('Type: ') + typeShort(d.type)].filter(Boolean).join('   ');
+    if (t === 'image') {
+      const mm = _pvMedia;
+      mm.onload = () => { if (setDims(d, mm.naturalWidth, mm.naturalHeight)) updFoot(); };
+      if (mm.complete && mm.naturalWidth) setDims(d, mm.naturalWidth, mm.naturalHeight);
+    } else if (t === 'video') {
+      const mm = _pvMedia;
+      mm.onloadedmetadata = () => { if (setDims(d, mm.videoWidth, mm.videoHeight)) updFoot(); };
+      if (mm.readyState >= 1) setDims(d, mm.videoWidth, mm.videoHeight);
+    }
+    updFoot();
     strip.innerHTML = '';
     files.forEach((x, i) => {
       const sel = batch && selSet.has(i);
@@ -1598,7 +2326,8 @@ function open3d(node, item, card, file) {
   const tip = el('div'); tip.style.cssText = 'font-size:11px;color:var(--ez-fg-muted);'; tip.textContent = ezT('Left drag = orbit · wheel = zoom · Shift/right drag = pan');
   box.appendChild(hd); box.appendChild(bodyWrap); box.appendChild(status); box.appendChild(tip);
   ov.appendChild(box); document.body.appendChild(ov);
-  let cleanup = () => { try { ov.remove(); } catch (_) {} };   // 加载失败也要能关掉
+  let _free3d = null;   // 渲染器建好后才有：释放 WebGL 上下文 + 断开 ResizeObserver
+  let cleanup = () => { try { if (_free3d) _free3d(); } catch (_) {} try { ov.remove(); } catch (_) {} };   // 加载失败/加载中关闭也要能关掉并释放
   close.addEventListener('click', () => cleanup());
   ov.addEventListener('mousedown', (e) => { if (e.target === ov) cleanup(); });
   const wfCb = panel.querySelector('.pvwf'), bgIn = panel.querySelector('.pvbg'), resetBtn = panel.querySelector('.pvreset'), shotBtn = panel.querySelector('.pvshot'), fsBtn = panel.querySelector('.pvfs'), matSel = panel.querySelector('.pvmat');
@@ -1608,6 +2337,7 @@ function open3d(node, item, card, file) {
     try {
       const THREE_BASE = '/preview_any/3d/libs/';
       const THREE = await import(THREE_BASE + 'three.module.js');
+      if (!ov.isConnected) return;   // 加载期间弹窗已被关掉：别再建渲染器（否则上下文没人释放）
       const scene = new THREE.Scene(); scene.background = new THREE.Color(0xf7f9fd);
       const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100000); camera.position.set(3, 2.4, 4);
       const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -1616,6 +2346,9 @@ function open3d(node, item, card, file) {
       fit();
       const ro = new ResizeObserver(() => { fit(); repaint(); });
       ro.observe(canvas);
+      // 与 preview_any 的 3D 查看器同口径：dispose 只是释放资源，forceContextLoss 才真正把 WebGL 上下文交还
+      // 浏览器（同时存活的上下文有限，反复开关 3D 预览会黑屏）。
+      _free3d = () => { try { ro.disconnect(); } catch (_) {} try { renderer.dispose(); renderer.forceContextLoss(); } catch (_) {} };
       scene.add(new THREE.AmbientLight(0xffffff, 0.9));
       const dir = new THREE.DirectionalLight(0xffffff, 0.8); dir.position.set(5, 10, 7); scene.add(dir);
       const ext = ext3d(url);
@@ -1627,6 +2360,7 @@ function open3d(node, item, card, file) {
       // 只随包带了 GLTF / FBX / OBJ / Splat 四个加载器：别的扩展名以前会落到 OBJLoader 里报一堆难懂的错误
       else { throw new Error(ezT('Unsupported 3D format .') + (ext || '?') + ezT(' (only glb / gltf / obj / fbx / splat are supported)')); }
       loader.load(url, (obj) => {
+        if (!ov.isConnected) return;   // 加载完才发现弹窗已关：别再往卸掉的画布上建场景/开渲染循环
         status.textContent = '';
         const wrap = new THREE.Group(); wrap.add(obj);
         const b3 = new THREE.Box3().setFromObject(wrap); const size = b3.getSize(new THREE.Vector3()); const center = b3.getCenter(new THREE.Vector3());
@@ -1682,7 +2416,7 @@ function open3d(node, item, card, file) {
         bgIn.addEventListener('input', () => { scene.background = new THREE.Color(bgIn.value || '#f7f9fd'); render(); });
         resetBtn.addEventListener('click', () => { theta = 0.6; phi = 1.0; radius = maxD * 3 || 4; target.set(0, maxD * 0.2, 0); apply(); });
         shotBtn.addEventListener('click', () => doShot());
-        cleanup = () => { cancelAnimationFrame(raf); try { ro.disconnect(); } catch (_) {} try { renderer.dispose(); } catch (_) {} ov.remove(); };
+        cleanup = () => { cancelAnimationFrame(raf); try { if (_free3d) _free3d(); } catch (_) {} ov.remove(); };
       }, (xhr) => { try { if (xhr && xhr.total) status.textContent = ezT('Loading 3D model…') + ' ' + Math.round((xhr.loaded / xhr.total) * 100) + '%'; } catch (_) {} },
       (err) => { status.textContent = ezT('Load error: ') + (err && err.message || err); });
     } catch (e) { status.textContent = ezT('3D viewer failed to initialize: ') + (e && e.message || e); }
@@ -1760,6 +2494,7 @@ function mlPortItems(node, port) {
 // 也与 prompt_helper.js 的 deferSync 写法一致。
 function mlDeferSync(node) {
   if (!node || node._emlSyncTimer) return;
+  if ((node._emlSyncTries = (node._emlSyncTries || 0) + 1) > 40) return;
   node._emlSyncTimer = setTimeout(() => {
     node._emlSyncTimer = null;
     try { updatePorts(node); syncOutputTypes(node); render(node); } catch (e) { console.error('[MediaLoader] port sync failed (panel may not render):', e); }
@@ -1778,6 +2513,7 @@ function updatePorts(node, noRedraw) {
   const want = stateFor(node).fixed.on ? [{ id: 'segment', name: 'Segment', files: mlSegmentFiles(node) }] : mlPorts(node);
   let changed = false;
   const old = (node.outputs || []).slice();
+  const cap = ezCaptureSocketLinks(node);   // 重排前按 socket 拍连线快照（新版前端的 socket.links 按下标变）
   const used = new Set(); const seq = [];
   want.forEach((w) => {
     let sock = null;
@@ -1802,14 +2538,16 @@ function updatePorts(node, noRedraw) {
   });
   old.forEach((o, i) => { if (!used.has(i)) { const idx = node.outputs.indexOf(o); if (idx >= 0) { node.removeOutput(idx); changed = true; } } });
   if (node.outputs.length !== seq.length || node.outputs.some((o, i) => o !== seq[i])) { for (let i = 0; i < seq.length; i++) node.outputs[i] = seq[i]; node.outputs.length = seq.length; changed = true; }
-  node.outputs.forEach((o, i) => {
-    const ids = []; if (Array.isArray(o.links)) ids.push(...o.links); if (o.link != null) ids.push(o.link);
-    ids.forEach((lid) => { if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) { try { node.graph.links[lid].origin_slot = i; } catch (_) {} } });
-  });
+  ezApplySocketLinks(node, cap);   // 按快照把每条线改挂到它 socket 的新下标（新版前端只改 link，不碰 socket.links）
   if (changed && node.graph) node.graph.setDirtyCanvas(true, true);
   if (changed) syncOutputTypes(node);
   if (changed) notifyDownstream(node);   // 所连 MediaOut 的口要跟着内容变
   return changed;
+}
+function mlGraphLink(node, id) {
+  const links = node && node.graph && node.graph.links;
+  if (!links) return null;
+  return links instanceof Map ? links.get(id) : links[id];
 }
 function notifyDownstream(node) {
   const graph = node.graph; if (!graph || !graph.links) return;
@@ -1817,7 +2555,7 @@ function notifyDownstream(node) {
   (node.outputs || []).forEach((o) => {
     const ids = []; if (Array.isArray(o.links)) ids.push(...o.links); if (o.link != null) ids.push(o.link);
     ids.forEach((lid) => {
-      const lk = graph.links[lid]; if (!lk) return;
+      const lk = mlGraphLink(node, lid); if (!lk) return;
       const t = byId(lk.target_id);
       if (!t) return;
       if (typeof t._ezMediaOutUpdate === 'function') { try { t._ezMediaOutUpdate(); } catch (_) {} }
@@ -1833,13 +2571,14 @@ function portLinksReady(node) {
   for (let i = 0; i < outs.length; i++) {
     const o = outs[i]; if (!o) continue;
     const ids = Array.isArray(o.links) ? o.links : [];
-    for (let k = 0; k < ids.length; k++) { const lid = ids[k]; if (lid != null && !node.graph.links[lid]) return false; }
+    for (let k = 0; k < ids.length; k++) { const lid = ids[k]; if (lid != null && !mlGraphLink(node, lid)) return false; }
   }
   const ins = node.inputs || [];
   for (let i = 0; i < ins.length; i++) {
     const s = ins[i]; if (!s) continue;
-    if (s.link != null && !node.graph.links[s.link]) return false;
+    if (s.link != null && !mlGraphLink(node, s.link)) return false;
   }
+  node._emlSyncTries = 0;
   return true;
 }
 function syncOutputTypes(node) {
@@ -1885,11 +2624,12 @@ function installOutsideLabels(node) {
     all.forEach((item) => {
       let pos = null; try { pos = node.getOutputPos(item.i); } catch (_) { pos = null; }
       if (!pos || !pos.length) { item.el.style.display = 'none'; return; }
-      const nodeW = (node.size && node.size[0]) || 1; const sx = rect.width / nodeW; const np = node.pos || [0, 0];
-      const cx = rect.left + ((pos[0] || 0) - (np[0] || 0)) * sx; const cy = rect.top + ((pos[1] || 0) - (np[1] || 0)) * sy;
+      // ★ 用画布变换换算（跟画布画圆点同一套口径），别再用 rect 当节点左上角近似
+      const pt = ezfxGraphToScreen(node, pos, rect);
+      const cx = pt.x, cy = pt.y;
       item.el.style.display = 'inline-flex'; item.el.style.zIndex = '20';
-      const zoom = Math.max(0.5, sx); item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px'; item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
-      const tw = item.el.offsetWidth; const th = item.el.offsetHeight || 16; const offX = 10 * zoom;
+      const zoom = Math.max(0.5, pt.zoom); item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px'; item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
+      const tw = item.el.offsetWidth; const th = item.el.offsetHeight || 16; const offX = ezfxLabelOffX(item.in, zoom);
       item.el.style.left = (cx + offX) + 'px'; item.el.style.top = (cy - th / 2) + 'px';
     });
   };
@@ -1903,8 +2643,8 @@ function installOutsideLabels(node) {
         // 不再额外 pumpFrames() —— setDirty/指针/滚轮/resize 已经在 pump，否则同一帧 update 跑两遍
         update();
       };
-    scheduleOnRedraw(update);
-    onLocaleChange(() => { try { render(node); } catch (_) {} });   // 语言切换即时重画
+    ezScheduleNodeRedraw(node, update);
+    ezBindHooks(node, onLocaleChange(() => { try { render(node); } catch (_) {} }));   // 语言切换即时重画
     schedule();
   }
 }
@@ -1918,7 +2658,7 @@ function installIndexLabel(node) {
   installEdgeLabels(node, { side: 'in', rootOf: (n) => n._emlRoot, labelOf: (s) => ((s && s.name === 'index') ? 'index' : '') });
 }
 function hideConfigWidget(node) {
-  try { const ins = node.inputs || []; for (let i = ins.length - 1; i >= 0; i--) { if (ins[i] && ins[i].name === 'config') { try { node.inputs.splice(i, 1); } catch (_) { try { ins[i].hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const ins = node.inputs || []; for (let i = ins.length - 1; i >= 0; i--) { if (ins[i] && ins[i].name === 'config') { try { ezDropInput(node, i); } catch (_) { try { ins[i].hidden = true; } catch (_) {} } } } } catch (_) {}
   const w = configWidgetOf(node); if (!w || node._emlCfgHid) return;
   node._emlCfgHid = true;
   try { w.origComputeSize = w.computeSize; w.computeSize = () => [0, 0]; w.computedHeight = 0; w.y = 0; w.last_y = 0; w.width = 0; w.draw = () => {}; w.hidden = true; w.options = w.options || {}; w.options.hidden = true; w.options.getMinHeight = () => 0; w.options.getMaxHeight = () => 0; if (w.element && w.element.style) { w.element.style.display = 'none'; w.element.style.height = '0'; w.element.style.minHeight = '0'; w.element.style.maxHeight = '0'; } } catch (_) {}
@@ -1953,7 +2693,7 @@ function addMediaOut(node) {
   } catch (_) { uiToast(ezT('Failed to load output')); }
 }
 function fitNode(node) {
-  try { const root = node && node._emlRoot && node._emlRoot.querySelector('.eml-root'); if (!root || typeof node.setSize !== 'function') return; const cur = node.size || [MIN_WIDTH, 170]; const contentH = root.scrollHeight + 12; if (contentH > cur[1] + 4) node.setSize([Math.max(MIN_WIDTH, cur[0]), Math.min(900, contentH)]); } catch (_) {}
+  // 尺寸由用户决定：内容超出走面板内部滚动条，这里不再自动加高
 }
 function setupNode(node) {
   if (!node || node._emlSetup) return;
@@ -1971,7 +2711,7 @@ function setupNode(node) {
     try { node.widgets_start_y = 0; } catch (_) {}
     // 别把面板 widget 插到 widgets[0]：widgets_values 是按下标对应的，错位会让 config 读到面板的值（刷新后素材全空）
     installResizeHandles(node, root);
-    try { node.setSize([MIN_WIDTH + 40, 390]); } catch (_) {}
+    try { ezApplyDefaultSize(node, MIN_WIDTH + 40, 430); } catch (_) {}
     hideConfigWidget(node);
     render(node);
     updatePorts(node, true); syncOutputTypes(node);
@@ -1989,7 +2729,7 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__emlHooked) return; nt.__emlHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); render(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { this.__ezSizeRestored = true; const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); updatePorts(this, true); render(this); return r; };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; try { (this._emlOutEls || []).forEach((x) => { try { x.remove(); } catch (_) {} }); this._emlOutEls = []; } catch (_) {} try { clearInterval(this._ezSettleIv); } catch (_) {} try { clearTimeout(this._emlSyncTimer); this._emlSyncTimer = null; } catch (_) {} try { if (this._emlRoot) this._emlRoot.remove(); } catch (_) {} this._emlSetup = false; return r; };
 }
 app.registerExtension({

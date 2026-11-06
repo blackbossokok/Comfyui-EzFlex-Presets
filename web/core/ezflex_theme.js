@@ -1,3 +1,4 @@
+// 模块：主题变量与主题切换（ezThemeColor / onThemeChange）
 // EzFlex 主题：全套面板共用一套配色变量（--ez-*），换主题只改根元素的 data-ez-theme。
 // 面板 CSS 只写 var(--ez-...)，颜色数据集中在这里；改配色不用动面板。
 // 每套给一整套「层次」：五级表面（面板/卡片/控件/悬停/选中）+ 三级描边 + 四级文字 + 强调/状态色；
@@ -194,7 +195,12 @@ export function ezThemeInit() {
   ezThemeSet(ezTheme());
 }
 
-export function onThemeChange(fn) { if (typeof fn === 'function') _hooks.add(fn); }
+// 返回 disposer（配合 ezflex_service.ezBindHooks(node, ...) 在节点删除时注销）
+export function onThemeChange(fn) {
+  if (typeof fn !== 'function') return () => {};
+  _hooks.add(fn);
+  return () => { _hooks.delete(fn); };
+}
 
 // 2D canvas / Three.js 这类要「实际颜色值」的地方用（它们吃不了 CSS 变量）
 export function ezThemeColor(name, fallback) {

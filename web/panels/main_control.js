@@ -1,17 +1,18 @@
+// 面板：MainControl 面板：总预设，级联下推到 Master/ParamPreset/ModelsCombo/FreeLatent
 // EzFlex-MainControl 总控制节点。
 // 总预设 = { 目标节点 id -> { type, preset } } 的映射，目标是画布上的
 // EzFlex-NodeSwitchMaster / EzFlex-ParamPresetControl 实例；应用时级联下推（写目标 config.current 并触发其应用）。
 // 前端先按 NodeSwitchMaster 卡片样式实现，后续由用户迭代调整。
-import { app } from "../../scripts/app.js";
-import { ezT, onLocaleChange, ezLocale, ezSetLocale } from "./ezflex_i18n.js";
-import {
+import { app } from "../../../scripts/app.js";
+import { ezT, onLocaleChange, ezLocale, ezSetLocale } from "../core/ezflex_i18n.js";
+import {ezBindHooks, ezApplyDefaultSize,
   NODE_TYPES, BASE_PRESETS, isBasePreset, basePresetName,
   registerNode, unregisterNode, nodeTypeOf, nodesOfType,
   configWidget, writeConfig, readConfig,
-  loadPresets, savePreset, deletePreset, uiPrompt, on, installResizeHandles, makeDomWidgetHitThrough,
+  loadPresets, savePreset, deletePreset, uiPrompt, uiToast, on, installResizeHandles, makeDomWidgetHitThrough,
   EZ_PERF, scheduleOnRedraw,
-} from "./ezflex_service.js";
-import { ezThemeList, ezTheme, ezThemeSet, ezThemeInit, onThemeChange } from "./ezflex_theme.js";
+  ezDropInput } from "../core/ezflex_service.js";
+import { ezThemeList, ezTheme, ezThemeSet, ezThemeInit, onThemeChange } from "../core/ezflex_theme.js";
 
 const NODE = NODE_TYPES.MAIN;
 const API = "/main_control/presets";
@@ -25,7 +26,11 @@ const SCAFFOLD_TYPES = [
   NODE_TYPES.PROMPT_HELPER, NODE_TYPES.MEDIA_LOADER, NODE_TYPES.PREVIEW_ANY,
   // 循环 / 转接系列（V1.3.0 新增）：顺序 = 加载全部里那一排的排列顺序
   NODE_TYPES.MERGE_LIST, NODE_TYPES.SPLIT_LIST, NODE_TYPES.REROUTE,
-  NODE_TYPES.LOOP_START, NODE_TYPES.LOOP_END, NODE_TYPES.TIME_LINE,
+  NODE_TYPES.LOOP_START, NODE_TYPES.LOOP_END, NODE_TYPES.TIME_PLAN, NODE_TYPES.TIME_LINE,
+  NODE_TYPES.MOTION_CONTEXT,
+  NODE_TYPES.SPLIT_VIDEO, NODE_TYPES.VIDEO_COMPONENTS,
+  NODE_TYPES.SEGMENT_PANEL,
+  NODE_TYPES.PREPROCESSOR,
 ];
 const SCAFFOLD_LABEL = {
   [NODE_TYPES.COMBO]: 'Models Combo Loader',
@@ -40,8 +45,14 @@ const SCAFFOLD_LABEL = {
   [NODE_TYPES.MERGE_LIST]: 'Merge List',
   [NODE_TYPES.SPLIT_LIST]: 'Split List',
   [NODE_TYPES.REROUTE]: 'Reroute',
+  [NODE_TYPES.MOTION_CONTEXT]: 'Motion Context',
+  [NODE_TYPES.SPLIT_VIDEO]: 'Split Video',
+  [NODE_TYPES.VIDEO_COMPONENTS]: 'Video Components',
+  [NODE_TYPES.SEGMENT_PANEL]: 'Segment Panel',
+  [NODE_TYPES.PREPROCESSOR]: 'Preprocessor',
   [NODE_TYPES.LOOP_START]: 'Loop Start',
   [NODE_TYPES.LOOP_END]: 'Loop End',
+  [NODE_TYPES.TIME_PLAN]: 'Time Plan',
   [NODE_TYPES.TIME_LINE]: 'Time Line',
 };
 // 加载全部的排布（以「总控制」自身为基准，间距 30px）：
@@ -51,12 +62,18 @@ const SCAFFOLD_LABEL = {
 //   分辨率：总控制右侧 +30px、底部平齐；任意预览：参数输出控制右侧 +30px、底部平齐
 //   ★ 循环/转接一排：参数预设控制**下方** +30px，**左缘与参数预设控制对齐**，向右依次排开（横向，共用同一个可视上边）
 //       顺序 = 合并列表 → 拆分列表 → 转接节点 → 开启循环 → 结束循环
+//   ★ 预处理器：**另起一行** —— 循环/转接那排的下一行 +30px，左缘同样与参数预设控制对齐
 //   ★ 时间轴：任意预览**右侧** +30px、**底边与任意预览平齐**
 const SCAFFOLD_GAP = 30;
 // 循环/转接那一排的排列顺序（也是「加载全部」里从左到右的顺序）
 const LOOP_ROW = [
   NODE_TYPES.MERGE_LIST, NODE_TYPES.SPLIT_LIST, NODE_TYPES.REROUTE,
   NODE_TYPES.LOOP_START, NODE_TYPES.LOOP_END,
+];
+// 长视频/分段/运动上下文：预处理器下一排，横向排开
+const VIDEO_ROW = [
+  NODE_TYPES.TIME_PLAN, NODE_TYPES.SPLIT_VIDEO,
+  NODE_TYPES.VIDEO_COMPONENTS, NODE_TYPES.SEGMENT_PANEL, NODE_TYPES.MOTION_CONTEXT,
 ];
 
 // ⚠️ LiteGraph 的 node.pos 是「标题栏下沿」的左上角，标题栏画在 pos 上方（高 = LiteGraph.NODE_TITLE_HEIGHT，
@@ -97,11 +114,27 @@ function scaffoldLayout(mainBox, boxes) {
   // ★ 循环/转接一排：接在「参数预设控制」下方（此刻 visTop = 它的可视底边），
   //   左缘与参数预设控制对齐（都是 mLeft），向右依次排开 —— 共用同一个可视上边，横向推进。
   const rowTop = visTop + G;
-  let rowX = mLeft;
+  let rowX = mLeft, rowH = 0;
   LOOP_ROW.forEach((t) => {
     const b = boxOf(t);
     putLeft(t, rowX, rowTop);
     rowX += b.w + G;
+    if (b.h > rowH) rowH = b.h;          // 记这排最高的一只，给下一行定位用
+  });
+
+  // ★ 预处理器：放在循环/转接那排下方，右缘与 PromptHelper 右缘对齐；
+  //   这样它左边留出的空位正好让下面的视频/分段同排接在右侧。
+  const preTop = rowTop + TITLE + rowH + G;
+  putRight(NODE_TYPES.PREPROCESSOR, leftRight, preTop);
+
+  // ★ 长视频/分段这一排：与预处理器同一行，从主控制左缘（mLeft）向右排。
+  const videoTop = preTop;
+  let vx = mLeft, vh = 0;
+  VIDEO_ROW.forEach((t) => {
+    const b = boxOf(t);
+    putLeft(t, vx, videoTop);
+    vx += b.w + G;
+    if (b.h > vh) vh = b.h;
   });
 
   // 右列：总控制右缘下方（记录末节点右缘/底边，供「任意预览」对齐）
@@ -225,13 +258,15 @@ async function applyPreset(node, name) {
   const p = await findLibPreset(name);
   if (!p) return false;
   targets = p.targets || {};
+  let failed = 0;
   for (const [id, spec] of Object.entries(targets)) {
     const target = nodesOfType(spec && spec.type).find((n) => String(n.id) === id) || null;
     const api = target && targetAPI(target);
     if (api && spec && spec.preset) {
-      try { await api.setCurrent(spec.preset); } catch (_) {}
+      try { await api.setCurrent(spec.preset); } catch (_) { failed += 1; }
     }
   }
+  if (failed) { try { uiToast(ezT('Some nodes failed to apply this preset') + ' (' + failed + ')'); } catch (_) {} }
   st.current = name; syncToConfig(node); refreshUI(node);
   return true;
 }
@@ -245,13 +280,23 @@ async function savePresetToLib(node) {
       if (api) targets[String(n.id)] = { type, preset: basePresetName(api.current()) || BASE_PRESETS[0] };
     });
   });
-  await savePreset(API, { name: name.trim(), label: name.trim(), targets });
+  // 写盘失败（403 / 只读 user 目录 / 盘满）时 savePreset 只会把旧列表还回来：
+  // 确认列表里真的有这个名字，再把它写进工作流（2026-11 审计 P2-11）。
+  // 写盘失败（403 / 只读 user 目录 / 盘满）时 savePreset 会抛错：先兜住再确认列表。
+  let list = null;
+  try { list = await savePreset(API, { name: name.trim(), label: name.trim(), targets }); }
+  catch (_) { try { uiToast(ezT('Save failed')); } catch (_2) {} return; }
+  if (!(list || []).some((p) => p && p.name === name.trim())) { try { uiToast(ezT('Save failed')); } catch (_) {} return; }
   stateFor(node).current = name.trim(); syncToConfig(node); refreshUI(node);
 }
 async function deletePresetFromLib(node) {
   const st = stateFor(node);
   if (isBasePreset(st.current) || st.current === MAIN_DEFAULT) return;
-  await deletePreset(API, st.current);
+  const gone = st.current;
+  let list = null;
+  try { list = await deletePreset(API, gone); }
+  catch (_) { try { uiToast(ezT('Delete failed')); } catch (_2) {} return; }
+  if ((list || []).some((p) => p && p.name === gone)) { try { uiToast(ezT('Delete failed')); } catch (_) {} return; }
   st.current = MAIN_DEFAULT; syncToConfig(node); refreshUI(node);
 }
 
@@ -289,7 +334,7 @@ function buildRoot(node) {
   ezThemeList().forEach((t) => { const o = el('option'); o.value = t.id; o.textContent = ezT(t.label); themeSel.appendChild(o); });
   themeSel.value = ezTheme();
   themeSel.addEventListener('change', () => ezThemeSet(themeSel.value));
-  onThemeChange(() => { themeSel.value = ezTheme(); });
+  ezBindHooks(node, onThemeChange(() => { themeSel.value = ezTheme(); }));
   const applyLang = () => {
     masterSel.title = ezT('Master preset');
     saveBtn.textContent = ezT('Save');
@@ -314,7 +359,8 @@ function buildRoot(node) {
     const lib = await loadPresets(API);
     masterSel.innerHTML = '';
     const opts = [MAIN_DEFAULT].concat(lib.map((p) => p.name));
-    if (opts.indexOf(st.current) < 0) { st.current = MAIN_DEFAULT; syncToConfig(node); }
+    // 预设列表加载失败/为空时不要把已保存的 current 冲成 default；把当前值补进下拉先保住状态。
+    if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
     opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
 
     list.innerHTML = '';
@@ -339,7 +385,7 @@ async function refreshPresetOptions(node, sel) {
   const st = stateFor(node);
   const lib = await loadPresets(API, true);
   const opts = [MAIN_DEFAULT].concat(lib.map((p) => p.name));
-  if (opts.indexOf(st.current) < 0) st.current = MAIN_DEFAULT;
+  if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
   sel.innerHTML = '';
   opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; sel.appendChild(o); });
 }
@@ -363,11 +409,19 @@ function renderRow(mainNode, targetNode) {
   };
   fill();
   sel.addEventListener('mousedown', () => fill()); // 点开该卡片下拉即实时刷新预设
-  sel.addEventListener('change', () => {
-    if (api) { try { api.setCurrent(sel.value); } catch (_) {} }
-    syncCards(mainNode);
+  sel.addEventListener('change', async () => {
+    if (api) {
+      try {
+        // FreeLatent 的占位项「— 预设 —」= 快速套用星标收藏的默认预设。
+        if (!sel.value && nodeTypeOf(targetNode) === NODE_TYPES.LATENT && typeof api.applyDefault === 'function') await api.applyDefault();
+        else await api.setCurrent(sel.value);
+      } catch (_) {}
+    }
+    try { await fill(); } catch (_) {}
+    syncCards(mainNode);   // 等目标真正应用完再回读，否则卡片还是旧值
   });
   row.appendChild(handle); row.appendChild(name); row.appendChild(sel);
+  row._ezFill = fill;   // 目标 API 晚于卡片初始化时，syncCards 会再补一次选项
   return row;
 }
 
@@ -470,7 +524,7 @@ function fitNode(node) {
       const needW = headerWidth(root.querySelector('.ezc-hd')) + 52;   // .ezc-shell 左右 14 + .ezc-root 左右 12
       if (needW > 52) { node._ezMainWidthFit = true; w = Math.max(w, needW); }
     }
-    if (contentH > cur[1] + 4 || w > cur[0]) node.setSize([w, Math.min(420, Math.max(cur[1], contentH))]);
+    // 尺寸由用户决定：内容超出走面板内部滚动条，这里不再自动加高
   } catch (_) {}
 }
 function refreshUI(node) {
@@ -487,7 +541,7 @@ function refreshUI(node) {
     const st = stateFor(node);
     if (masterSel) {
       const opts = [MAIN_DEFAULT].concat(lib.map((p) => p.name));
-      if (opts.indexOf(st.current) < 0) st.current = MAIN_DEFAULT;
+      if (st.current && opts.indexOf(st.current) < 0) opts.push(st.current);
       masterSel.innerHTML = '';
       opts.forEach((k) => { const o = el('option'); o.value = k; o.textContent = k; if (k === st.current) o.selected = true; masterSel.appendChild(o); });
     }
@@ -512,7 +566,10 @@ function syncCards(node) {
     const target = byKey.get(key); if (!target) return;
     const api = targetAPI(target); if (!api) return;
     const cur = api.current() || '';
-    const sel = row.querySelector('select'); if (sel && Array.from(sel.options).some((o) => o.value === cur) && sel.value !== cur) sel.value = cur;
+    const sel = row.querySelector('select');
+    // 卡片先建、目标 API 后建：选项只有占位项时补一次 fill（不是轮询，只在画布签名变化时）
+    if (sel && sel.options.length <= 1 && typeof row._ezFill === 'function') { try { row._ezFill(); } catch (_) {} }
+    if (sel && Array.from(sel.options).some((o) => o.value === cur) && sel.value !== cur) sel.value = cur;
     const name = row.querySelector('.gname'); if (name && name.textContent !== (target.title || ezT('Node'))) name.textContent = target.title || ezT('Node');
   });
 }
@@ -520,6 +577,11 @@ function startTitleWatch(node) {
   // 不再定时轮询：画布重绘（onDrawForeground）+ 节点注册表变化事件 触发，一帧合并；全静止时零开销。
   const check = () => {
     node._ezTitlePend = false;
+    // 每帧都会走到这里：4 次 nodesOfType + 全体目标节点签名 = 一次全图扫描。120ms 内只算一次，
+    // 其余帧直接排到窗口末尾（人眼对「改名后 0.1s 才更新」无感，但拖动时省掉整帧扫描）。
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (now - (node._ezTitleAt || 0) < 120) { schedule(); return; }
+    node._ezTitleAt = now;
     const targets = nodesOfType(NODE_TYPES.COMBO).concat(nodesOfType(NODE_TYPES.LATENT), nodesOfType(NODE_TYPES.MASTER), nodesOfType(NODE_TYPES.PARAM_CTRL));
     const ids = targets.map((g) => String(g.id)).join(',');
     const detail = targets.map((g) => { const a = targetAPI(g); return ((g.title || '') + ':' + (a ? a.current() : '')); }).join('|');
@@ -540,7 +602,7 @@ function startTitleWatch(node) {
     const prevDraw = node.onDrawForeground;
     node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); schedule(); };
     scheduleOnRedraw(schedule);   // resize / 滚动 / 节点注册表变化 都会醒一次
-    onLocaleChange(() => { node._ezTitleSig = ''; try { refreshUI(node); } catch (_) {} });   // 语言切换即时重画
+    ezBindHooks(node, onLocaleChange(() => { node._ezTitleSig = ''; try { refreshUI(node); } catch (_) {} }));
     if (EZ_PERF.mainPollMs > 0) node._ezTitleIv = setInterval(schedule, EZ_PERF.mainPollMs);
     schedule();
   }
@@ -548,7 +610,7 @@ function startTitleWatch(node) {
 
 // ===== 挂载 =====
 function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
   const w = configWidget(node); if (!w || node._ezMainCfgHid) return; node._ezMainCfgHid = true;
   try {
@@ -572,7 +634,7 @@ function setupNode(node) {
     makeDomWidgetHitThrough(widget.element || root);
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
-    try { node.setSize([Math.max(680, (node.size ? node.size[0] : 320) + 230), (node.size ? node.size[1] : 200) + 70]); } catch (_) {} // 初始加宽：头部多了主题下拉，窄了会换行/裁掉
+    try { ezApplyDefaultSize(node, 680, 200); } catch (_) {} // 初始加宽：头部多了主题下拉，窄了会换行/裁掉
     setTimeout(hideConfigWidget, 60, node);
     installResizeHandles(node, root);
     startTitleWatch(node);
@@ -581,7 +643,13 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__ezMainHooked) return; nt.__ezMainHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { this.__ezSizeRestored = true;
+    const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
+    loadFromConfig(this);
+    // setup/render 在 configure 之前跑过，masterSel 这时还是默认值；配置恢复后必须重画一次。
+    try { refreshUI(this); } catch (_) {}
+    return r;
+  };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; clearInterval(this._ezTitleIv); clearTimeout(this._ezScaffoldTimer); try { if (this._ezTitleRaf) cancelAnimationFrame(this._ezTitleRaf); this._ezTitleRaf = 0; } catch (_) {} unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezMainSetup = false; return r; };
   const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
 }

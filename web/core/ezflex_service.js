@@ -1,16 +1,27 @@
+// 模块：共享服务层：节点注册表、画布分组匹配、node.mode 控制、预设 API、连线快照/回写、标签安装
 // EzFlex 控制节点共享模块：节点注册表 / 画布分组匹配 / node.mode 控制 / 预设库 API / 命名弹窗。
 // 参考 rgthree Fast Groups Muter/Bypasser：分组按 颜色+标题正则 匹配，控制 = node.mode 0/2/4。
-import { app } from "../../scripts/app.js";
+import { app } from "../../../scripts/app.js";
 import { ezT } from "./ezflex_i18n.js";
 import { ezThemeInit } from "./ezflex_theme.js";
-import { api } from "../../scripts/api.js";
+import { api } from "../../../scripts/api.js";
 
 // 富文本 / 外部 HTML 的安全渲染：去掉可执行标签、所有 on* 事件属性与危险 URL，
 // 其余排版标签（div/span/font/style/color、@媒体芯片里的静态 svg）原样保留。
 const _EZ_DROP_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'base',
   'form', 'input', 'textarea', 'select', 'button', 'noscript']);
 const _EZ_URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'poster', 'background']);
-const _EZ_UNSAFE_URL = /^\s*(javascript|vbscript|data:text\/html|data:application\/xhtml)/i;
+// 只放行「能安全落到 src / window.open / fetch」的 URL：
+// 同源绝对路径（不能是 //host）、http(s)、blob:、data:image|video|audio。
+// 恶意工作流可以把素材 url 写成 javascript:/data:text/html —— 这些一律返回 ''。
+const _EZ_BAD_URL = /^\s*(javascript|vbscript|file|data:text\/html)/i;
+export function ezSafeUrl(u) {
+  const s = String(u == null ? '' : u).trim();
+  if (!s || _EZ_BAD_URL.test(s)) return '';
+  if (/^(https?:\/\/|blob:|data:(?:image|video|audio)\/)/i.test(s)) return s;
+  if (s.charAt(0) === '/' && s.charAt(1) !== '/') return s;
+  return '';
+}
 export function ezSanitizeHtml(html) {
   const s = String(html == null ? '' : html);
   if (!s) return '';
@@ -23,8 +34,17 @@ export function ezSanitizeHtml(html) {
         for (const a of Array.from(c.attributes || [])) {
           const n = a.name.toLowerCase();
           if (n.startsWith('on')) { c.removeAttribute(a.name); continue; }
-          if (_EZ_URL_ATTRS.has(n) && _EZ_UNSAFE_URL.test(a.value)) c.removeAttribute(a.name);
+          // URL 统一走 ezSafeUrl 的白名单：同源绝对路径 / http(s) / blob / data:image|video|audio。
+          // 以前只挡 javascript/vbscript，`//host`（协议相对）和 `file:` 会被原样留下 —— 导入的卡片
+          // 一打开就向第三方发请求，与本文件另一处的策略自相矛盾。
+          // ⚠️ http(s) 是**故意**保留的：ModelsCombo 的 Civitai 描述图（<img src="https://…">）靠它渲染。
+          if (_EZ_URL_ATTRS.has(n) && !ezSafeUrl(a.value)) c.removeAttribute(a.name);
         }
+        // 富文本只该有排版样式：定位/层叠/指针相关的 style 一律丢掉（防导入的卡片 HTML 盖住整个页面）
+        try {
+          const st = c.getAttribute && c.getAttribute('style');
+          if (st && /(^|;)\s*(position|inset|z-index|pointer-events|transform)\s*:/i.test(st)) c.removeAttribute('style');
+        } catch (_) {}
         walk(c);
       }
     };
@@ -64,7 +84,13 @@ export const NODE_TYPES = {
   LOOP_END: "EzFlex-LoopEnd",
   SPLIT_LIST: "EzFlex-SplitList",
   REROUTE: "EzFlex-Reroute",
+  TIME_PLAN: "EzFlex-TimePlan",
+  SPLIT_VIDEO: "EzFlex-SplitVideo",
+  VIDEO_COMPONENTS: "EzFlex-VideoComponents",
+  SEGMENT_PANEL: "EzFlex-SegmentPanel",
+  MOTION_CONTEXT: "EzFlex-MotionContext",
   TIME_LINE: "EzFlex-TimeLine",
+  PREPROCESSOR: "EzFlex-ControlnetPreprocessor",
 };
 
 // ===== 性能开关（全插件一处控制；出问题改常数即可回到旧行为，不用改结构）=====
@@ -94,16 +120,85 @@ export function pumpFrames(ms) {
   };
   _pumpRaf = requestAnimationFrame(tick);
 }
+// 按节点注册的每帧回调：节点被删 / 换工作流重建后自动从全局调度表里注销，
+// 否则每个面板都会在 _perfScheds 里留一个永久闭包（切几次图就几千个，每帧空跑）。
+export function ezScheduleNodeRedraw(node, fn, onDispose) {
+  let dispose = null;
+  let seen = false;
+  const wrapped = () => {
+    if (!node) { if (dispose) dispose(); return; }
+    if (!node.graph) { if (seen && dispose) dispose(); return; }
+    if (Array.isArray(node.graph._nodes) && node.graph._nodes.indexOf(node) < 0) { if (dispose) dispose(); return; }
+    seen = true;
+    try { fn(); } catch (_) {}
+  };
+  const raw = scheduleOnRedraw(wrapped);
+  dispose = () => {
+    try { raw(); } catch (_) {}
+    // 节点没了：把面板挂到 body 上的 DOM（黑框端口标签 / 气泡）一起摘掉，
+    // 否则换图/删节点后它们停在最后一帧的位置，看起来像“黑框残影”。
+    try { if (onDispose) onDispose(); } catch (_) {}
+  };
+  return wrapped;
+}
 function canvasEl() {
   try {
     if (app && app.canvas) return app.canvas.canvas || app.canvas.canvasEl || null;
     return document.querySelector('canvas#graph-canvas') || document.querySelector('.litegraph canvas') || null;
   } catch (_) { return null; }
 }
+// 节点尺寸策略：**完全由用户决定**。新建节点套一次默认尺寸；从工作流加载回来的节点
+// （`configure` 过的）一个像素都不动 —— 不放大也不缩小，内容超出走面板内部滚动条。
+// 加载工作流：Node 2.0 的布局会按「widget 最小高 + 标题」重新算高度，比存下来的尺寸高一点。
+// 这里在 configure 之后把 info.size 钉回去，刷新/切窗口就不再变高。
+export function ezRestoreSavedSize(node, info) {
+  try {
+    const s = info && Array.isArray(info.size) ? info.size : null;
+    if (!node || !s) return;
+    const w = Number(s[0]), h = Number(s[1]);
+    if (!(w > 0 && h > 0)) return;
+    const apply = () => {
+      try { if (!node.size || node.size[0] !== w || node.size[1] !== h) node.setSize([w, h]); } catch (_) {}
+    };
+    apply();
+    setTimeout(apply, 0);
+    setTimeout(apply, 150);
+  } catch (_) {}
+}
+
+export function ezApplyDefaultSize(node, w, h) {
+  try {
+    installSizeGuard();
+    if (!node || typeof node.setSize !== 'function') return;
+    // 从工作流加载回来的节点（configure 过）尺寸原样保留：用户拖多大就是多大，不放大也不缩小
+    if (node.__ezSizeRestored || node.__ezUserSized) return;
+    node.__ezAutoSizing = true;
+    try { node.setSize([w, h]); } finally { node.__ezAutoSizing = false; }
+  } catch (_) {}
+}
+
+// 给 LGraphNode.configure 打一次补丁：只要节点是被「加载」出来的，就记下 __ezSizeRestored，
+// 之后任何 mount / 重挂都不再动它的尺寸。新建节点不经过 configure ⇒ 仍然拿到默认尺寸。
+export function installSizeGuard() {
+  try {
+    const N = (typeof LGraphNode !== 'undefined' && LGraphNode) ? LGraphNode : null;
+    if (!N || !N.prototype || N.prototype.__ezSizeGuard) return;
+    N.prototype.__ezSizeGuard = true;
+    const prev = N.prototype.configure;
+    N.prototype.configure = function () {
+      try { this.__ezSizeRestored = true; } catch (_) {}
+      return prev ? prev.apply(this, arguments) : undefined;
+    };
+  } catch (_) {}
+}
+// 模块加载时就装好（页面加载已有工作流时不会再走 onNodeCreated，必须在 configure 之前生效）
+try { installSizeGuard(); } catch (_) {}
+try { window.addEventListener('load', () => installSizeGuard(), { once: true }); } catch (_) {}
 export function scheduleOnRedraw(fn) {
-  if (typeof fn !== 'function') return;
+  if (typeof fn !== 'function') return () => {};
   _perfScheds.add(fn);
-  if (_perfScheds._bound) return;
+  const dispose = () => { try { _perfScheds.delete(fn); } catch (_) {} };
+  if (_perfScheds._bound) return dispose;
   _perfScheds._bound = true;
   // ① LiteGraph 请求重绘（拖动节点 / 平移 / 缩放画布 都会走这里）→ 保持连续帧
   try {
@@ -122,13 +217,14 @@ export function scheduleOnRedraw(fn) {
       ['pointerdown', 'pointermove', 'pointerup', 'wheel'].forEach((ev) => cv.addEventListener(ev, () => pumpFrames(), { passive: true }));
     }
   } catch (_) {}
-  // ③ 窗口变化
+  // ③ 窗口变化 / 页面滚动 / 注册表与语言变化
   window.addEventListener('resize', () => pumpFrames(), { passive: true });
   window.addEventListener('scroll', () => pumpFrames(), { passive: true, capture: true });
   on('ezflex:changed', () => _runScheds());   // 注册表变化：立刻刷一次
   // 语言切换（ezflex_i18n 在 window 上派发）：各面板的 update 都挂在调度集合里，立刻重画一次
   window.addEventListener('ezflex:locale', () => { _runScheds(); try { app.graph.setDirtyCanvas(true, true); } catch (_) {} }, { passive: true });
   if (EZ_PERF.labelFallbackMs > 0) setInterval(_runScheds, EZ_PERF.labelFallbackMs);
+  return dispose;
 }
 
 export const MODE_NUM = { on: 0, off: 2, bypass: 4 }; // LiteGraph.ALWAYS / NEVER / BYPASS
@@ -313,6 +409,17 @@ export function ezLinkIsDangling(node, lid, originSlot) {
   return false;
 }
 // 拆掉 node 上「去路已不存在」的坏线；返回清掉的条数。保留一切有效线。
+// 删输出口前先摘掉挂在它上面的连线：LiteGraph 的 removeOutput 会逐个解引用这些链路，
+// 残留一个指向已消失 link 的 id 就会直接抛错（删卡/删口时整块面板报错）。
+export function ezDropOutput(node, idx) {
+  const s = node && node.outputs ? node.outputs[idx] : null;
+  if (s && Array.isArray(s.links)) {
+    s.links.slice().forEach((lid) => { try { if (node.graph && node.graph.links[lid]) node.graph.removeLink(lid); } catch (_) {} });
+    try { s.links.length = 0; s.link = null; } catch (_) {}
+  }
+  try { node.removeOutput(idx); return true; } catch (_) { return false; }
+}
+
 export function ezPruneDanglingLinks(node) {
   const g = node && node.graph; if (!g || !g.links) return 0;
   let n = 0;
@@ -339,7 +446,7 @@ export function ezPruneDanglingLinks(node) {
             const os = other && (isOutput ? (other.inputs || [])[L.target_slot] : (other.outputs || [])[L.origin_slot]);
             if (os) {
               if (isOutput) { if (String(os.link) === String(lid)) os.link = null; }
-              else if (Array.isArray(os.links)) { os.links = os.links.filter((x) => String(x) !== String(lid)); if (!os.links.length) os.links = null; }
+              else if (!ezLinkStore(g) && Array.isArray(os.links)) { os.links = os.links.filter((x) => String(x) !== String(lid)); if (!os.links.length) os.links = null; }
             }
           } catch (_) {}
           try { delete g.links[lid]; } catch (_) { try { g.links[lid] = null; } catch (_) {} }
@@ -354,7 +461,9 @@ export function ezPruneDanglingLinks(node) {
           }
         }
       });
-      if (Array.isArray(s.links)) { try { s.links = keep.length ? keep : null; } catch (_) {} }
+      // 新版前端的 socket.links setter 会「按当前下标重算 + 把不在集合里的线真断开」：
+      // 这里只该删已判定的悬空线（上面 delete g.links 已完成），不要再用赋值重算整个口。
+      if (!ezLinkStore(g) && Array.isArray(s.links)) { try { s.links = keep.length ? keep : null; } catch (_) {} }
       if (!isOutput && s.link != null && keep.indexOf(s.link) < 0) { try { s.link = keep.length ? keep[0] : null; } catch (_) {} }
     });
   };
@@ -363,26 +472,123 @@ export function ezPruneDanglingLinks(node) {
   return n;
 }
 
+// ===== 端口重排的连线回写（新旧前端都成立）=====
+// 旧版 LiteGraph：连线记在 socket 自己身上（output.links 数组 / input.link），搬 socket 对象时线跟着走。
+// 新版前端（ComfyUI v0.40+ / frontend 1.55+）：连线存在 graph.links（LinkMap）里，socket.links 只是
+// **按 socket 当前数组下标**现拼出来的兼容视图 —— 往里加 id 什么也不会发生，删 id 会真把那几条线断开；
+// 端口数组一重排，视图立刻指到别的口上。行为差异会把「换顺序」变成「断线 / 错接」。
+// ⇒ 凡是「搬 socket → 回写 origin_slot/target_slot」的地方，必须搬之前按 **socket 对象**拍快照，
+//   搬之后按快照把 link 的下标改到 socket 的新位置；绝不能靠搬完再读 socket.links。
+export function ezLinkStore(graph) {
+  return !!(graph && graph.links && graph.links instanceof Map);
+}
+// 摘掉一个输入口：新版前端只有 removeInput() 会按 socket 对象重写其它输入的 target_slot；
+// 直接 node.inputs.splice 会把该口之后的真实输入整体错一格（config 口通常在最前面，最容易踩）。
+export function ezDropInput(node, i) {
+  try { if (node && typeof node.removeInput === 'function') { node.removeInput(i); return true; } } catch (_) {}
+  try { node.inputs.splice(i, 1); return true; } catch (_) { return false; }
+}
+function socketLinkIds(sock) {
+  const out = [];
+  if (!sock) return out;
+  const ls = sock.links;
+  if (Array.isArray(ls)) ls.forEach((x) => { if (x != null) out.push(x); });
+  if (sock.link != null) out.push(sock.link);
+  return out;
+}
+// 快照值 = { ids: 拍快照时的连线 id, pending: 当时 graph.links 里还没有的（工作流加载中途）。
+// 回写时「拍快照时就有、回写时却没了」的 id 说明是在这次操作里被主动断掉的，不能再写回 socket.links。
+export function ezCaptureSocketLinks(node) {
+  const g = node && node.graph; const gl = g && g.links;
+  const store = ezLinkStore(g);
+  // 新版前端直接从链接存储按当前下标取（不依赖 socket.links 这个即将废弃的兼容视图）：
+  // 以后前端把旧 getter 删掉，这里也不用改。
+  const outById = new Map(); const inById = new Map();
+  if (store) {
+    try {
+      for (const L of gl.values()) {
+        if (!L) continue;
+        if (String(L.origin_id) === String(node.id)) {
+          const k = Number(L.origin_slot);
+          if (!outById.has(k)) outById.set(k, []);
+          outById.get(k).push(L.id);
+        }
+        if (String(L.target_id) === String(node.id)) inById.set(Number(L.target_slot), L.id);
+      }
+    } catch (_) {}
+  }
+  const has = (lid) => {
+    if (!gl) return true;
+    return store ? gl.has(lid) : gl[lid] != null;
+  };
+  const m = new Map();
+  const put = (s, ids) => { m.set(s, { ids, pending: ids.filter((lid) => !has(lid)) }); };
+  (node.outputs || []).forEach((s, i) => { if (s) put(s, store ? (outById.get(i) || []) : socketLinkIds(s)); });
+  (node.inputs || []).forEach((s, i) => {
+    if (!s) return;
+    const lid = store ? inById.get(i) : undefined;
+    put(s, store ? (lid != null ? [lid] : []) : socketLinkIds(s));
+  });
+  return m;
+}
+export function ezApplySocketLinks(node, cap) {
+  const g = node && node.graph; const gl = g && g.links; if (!gl || !cap) return;
+  const store = ezLinkStore(g);
+  const linkOf = (lid) => (store ? gl.get(lid) : gl[lid]);
+  const keep = (rec) => (!rec ? [] : rec.ids.filter((lid) => lid != null && (linkOf(lid) != null || rec.pending.indexOf(lid) >= 0)));
+  (node.outputs || []).forEach((s, i) => {
+    const ids = keep(cap.get(s));
+    if (!store) { try { s.links = ids.length ? ids.slice() : null; } catch (_) {} }
+    ids.forEach((lid) => {
+      const L = linkOf(lid);
+      if (L && Number(L.origin_slot) !== i) { try { L.origin_slot = i; } catch (_) {} }
+    });
+  });
+  // 输入口一个 socket 只有一条线。新版链接存储不允许两条线同时占同一个输入槽，
+  // 所以重排（交换/搬位）时先把待搬的线挪到不存在的临时槽，再落到目标槽 —— 否则 updateEndpoint 会拒绝。
+  const moves = [];
+  (node.inputs || []).forEach((s, i) => {
+    const lid = keep(cap.get(s))[0];
+    if (lid == null) return;
+    if (!store) { try { s.link = lid; } catch (_) {} }
+    const L = linkOf(lid);
+    if (L && Number(L.target_slot) !== i) moves.push({ L, i });
+  });
+  if (!moves.length) return;
+  if (store) {
+    const tmp = (node.inputs || []).length + 1;
+    moves.forEach((m, k) => { try { m.L.target_slot = tmp + k; } catch (_) {} });
+  }
+  moves.forEach((m) => { try { m.L.target_slot = m.i; } catch (_) {} });
+}
+
 // ===== 预设库 API（服务器 user_data，按节点名共享）=====
-export async function apiGet(path) { try { const r = await (api && api.fetchApi ? api.fetchApi(path) : fetch(path)); return r && r.ok ? await r.json() : []; } catch (_) { return []; } }
-export async function apiPost(path, body) { try { await (api && api.fetchApi ? api.fetchApi(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) : fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })); } catch (_) {} }
-export async function apiDelete(path) { try { await (api && api.fetchApi ? api.fetchApi(path, { method: 'DELETE' }) : fetch(path, { method: 'DELETE' })); } catch (_) {} }
+// 失败返回 null（区别于"合法的空表 []"）：调用方据此区分"拉不到"与"没有预设"。
+export async function apiGet(path) { try { const r = await (api && api.fetchApi ? api.fetchApi(path) : fetch(path)); return r && r.ok ? await r.json() : null; } catch (_) { return null; } }
+export async function apiPost(path, body) { try { const r = await (api && api.fetchApi ? api.fetchApi(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) : fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })); return r || null; } catch (_) { return null; } }
+export async function apiDelete(path) { try { const r = await (api && api.fetchApi ? api.fetchApi(path, { method: 'DELETE' }) : fetch(path, { method: 'DELETE' })); return r || null; } catch (_) { return null; } }
 
 const _libCache = new Map(); // apiPath -> [{name,...}]
 export async function loadPresets(apiPath, force) {
   if (!force && _libCache.has(apiPath)) return _libCache.get(apiPath);
   const items = await apiGet(apiPath);
-  const list = Array.isArray(items) ? items.filter((p) => p && p.name) : [];
+  // 拉取失败（403 / 500 / 断网 / 非 JSON）不等于"预设表为空"：不写缓存，沿用上一次成功的结果。
+  // 否则一次抖动就会把空表缓存整个会话，各面板下拉变空、进而把节点的 current 冲成默认值。
+  if (!Array.isArray(items)) return _libCache.get(apiPath) || [];
+  const list = items.filter((p) => p && p.name);
   _libCache.set(apiPath, list);
   return list;
 }
 export async function savePreset(apiPath, payload) {
-  await apiPost(apiPath, payload);
+  const r = await apiPost(apiPath, payload);
+  // 403/500 不能当成功：否则调用方会把一个不存在的预设名写进节点 config（刷新后凭空消失）。
+  if (!r || r.ok === false) throw new Error('preset save failed');
   _libCache.delete(apiPath);
   return loadPresets(apiPath, true);
 }
 export async function deletePreset(apiPath, name) {
-  await apiDelete(apiPath + '/' + encodeURIComponent(name));
+  const r = await apiDelete(apiPath + '/' + encodeURIComponent(name));
+  if (!r || r.ok === false) throw new Error('preset delete failed');
   _libCache.delete(apiPath);
   return loadPresets(apiPath, true);
 }
@@ -637,9 +843,9 @@ export function installPanelUndoRedoGuard() { _ezUndoGuardInit(); }
   setTimeout(tick, 250);
 })();
 
-const _SCROLL_SEL = '.eml-cards,.eml-tabs,.eml-bblist,.eml-bbtree,.eph-list,.mc-list,.ezc-list,.ezg-list,.ezm-list,.ezpc-list,.ezo-list,.ezpv-list,.emoo-list,.eztl-libbody,.eztl-trow,.eztl-vp';
+const _SCROLL_SEL = '.eml-cards,.eml-tabs,.eml-bblist,.eml-bbtree,.eph-list,.mc-list,.ezc-list,.ezg-list,.ezm-list,.ezpc-list,.ezo-list,.ezpv-list,.emoo-list,.eztl-libbody,.eztl-trow,.eztl-vp,.ezsv-list,.ezpp-list,.ezlp-root,.ezlp-rows,.ezlp-persist-cards,.ezlp-refs';
 // 祖先链判断用的类名集合（比用选择器逐层 matches 便宜）
-const _SCROLL_CLASSES = ['eml-cards', 'eml-tabs', 'eml-bblist', 'eml-bbtree', 'eph-list', 'mc-list', 'ezc-list', 'ezg-list', 'ezm-list', 'ezpc-list', 'ezo-list', 'ezpv-list', 'emoo-list', 'eztl-libbody', 'eztl-trow', 'eztl-vp'];
+const _SCROLL_CLASSES = ['eml-cards', 'eml-tabs', 'eml-bblist', 'eml-bbtree', 'eph-list', 'mc-list', 'ezc-list', 'ezg-list', 'ezm-list', 'ezpc-list', 'ezo-list', 'ezpv-list', 'emoo-list', 'eztl-libbody', 'eztl-trow', 'eztl-vp', 'ezsv-list', 'ezpp-list', 'ezlp-root', 'ezlp-rows', 'ezlp-persist-cards', 'ezlp-refs'];
 // 已挂载的面板外壳：Vue 全局滚轮只在这些外壳里找滚动容器（不再每次 document.querySelectorAll 扫全页）
 const _panelShells = new Set();
 let _vueWheelBound = false;
@@ -851,6 +1057,10 @@ function injectSocketPanelBaseCSS() {
    改为 top 下移 + height 减去等量，让面板正好落在标题下方、底边齐平节点。
    --ezfx-vue-title 可在 DevTools 里调(document.documentElement.style.setProperty('--ezfx-vue-title','40px')) */
 .ezfx-is-vue[class*="-shell"]{top:var(--ezfx-vue-title,30px)!important;height:calc(100% - var(--ezfx-vue-title,30px))!important;bottom:auto!important;}
+/* 每个 EzFlex 节点是一整棵 DOM 面板：不隔离时，任意面板改样式/尺寸都会让整页重算样式与布局
+   （工作流里十几个面板叠一起，切换就是几百毫秒的 Recalculate Style / Layout）。
+   contain 把样式与布局影响限制在面板内部；不加 paint，避免把面板里的浮层裁掉。 */
+.ezfx-panel-shell{contain:layout style;}
 `;
   document.head.appendChild(s);
   try { enlargeSocketHitArea(); } catch (_) {}
@@ -915,6 +1125,37 @@ function _ezEdgeInjectCss() {
     document.head.appendChild(s);
   } catch (_) {}
 }
+// ===== 端口黑框的屏幕坐标（所有面板共用）=====
+// 把「画布坐标系里的端口位置」换算成屏幕（视口）坐标。
+// ★ 优先用画布变换 `screen = 画布元素.left/top + (graph + ds.offset) * ds.scale` —— 跟画布自己
+//   画圆点用的是同一套口径，不受「DOM widget 容器在标题栏之下（Vue 模式 forceShell 还要再叠一个
+//   标题高）」「面板 root 有 inset」影响。拿不到画布变换才退回 root 的 rect 近似。
+// 返回 { x, y, zoom }；**zoom 用画布缩放**，别再用 `rect.width / nodeW` 当缩放 —— 面板 root 只要有
+// 内边距，那个比值就偏小，越往下的端口偏得越多（曾把预处理器面板的黑框顶得比圆点高一点点）。
+export function ezfxGraphToScreen(node, p, rect) {
+  const gx = Number(p && p[0]) || 0, gy = Number(p && p[1]) || 0;
+  let cvs = null, ds = null, cr = null;
+  try {
+    cvs = (app && app.canvas) || null;
+    ds = cvs && cvs.ds;
+    const el = cvs && (cvs.canvas || cvs.canvasEl || (ds && ds.element));
+    cr = (el && typeof el.getBoundingClientRect === 'function') ? el.getBoundingClientRect() : null;
+  } catch (_) { cr = null; }
+  if (ds && cr && isFinite(ds.scale) && ds.scale > 0 && ds.offset && isFinite(ds.offset[0]) && isFinite(ds.offset[1])) {
+    return { x: cr.left + (gx + ds.offset[0]) * ds.scale, y: cr.top + (gy + ds.offset[1]) * ds.scale, zoom: ds.scale };
+  }
+  const nodeW = (node && node.size && node.size[0]) || 1;
+  const sx = (rect && rect.width > 0) ? (rect.width / nodeW) : 1;
+  const np = (node && node.pos) || [0, 0];
+  return { x: (rect ? rect.left : 0) + (gx - (Number(np[0]) || 0)) * sx, y: (rect ? rect.top : 0) + (gy - (Number(np[1]) || 0)) * sx, zoom: sx };
+}
+
+// 黑框相对圆点中心往节点外侧让多少：入口 10、出口 9。
+// ⚠️ 差这 1px 是因为 ComfyUI 的槽位公式里出口多算了 1（`nodeX + size[0] + 1 - 0.5*SLOT_H`）：
+//    入口圆点在节点左缘内缩 10、出口圆点在右缘内缩 9 ⇒ 两边都让 10 的话，右边的
+//    「标签 ↔ 节点边框」缝隙会比左边大 1px。这样取两边都**正好贴着**节点边框。
+export function ezfxLabelOffX(isIn, zoom) { return (isIn ? 4 + 6 : 4 + 5) * zoom; }
+
 export function installEdgeLabels(node, opts) {
   opts = opts || {};
   if (!node) return null;
@@ -923,6 +1164,7 @@ export function installEdgeLabels(node, opts) {
   _ezEdgeInjectCss();
   const sides = opts.side === 'in' ? [true] : (opts.side === 'both' ? [true, false] : [false]);
   const rootOf = opts.rootOf || ((n) => n._ezRoot);
+  const enabled = (typeof opts.enabled === 'function') ? opts.enabled : null;
   let all = [], sig = '';
   const scan = () => {
     const cur = [];
@@ -947,6 +1189,7 @@ export function installEdgeLabels(node, opts) {
   };
   const hideAll = () => { all.forEach((x) => { try { x.el.style.display = 'none'; } catch (_) {} }); };
   const update = () => {
+    if (enabled && !enabled()) { hideAll(); return; }
     const rootEl = rootOf(node);
     if (!rootEl || !rootEl.isConnected) { hideAll(); return; }
     // 只在「当前渲染的那张图」里显示：子图（app.canvas.graph）也算当前图
@@ -958,32 +1201,46 @@ export function installEdgeLabels(node, opts) {
     const sx = rect.width / nodeW;
     if (rect.right < 0 || rect.left > window.innerWidth || rect.bottom < 0 || rect.top > window.innerHeight || sx < 0.3) { hideAll(); return; }
     scan();
-    const np = node.pos || [0, 0];
-    const zoom = Math.max(0.5, sx);
     all.forEach((item) => {
+      // ★ 优先用新的 getInputPos / getOutputPos：它们返回**槽中心**（Vue 模式走 DOM 布局，最准）；
+      //   老的 getConnectionPos 在拿不到 slot.pos 时会用 (i+0.7)*SLOT_H，比圆点中心低约 4px。
       let pos = null;
-      try { pos = node.getConnectionPos(item.in, item.i, [0, 0]); } catch (_) { pos = null; }
-      if (!pos || !pos.length) { try { pos = item.in ? node.getInputPos(item.i) : node.getOutputPos(item.i); } catch (_2) { pos = null; } }
+      try { pos = item.in ? node.getInputPos(item.i) : node.getOutputPos(item.i); } catch (_) { pos = null; }
+      if (!pos || !pos.length) { try { pos = node.getConnectionPos(item.in, item.i, [0, 0]); } catch (_2) { pos = null; } }
       if (!pos || !pos.length) { item.el.style.display = 'none'; return; }
-      const cx = rect.left + ((pos[0] || 0) - (np[0] || 0)) * sx;
-      const cy = rect.top + ((pos[1] || 0) - (np[1] || 0)) * sx;
+      const sp = ezfxGraphToScreen(node, pos, rect);
+      const cx = sp.x, cy = sp.y;
+      const zoom = Math.max(0.5, sp.zoom);
       item.el.style.display = 'inline-flex';
       item.el.style.fontSize = Math.max(8, 9 * zoom) + 'px';
       item.el.style.padding = (3 * zoom) + 'px ' + (7 * zoom) + 'px';
       item.el.style.borderRadius = (3 * zoom) + 'px';
       item.el.style.boxShadow = '0 1px ' + (3 * zoom) + 'px rgba(0,0,0,.25)';
-      const tw = item.el.offsetWidth, th = item.el.offsetHeight || 16, offX = 11 * zoom;
+      // 从**圆点边缘**往外让：圆点半径 4（ComfyUI 画的是 arc(...,4,...)）+ 间距 7 ⇒ 两侧同口径
+      // 尺寸缓存：上面刚写过 fontSize/padding，紧接着读 offsetWidth 会强制一次同步布局；每帧每标签一次很贵。
+      // 只在「缩放或文字变了」时量一次，静止时零强制布局。
+      const sig = ((zoom * 100) | 0) + '|' + item.el.textContent;
+      if (item._twSig !== sig) {
+        const w = item.el.offsetWidth, h = item.el.offsetHeight || 16;
+        if (w > 0) { item._tw = w; item._th = h; item._twSig = sig; }   // 隐藏时量出来是 0，别缓存
+      }
+      const tw = item._tw > 0 ? item._tw : item.el.offsetWidth;
+      const th = item._tw > 0 ? item._th : (item.el.offsetHeight || 16);
+      const offX = ezfxLabelOffX(item.in, zoom);
       item.el.style.left = (item.in ? cx - tw - offX : cx + offX) + 'px';
       item.el.style.top = (cy - th / 2) + 'px';
     });
   };
   node._ezEdgeUpdate = update;
+  const cleanup = () => { try { all.forEach((x) => { try { x.el.remove(); } catch (_) {} }); } catch (_) {} all = []; node._ezEdgeEls = []; };
+  const prevRemoved = node.onRemoved;
+  node.onRemoved = function () { try { cleanup(); } catch (_) {} const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; return r; };
   const prevDraw = node.onDrawForeground;
   // 与画布同帧同步更新（不再经过 rAF，避免比画布慢一拍出现「流体感」）；
   // 不再额外 pumpFrames()：setDirty/指针/滚轮/resize 已在 pump，否则同一帧 update 跑两遍，
   // 且每帧把 _pumpUntil 推后 300ms 会让 rAF 链永不空闲（静止时 60fps 空转）。
   node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); update(); };
-  scheduleOnRedraw(update);
+  ezScheduleNodeRedraw(node, update, cleanup);
   pumpFrames();
   update();
   return update;
@@ -1050,6 +1307,46 @@ export function uiConfirm(msg) {
     _confirm.style.zIndex = '100300';   // 每次显示都设：弹窗是复用的，创建时的值改不动
     _confirm.style.display = 'flex';
   });
+}
+
+// 轻提示：2 秒自动消失，不阻塞、不抢焦点。面板层（MediaLoader / TimeLine 等）共用这一份。
+export function uiToast(msg) {
+  const t = document.createElement('div');
+  t.style.cssText = 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--ez-strong);color:var(--ez-on-strong);padding:8px 20px;border-radius:30px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.2);z-index:10000;opacity:0;transition:opacity .3s;pointer-events:none;';
+  t.textContent = msg; document.body.appendChild(t);
+  requestAnimationFrame(() => { t.style.opacity = '1'; });
+  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 400); }, 2000);
+}
+
+// 「仅本机可用」提示（每个功能只弹一次）：远端访问时面板拿不到根/设置，
+// 以前直接显示成"没有数据"，用户会以为配置丢了。
+const _ezLocalOnlySeen = new Set();
+export function ezLocalOnlyNotice(kind) {
+  const k = String(kind || 'feature');
+  if (_ezLocalOnlySeen.has(k)) return;
+  _ezLocalOnlySeen.add(k);
+  try { uiToast(ezT('This feature only works on the machine running ComfyUI; remote access cannot see the local settings.')); } catch (_) {}
+}
+
+// 把 i18n/主题钩子的 disposer 绑到节点上：节点第一次绑定时包一层 onRemoved，统一注销。
+// 以前这些钩子按节点注册却从不注销 —— 每加载一次工作流就多留一批闭包，切语言/主题会遍历到已删节点。
+export function ezBindHooks(node, off) {
+  if (!node || typeof off !== 'function') return off;
+  try {
+    (node._ezHookOffs || (node._ezHookOffs = [])).push(off);
+    if (!node._ezHookOffsWrapped) {
+      node._ezHookOffsWrapped = true;
+      const prev = node.onRemoved;
+      node.onRemoved = function () {
+        try {
+          (this._ezHookOffs || []).forEach((f) => { try { f(); } catch (_) {} });
+          this._ezHookOffs = [];
+        } catch (_) {}
+        return prev ? prev.apply(this, arguments) : undefined;
+      };
+    }
+  } catch (_) {}
+  return off;
 }
 
 // ===== 新 socket 面板方案（V1.5 起）：面板居中 + 端口列穿透 + 隐藏端口文字 + 放大原生命中区 =====

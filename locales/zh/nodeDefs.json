@@ -1,100 +1,405 @@
 {
   "EzFlex-ModelsCombo": {
     "description": "模型组合加载器",
-    "inputs": { "config": { "tooltip": "从「模型组合配置器」页面复制的 JSON 配置（加载器数组）。" } }
+    "inputs": {
+      "config": {
+        "tooltip": "从「模型组合配置器」页面复制的 JSON 配置（加载器数组）。"
+      }
+    }
   },
   "EzFlex-FreeLatent": {
     "description": "分辨率/Latent 选择器",
     "inputs": {
-      "config": { "tooltip": "「分辨率选择器」面板生成的配置 JSON（宽度/高度/批次/算法/比例等）。" },
-      "width": { "tooltip": "外部宽度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。" },
-      "height": { "tooltip": "外部高度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。" },
-      "batch_size": { "tooltip": "外部批次：>0 时覆盖面板批次（不填/为 0 时用面板值）。" }
+      "config": {
+        "tooltip": "「分辨率选择器」面板生成的配置 JSON（宽度/高度/批次/算法/比例等）。"
+      },
+      "width": {
+        "tooltip": "外部宽度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。"
+      },
+      "height": {
+        "tooltip": "外部高度：>0 时覆盖面板宽高（不填/为 0 时用面板值）。"
+      },
+      "batch_size": {
+        "tooltip": "外部批次：>0 时覆盖面板批次（不填/为 0 时用面板值）。"
+      }
     },
     "outputs": {
-      "0": { "name": "Latent", "tooltip": "空 latent (batch,4,height/8,width/8)" },
-      "1": { "name": "Width", "tooltip": "像素宽度" },
-      "2": { "name": "Height", "tooltip": "像素高度" },
-      "3": { "name": "Batch", "tooltip": "批次数量" }
+      "0": {
+        "name": "Latent",
+        "tooltip": "空 latent (batch,4,height/8,width/8)"
+      },
+      "1": {
+        "name": "Width",
+        "tooltip": "像素宽度"
+      },
+      "2": {
+        "name": "Height",
+        "tooltip": "像素高度"
+      },
+      "3": {
+        "name": "Batch",
+        "tooltip": "批次数量"
+      }
     }
   },
-  "EzFlex-NodeSwitchGroup": { "description": "节点开关组" },
-  "EzFlex-NodeSwitchMaster": { "description": "节点总控制" },
-  "EzFlex-MainControl": { "description": "总控制节点" },
-  "EzFlex-ParamPresetControl": { "description": "参数预设控制节点" },
+  "EzFlex-NodeSwitchGroup": {
+    "description": "节点开关组"
+  },
+  "EzFlex-NodeSwitchMaster": {
+    "description": "节点总控制"
+  },
+  "EzFlex-MainControl": {
+    "description": "总控制节点"
+  },
+  "EzFlex-ParamPresetControl": {
+    "description": "参数预设控制节点"
+  },
   "EzFlex-ParamPresetOutput": {
     "description": "参数输出控制节点",
-    "inputs": { "config": { "tooltip": "「参数预设输出」面板生成的配置 JSON（局部启用/禁用参数 id 集合）。" } }
+    "inputs": {
+      "config": {
+        "tooltip": "「参数预设输出」面板生成的配置 JSON（局部启用/禁用参数 id 集合）。"
+      }
+    }
   },
   "EzFlex-PreviewAny": {
     "description": "任意预览",
-    "inputs": { "config": { "tooltip": "「任意预览」配置（是否存档 + 存档相对目录）。" } }
+    "inputs": {
+      "config": {
+        "tooltip": "「任意预览」配置（是否存档 + 存档相对目录）。"
+      }
+    }
   },
   "EzFlex-MediaLoader": {
     "description": "素材加载器",
-    "inputs": { "config": { "tooltip": "「素材加载器」面板生成的配置 JSON（分组/卡片/文件）。" } }
+    "inputs": {
+      "config": {
+        "tooltip": "「素材加载器」面板生成的配置 JSON（分组/卡片/文件）。"
+      }
+    }
   },
   "EzFlex-MediaOut": {
     "description": "素材输出",
     "inputs": {
-      "card": { "tooltip": "来自 EzFlex-MediaLoader 的 list 端口（每个列表项拆成一个输出口）。" },
-      "config": { "tooltip": "「素材输出」面板配置（局部禁用文件 id 集合）。" }
+      "card": {
+        "tooltip": "来自 EzFlex-MediaLoader 的 list 端口（每个列表项拆成一个输出口）。"
+      },
+      "config": {
+        "tooltip": "「素材输出」面板配置（局部禁用文件 id 集合）。"
+      }
     }
   },
   "EzFlex-MergeList": {
     "description": "列表合并",
-    "outputs": { "0": { "name": "list", "tooltip": "按顺序拼好的列表，可直接接 StartLoop 的 List 模式。" } }
+    "outputs": {
+      "0": {
+        "name": "list",
+        "tooltip": "按顺序拼好的列表，可直接接 StartLoop 的 List 模式。"
+      }
+    }
   },
   "EzFlex-TimeLine": {
     "description": "时间轴规划",
     "inputs": {
-      "index": { "tooltip": "段号（0 起）：接 EzFlex-LoopStart.index，第几轮就输出第几段的帧数。" },
-      "video": { "tooltip": "分段成片列表（一项一段）。面板按 index 用第 i 项预览第 i 段；节点本身不用它。" }
+      "model": {
+        "tooltip": "目标模型：决定帧网格（B + S·k）与最大帧数。H3 = 5+17k / 上限 362。"
+      },
+      "total": {
+        "tooltip": "总时长（秒）。按 总时长 ÷ 每段时长 向上取整切成若干段。"
+      },
+      "segment": {
+        "tooltip": "每段目标时长（秒，未含重叠）。第 1 段向上吸附到网格；其余段由剩余网格步数平摊。"
+      },
+      "fps": {
+        "tooltip": "帧率。所有帧数 ↔ 秒数的换算都用它。"
+      },
+      "overlap": {
+        "tooltip": "从上一段尾巴接过来的重叠帧数。会**向下**吸附到网格（H3 只认 0 或 5+17k）：填 20→5、22→22、40→39。作为额外帧喂给采样器，再从每段输出的**头部**剪掉。"
+      },
+      "tolerance": {
+        "tooltip": "为拼接顺滑**额外**多生成、也要剪掉的头帧数（在 overlap 之外）：net = gen - overlap - tolerance。它**不会**把生成帧数顶出模型网格。"
+      },
+      "align": {
+        "tooltip": "align = 总时长优先：第 1 段向上取整，剩余网格步数按总时长反解后均匀平摊 ⇒ 整条时间轴贴合总时长（总偏差 ≤ 8 帧，各段净增可能偏离每段时长约 1~2 步）。strict = 每段时长优先：除首段外所有段用【同一个网格步数】，每段时长绝对统一；总时长靠【增减段数】去逼近（段数自由搜索取最贴近的总段数，不再限制在 ±2）。段长偏大时段数跳变会放大总偏差，这是段长统一的必然代价。"
+      },
+      "index": {
+        "tooltip": "段号（0 起）：接 EzFlex-LoopStart.index，第几轮就输出第几段的帧数。"
+      },
+      "video": {
+        "tooltip": "分段成片列表（一项一段）。面板按 index 用第 i 项预览第 i 段；节点本身不用它。"
+      },
+      "src": {
+        "tooltip": "要切分的源视频（一条）：可接 EzFlex-MediaLoader 的端口、内置 Load Video 节点或路径。按面板上的切分模式切片后从 video 输出。优先级高于面板「加载视频」按钮加载的那条。"
+      }
     },
     "outputs": {
-      "0": { "name": "frames", "tooltip": "该段要生成的帧数（= 采样器 length；一定落在模型帧网格上，如 H3 的 5+17k）。" },
-      "1": { "name": "overlap_frames", "tooltip": "该段输出要剪掉的「头帧」数（= 从上一段尾巴接过来的重叠帧），已吸附到网格。" },
-      "2": { "name": "tolerance_frames", "tooltip": "为拼接顺滑额外多生成、也要剪掉的头帧数（在 overlap 之外）。" },
-      "3": { "name": "net_frames", "tooltip": "该段净增帧数 = frames - overlap_frames - tolerance_frames（真正接在时间轴上的长度）。" },
-      "4": { "name": "gen_start", "tooltip": "该段生成内容在净时间轴上的起点（秒）。gen_start = net_start - (overlap+tolerance)/fps。" },
-      "5": { "name": "segments", "tooltip": "总段数（按 总时长 / 每段时长 切出来的段数）。" }
+      "0": {
+        "name": "frames",
+        "tooltip": "该段要生成的帧数（= 采样器 length；一定落在模型帧网格上，如 H3 的 5+17k）。"
+      },
+      "1": {
+        "name": "overlap_frames",
+        "tooltip": "该段输出要从头部剪掉的帧数（= 从上一段尾巴接过来的重叠帧；首段为 0）。如果你用了 tolerance，把它一起加进来。"
+      },
+      "2": {
+        "name": "src",
+        "tooltip": "源视频的切片（出口与入口 src 成对：源视频进、切片出）。格式跟面板「输出格式」下拉走：视频 = 每段一条（PyAV 切到临时 mp4 的 VIDEO）；帧序列 = 每段一个 IMAGE 批次；GIF = 每段一个 IMAGE 批次 + 另存一份动图到 output 目录。切分模式：全部 = 每段一条；指定段 = 就 [起点, 终点) 那一条（终点缺省 = 起点 + 5s）；循环 = 只有 index 那一段。端口声明成 ANY 以便三种格式都能连；没有源或切失败 = 一个 None。"
+      }
     }
   },
   "EzFlex-SplitList": {
     "description": "拆分列表",
     "inputs": {
-      "list": { "tooltip": "任意列表值（例如 EzFlex-MergeList 的输出）。" }
+      "list": {
+        "tooltip": "任意列表值（例如 EzFlex-MergeList 的输出）。"
+      }
     }
   },
   "EzFlex-Reroute": {
     "description": "转接点",
     "outputs": {
-      "0": { "tooltip": "第 1 张转接卡的输出，原样透传同序号入口的值。" }
+      "0": {
+        "tooltip": "第 1 张转接卡的输出，原样透传同序号入口的值。"
+      }
+    }
+  },
+  "EzFlex-ControlnetPreprocessor": {
+    "description": "预处理器（卡片列表）",
+    "inputs": {
+      "config": {
+        "tooltip": "面板状态：一张卡 = 一个预处理器（类型 + 自定义名 + 参数）。随工作流序列化。"
+      },
+      "image_1": {
+        "tooltip": "第 1 张卡的输入图像。"
+      },
+      "image_2": {
+        "tooltip": "第 2 张卡的输入图像。"
+      }
     }
   },
   "EzFlex-LoopStart": {
     "description": "循环起点（把上一轮 LoopEnd 收到的值回喂给本轮）",
     "inputs": {
-      "index": { "tooltip": "起始轮次（0 = 从头）。运行期每展开一轮 +1；它同时作为 index 输出口的值给下游。" },
-      "initial value1": { "tooltip": "初值口：第 1 轮（还没有上一轮产物）时 value1 输出什么。不接就是空。" }
+      "index": {
+        "tooltip": "起始轮次（0 = 从头）。运行期每展开一轮 +1；它同时作为 index 输出口的值给下游。"
+      },
+      "initial value1": {
+        "tooltip": "初值口：第 1 轮（还没有上一轮产物）时 value1 输出什么。不接就是空。"
+      }
     },
     "outputs": {
-      "0": { "name": "index", "tooltip": "本轮轮号（0 起），喂给 PromptHelper / MediaLoader / TimeLine 的 index 口。" },
-      "1": { "name": "value1", "tooltip": "上一轮 LoopEnd 第 1 口收到的值（第 1 轮 = initial value1）。回喂是隐式的，画布上别连 End→Start。" }
+      "0": {
+        "name": "index",
+        "tooltip": "本轮轮号（0 起），喂给 PromptHelper / MediaLoader / TimeLine 的 index 口。"
+      },
+      "1": {
+        "name": "value1",
+        "tooltip": "上一轮 LoopEnd 第 1 口收到的值（第 1 轮 = initial value1）。回喂是隐式的，画布上别连 End→Start。"
+      }
     }
   },
   "EzFlex-LoopEnd": {
     "description": "循环终点（总轮数在这里设）",
     "inputs": {
-      "value1": { "tooltip": "这口收什么，下一轮 LoopStart 同编号口就输出什么。想攒列表就接 EzFlex-MergeList 的输出。" },
-      "rounds": { "tooltip": "总轮数（含第 1 轮）：0 或 1 = 只跑 1 次；N = 一共跑 N 次。" }
+      "value1": {
+        "tooltip": "这口收什么，下一轮 LoopStart 同编号口就输出什么。想攒列表就接 EzFlex-MergeList 的输出。"
+      },
+      "rounds": {
+        "tooltip": "总轮数（含第 1 轮）：0 或 1 = 只跑 1 次；N = 一共跑 N 次。"
+      }
     },
     "outputs": {
-      "0": { "name": "out1", "tooltip": "跑完后的最终值（最后一轮 value1 收到的值）。只能喂循环体外的节点，接进循环体会报 Dependency cycle detected。" }
+      "0": {
+        "name": "out1",
+        "tooltip": "跑完后的最终值（最后一轮 value1 收到的值）。只能喂循环体外的节点，接进循环体会报 Dependency cycle detected。"
+      }
     }
   },
   "EzFlex-PromptHelper": {
     "description": "提示词助手",
-    "inputs": { "config": { "tooltip": "「提示词卡片」面板生成的配置 JSON（卡片列表）。" } }
+    "inputs": {
+      "config": {
+        "tooltip": "「提示词卡片」面板生成的配置 JSON（卡片列表）。"
+      }
+    }
+  },
+  "EzFlex-TimePlan": {
+    "description": "时间规划（按时长切段，输出本段帧数 + 完整规划表）",
+    "inputs": {
+      "model": {
+        "tooltip": "目标模型：决定帧网格（B + S·k）与最大帧数。H3 = 5+17k / 上限 362。"
+      },
+      "total": {
+        "tooltip": "总时长（秒）。按 总时长 ÷ 每段时长 向上取整切成若干段。"
+      },
+      "segment": {
+        "tooltip": "每段目标时长（秒，未含重叠）。"
+      },
+      "fps": {
+        "tooltip": "帧率。所有帧数 ↔ 秒数的换算都用它。"
+      },
+      "overlap": {
+        "tooltip": "从上一段尾巴接过来的重叠帧数。会**向下**吸附到网格（H3 只认 0 或 5+17k）：填 20→5、22→22、40→39。"
+      },
+      "tolerance": {
+        "tooltip": "为拼接顺滑**额外**多生成、也要剪掉的头帧数（在 overlap 之外）。用 AddGuide 硬锁时保持 0。"
+      },
+      "align": {
+        "tooltip": "align = 总时长优先（首段向上取整 + 剩余步数反解平摊）；strict = 除首段外所有段用同一个网格步数，总时长靠增减段数逼近。"
+      },
+      "config": {
+        "tooltip": "规划面板状态（segOverride = 手动每段时长，单位秒）。"
+      },
+      "index": {
+        "tooltip": "段号（0 起）：接 EzFlex-LoopStart.index，第几轮就输出第几段。越界 = 0 帧（让循环自己收尾）。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "frames",
+        "tooltip": "该段要生成的帧数（= 采样器 length；一定落在模型帧网格上，如 H3 的 5+17k）。"
+      },
+      "1": {
+        "name": "trim_frames",
+        "tooltip": "该段输出要从头部剪掉的帧数（= overlap + tolerance；首段为 0）。"
+      },
+      "2": {
+        "name": "net_frames",
+        "tooltip": "剪头之后的可播帧数（= frames - trim_frames）。"
+      },
+      "3": {
+        "name": "timeplan",
+        "tooltip": "完整规划对象：{index, total, fps, overlap, tolerance, segments:[...], cur:{...}}。下游统一从这里取数。"
+      }
+    }
+  },
+  "EzFlex-MotionContext": {
+    "description": "运动上下文（把上一段 AV latent 的尾部钉进本段 conditioning）",
+    "inputs": {
+      "positive": {
+        "tooltip": "本段的正向条件（来自视频生成节点）。"
+      },
+      "latent": {
+        "tooltip": "本段待采样的 AV latent（取 frame_count / 校验形状）。"
+      },
+      "context_length": {
+        "tooltip": "要钉的视频帧数。H3 合法值 = 17k+5（5 / 22 / 39 / 56 ...）。"
+      },
+      "context_audio_length": {
+        "tooltip": "要钉的音频帧数（0 = 跟随 context_length）。官方示例用 24 配视频 22。"
+      },
+      "context_latent": {
+        "tooltip": "上一段的 AV latent（EzFlex-LoopStart.valueK）。没接 = 不钉（首段）。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "positive",
+        "tooltip": "钉好尾帧的 conditioning（硬锁、永不去噪）。"
+      },
+      "1": {
+        "name": "trim_frames",
+        "tooltip": "本段解码后要从头部剪掉的帧数（没钉就是 0）。"
+      }
+    }
+  },
+  "EzFlex-SegmentPanel": {
+    "description": "段落检查站（裁头 · 落盘 · 清显存 · 末段收口）",
+    "inputs": {
+      "images": {
+        "tooltip": "本段解码后的画面（会被裁掉头部）。"
+      },
+      "timeplan": {
+        "tooltip": "EzFlex-TimePlan 的规划对象。"
+      },
+      "save_dir": {
+        "tooltip": "段落盘目录。空 = <output>/EzFlex_Segments。"
+      },
+      "fps": {
+        "tooltip": "落盘视频的帧率。"
+      },
+      "clean_vram": {
+        "tooltip": "每段结束后清缓存（低显存刚需）。"
+      },
+      "assemble": {
+        "tooltip": "最后一段自动用 ffmpeg concat 收口成片。"
+      },
+      "audio": {
+        "tooltip": "本段音频（一起裁头）。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "images",
+        "tooltip": "裁掉钉头之后的本段画面。"
+      },
+      "1": {
+        "name": "audio",
+        "tooltip": "裁掉钉头之后的本段音频。"
+      }
+    }
+  },
+  "EzFlex-SplitVideo": {
+    "description": "视频切分（卡片式切源视频）",
+    "inputs": {
+      "timeplan": {
+        "tooltip": "EzFlex-TimePlan 的规划对象。"
+      },
+      "max_frames": {
+        "tooltip": "单卡片最多解多少帧（防爆内存）。"
+      },
+      "config": {
+        "tooltip": "卡片配置（面板写）：{cards:[{mode, oneStart, oneEnd, src}]}"
+      },
+      "video_1": {
+        "tooltip": "卡片 1 的源视频（EzFlex-MediaLoader 口 / 内置 Load Video / 路径）。"
+      },
+      "video_2": {
+        "tooltip": "卡片 2 的源视频。"
+      },
+      "video_3": {
+        "tooltip": "卡片 3 的源视频。"
+      },
+      "video_4": {
+        "tooltip": "卡片 4 的源视频。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Segment 1",
+        "tooltip": "卡片 1 切出来的帧序列（IMAGE 批次）；没接 / 切失败 = None。"
+      },
+      "1": {
+        "name": "Segment 2",
+        "tooltip": "卡片 2 切出来的帧序列（IMAGE 批次）；没接 / 切失败 = None。"
+      },
+      "2": {
+        "name": "Segment 3",
+        "tooltip": "卡片 3 切出来的帧序列（IMAGE 批次）；没接 / 切失败 = None。"
+      },
+      "3": {
+        "name": "Segment 4",
+        "tooltip": "卡片 4 切出来的帧序列（IMAGE 批次）；没接 / 切失败 = None。"
+      }
+    }
+  },
+  "EzFlex-VideoComponents": {
+    "description": "获取视频元素（帧 / 音频 / fps / 帧数 / 时长 / 尺寸 / 位深 / 色彩空间）",
+    "inputs": {
+      "video": {
+        "tooltip": "要拆分的视频（SplitVideo 的 video 输出 / MediaLoader / 内置 Load Video）。"
+      }
+    },
+    "outputs": {
+      "0": {"name": "images", "tooltip": "解码后的全部帧（IMAGE 批次）。"},
+      "1": {"name": "audio", "tooltip": "音轨（没有音轨 = None）。"},
+      "2": {"name": "fps", "tooltip": "平均帧率。"},
+      "3": {"name": "frame_count", "tooltip": "解码帧数。"},
+      "4": {"name": "duration", "tooltip": "时长（秒）。"},
+      "5": {"name": "width", "tooltip": "像素宽。"},
+      "6": {"name": "height", "tooltip": "像素高。"},
+      "7": {"name": "bit_depth", "tooltip": "位深。"},
+      "8": {"name": "color_space", "tooltip": "色彩空间。"}
+    }
   }
 }

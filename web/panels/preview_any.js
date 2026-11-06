@@ -1,16 +1,19 @@
+// 面板：PreviewAny 面板：白板卡片、媒体探测展示、3D 查看器、导出
 // EzFlex-PreviewAny 任意预览节点（V1.3 简化版）。
 // 输入为固定 input_1..N ANY 槽；前端按「已连接 + 1 空槽」自动展示卡片（连一个自动加一个）。
 // 卡片可拖拽排序，卡片顺序即 socket 顺序；顶部为「存档开关 + 保存位置」，卡片带文件夹图标打开已保存文件。
 // 参考 AUNPassthroughAnyMulti（onExecuted entries + 固定 ANY 输入槽）。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { ezT, onLocaleChange, ezRelabel } from "./ezflex_i18n.js";
-import { openEzListPreview } from "./ezflex_listview.js";
-import { ezThemeInit } from "./ezflex_theme.js";
-import {
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import { ezT, onLocaleChange, ezRelabel } from "../core/ezflex_i18n.js";
+import { openEzListPreview } from "../core/ezflex_listview.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
+import { ezApplyDefaultSize,
   NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig, installResizeHandles, makeDomWidgetHitThrough, installEdgeLabels, hideNativeSlotText, ezPushModal, ezPopModal, ezIsTopModal, makeAudioPlayer, ezPruneDanglingLinks,
-} from "./ezflex_service.js";
+  ezCaptureSocketLinks, ezApplySocketLinks,
+  scheduleOnRedraw, pumpFrames, on,
+  ezDropInput } from "../core/ezflex_service.js";
 
 const NODE = NODE_TYPES.PREVIEW_ANY;
 const MAX_CARDS = 16;
@@ -76,6 +79,7 @@ const CSS = `
 .ezpv-fdirs button{text-align:left;background:var(--ez-surface);border:1px solid var(--ez-border-2);border-radius:8px;padding:5px 10px;font-size:12px;color:var(--ez-fg);cursor:pointer;font-family:inherit;}
 .ezpv-fdirs button:hover{background:var(--ez-surface-3);}
 .ezpv-media{position:fixed;z-index:9998;background:var(--ez-bg);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.25);padding:12px;display:none;left:50%;top:50%;transform:translate(-50%,-50%);max-width:82vw;max-height:82vh;overflow:auto;pointer-events:auto;}
+.ezpv-media img,.ezpv-media video,.ezpv-media audio{user-select:none;-webkit-user-select:none;-webkit-user-drag:none;user-drag:none;}
 .ezpv-media.active{display:block;}
 .ezpv-media-body{display:flex;flex-direction:column;gap:8px;justify-content:center;align-items:center;}
 .ezpv-media.ezpv-fs .ezpv-media-body{height:100%;justify-content:center;}
@@ -85,6 +89,7 @@ const CSS = `
 .ezpv-media.ezpv-fs.has-strip .ezpv-media-body > img{max-height:calc(100vh - 130px);}   /* 全屏也保留底部缩略图条：主图留出位置，不被盖住 */
 .ezpv-media.ezpv-fs video{width:100vw;height:100vh;object-fit:cover;max-width:none!important;max-height:none!important;}
 .ezpv-media-meta{font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-surface-2);border:1px solid var(--ez-border-2);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-all;margin:0;}
+.ezpv-media.ezpv-fs .ezpv-media-meta{display:none!important;}   /* 全屏看图时隐藏元信息栏（退出全屏自动恢复；!important 覆盖内联 display:block） */
 .ezpv-media .cap{font-size:12px;color:var(--ez-fg);padding:0 4px;}
 .ezpv-strip{display:none;align-items:center;gap:6px;width:100%;}
 .ezpv-media.has-strip .ezpv-strip{display:flex;}   /* 全屏不隐藏：多图时底部缩略图条一直在 */
@@ -105,8 +110,6 @@ function injectStyle() {
   ezThemeInit(); if (_styleInjected || !document.head) return; _styleInjected = true; const s = document.createElement('style'); s.textContent = CSS; document.head.appendChild(s); }
 function el(tag, cls, attrs) { const e = document.createElement(tag); if (cls) e.className = cls; if (attrs) Object.keys(attrs).forEach((k) => e.setAttribute(k, attrs[k])); return e; }
 const fetchApi = (p, o) => (api && typeof api.fetchApi === 'function') ? api.fetchApi(p, o) : fetch(p, o);
-// 关闭后恢复窗口级 keydown 监听回退
-let _escStack = [];
 // 为弹窗加「全屏」按钮：紧挨在 ✕ 左边。文字型弹窗插进标题栏，媒体弹窗（✕ 是绝对定位）贴其左侧。
 function attachFullscreen(host, closeFn, onExit, closeBtn) {
   let fs = false;
@@ -122,16 +125,20 @@ function attachFullscreen(host, closeFn, onExit, closeBtn) {
     btn.style.cssText = 'position:absolute;top:8px;right:' + (abs ? '44px' : '6px') + ';z-index:8;width:26px;height:26px;display:flex;align-items:center;justify-content:center;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;color:var(--ez-fg-3);cursor:pointer;font-size:12px;';
     host.appendChild(btn);
   }
-  btn.addEventListener('click', (e) => { e.stopPropagation(); fs = !fs; host.classList.toggle('ezpv-fs', fs); if (!fs) doExit(); });
+  // 退出全屏时把缩放/拖动复位：进全屏放大过再退出来，图片不该还停留在放大+偏移的状态。
+  const resetView = () => { try { if (host._resetZoom) host._resetZoom(); } catch (_) {} };
+  btn.addEventListener('click', (e) => { e.stopPropagation(); fs = !fs; host.classList.toggle('ezpv-fs', fs); if (!fs) { resetView(); doExit(); } });
+  const dispose = () => { try { window.removeEventListener('keydown', key); } catch (_) {} };
   const key = (e) => {
+    if (!host.isConnected) { dispose(); return; }   // 弹窗被其它路径关掉（点空白/删节点）：下次按键顺手解绑
     if (e.key === 'Escape') {
       e.stopPropagation();
-      if (fs) { fs = false; host.classList.remove('ezpv-fs'); doExit(); }
-      else { doExit(); closeFn(); }
+      if (fs) { fs = false; host.classList.remove('ezpv-fs'); resetView(); doExit(); }
+      else { doExit(); dispose(); closeFn(); }
     }
   };
   window.addEventListener('keydown', key);
-  _escStack.push(() => window.removeEventListener('keydown', key));
+  if (closeBtn) closeBtn.addEventListener('click', dispose);
 }
 
 // 点空白关闭：只有在“按下时也在弹窗外”并且是干净的点击（按下在窗内不关，即使拖到窗外）才真正关。
@@ -145,8 +152,187 @@ function bindOutsideClose(popup, closeFn) {
 
 // ===== 状态 / 配置 =====
 function stateFor(node) {
-  if (!node._ezPrev) node._ezPrev = { save: false, savePath: '', saveFormats: {}, batchMode: 'auto', previewMode: 'normal', entries: [] };
+  if (!node._ezPrev) node._ezPrev = { save: false, savePath: '', saveFormats: {}, batchMode: 'auto', batchMax: 64, previewMode: 'normal', entries: [] };
   return node._ezPrev;
+}
+// ★★ 卡片画面来源，优先级：小图优先（卡片只有 64~120 px，没必要解码大图）
+//   ① `thumb`（192px JPEG，存进 node.properties，能跨重启）
+//   ② `thumb_src`（后端落盘的 320px PNG；本次会话内有效，重启后 temp 被清空会 404）
+//   ③ `preview`（后端内联的卡片图 base64，兜底）
+//   ④ `image_src`（原图 URL，最后兜底）
+function entryThumbSrc(e) {
+  if (!e) return null;
+  if (e.thumb) return e.thumb;
+  if (e.thumb_src) return e.thumb_src;
+  if (e.preview) return 'data:image/png;base64,' + e.preview;
+  if (e.image_src) return e.image_src;
+  return null;
+}
+// 由预览的 base64 图生成 ~192px 的 JPEG data URL，存进 node.properties 一起走工作流。
+// ComfyUI 启动时会 rmtree(temp)（app/assets/lifecycle.cleanup_temp_filesystem）⇒ 只有落进 properties
+// 的小图能撑过重启；原来的 thumb_src 指向 temp，重启必丢。
+function pvMakeThumb(entry, node) {
+  try {
+    if (!entry || entry.thumb || !entry.preview) return;
+    let src = String(entry.preview);
+    if (!/^data:/.test(src)) src = (src.indexOf('/9j/') === 0 ? 'data:image/jpeg;base64,' : 'data:image/png;base64,') + src;
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+        const sc = Math.min(1, 192 / Math.max(1, iw, ih));
+        const cv = document.createElement('canvas');
+        cv.width = Math.max(1, Math.round(iw * sc)); cv.height = Math.max(1, Math.round(ih * sc));
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        entry.thumb = cv.toDataURL('image/jpeg', 0.8);
+        pvPersist(node);
+      } catch (_) {}
+    };
+    img.onerror = () => {};
+    img.src = src;
+  } catch (_) {}
+}
+// ===== entries 持久化（撑过「切换工作流标签 / 重开图」）=====
+// 切换工作流 = ComfyUI 重新 loadGraphData ⇒ 节点对象被**重建**，挂在节点上的 `_ezPrev.entries` 直接丢失
+// （内置照片预览靠 nodeOutputStore 存活，我们的自定义 ui.entries 不在那个 store 里）。
+// 所以每次 onExecuted 后把 entries 抄一份到 `node.properties.ezPrevEntries`（会随工作流 JSON 一起存），
+// 下次 onConfigure / 节点重建时从那里还原。★ 只存轻量字段：丢掉 `preview`（1600px base64，会让工作流膨胀到 MB 级），
+// 改用后端落盘的 `thumb_src` 小图 URL 还原画面。
+const PV_PERSIST_KEYS = ['input', 'caption', 'type', 'value', 'full_value', 'thumb', 'thumb_src', 'image_src', 'images', 'batch_kind',
+  'batch_total', 'audio', 'audio_src', 'video', 'video_src', 'model3d', 'frames', 'meta', 'gen_meta', 'saved_path'];
+function pvStripEntries(entries) {
+  const arr = (entries || []).slice(-64);
+  return arr.map((e, i) => {
+    const o = {};
+    if (!e) return o;
+    PV_PERSIST_KEYS.forEach((k) => { if (e[k] !== undefined) o[k] = e[k]; });
+    // ★ audio / video 是**整段**媒体编成的 data URI（每条几十 KB~几 MB）：全量写进 node.properties
+    //   会让工作流 JSON 涨到几十 MB（2026-11 复检 H-14）。只给最后 4 条保留内联源
+    //   （重开图还能听/看最近的结果），更早的留 thumb + *_src URL 即可。
+    if (i < arr.length - 4) { delete o.audio; delete o.video; }
+    return o;
+  });
+}
+function pvPersist(node) {
+  try {
+    const st = stateFor(node);
+    if (!node.properties) node.properties = {};
+    node.properties.ezPrevEntries = pvStripEntries(st.entries);
+  } catch (_) {}
+}
+function pvRestore(node) {
+  try {
+    const saved = node && node.properties && node.properties.ezPrevEntries;
+    if (!Array.isArray(saved) || !saved.length) return;
+    const st = stateFor(node);
+    const cur = Array.isArray(st.entries) ? st.entries : [];
+    // 本次会话已有更新鲜的 entries（刚执行完 / 循环累加中）就别用旧的覆盖
+    if (cur.length && cur.some((e) => e && e.preview)) return;
+    st.entries = saved.slice();
+  } catch (_) {}
+}
+// ===== 「排队后切到别的工作流，跑完再切回来」的结果回填 =====
+// 新版前端只把 executed 发给**当前显示图**上的节点（getNodeByExecutionId(this.rootGraph, …)），
+// 而切工作流会 clean() 掉整张图（节点重建、app.nodeOutputs 清空）。⇒ 在别的 tab 跑完的结果
+// 原来只能丢。这里自己收 executed，按「工作流 id + 节点 id」存一份（工作流 id = LGraph.id，
+// 前端从工作流 JSON 的 id 恢复，切 tab 前后不变），节点重建/切回来时再从这份缓存回填。
+function pvWorkflowId(graph) {
+  // 子图里的节点用 rootGraph.id（= 工作流 id）；root 图返回自己
+  try { const g = graph && (graph.rootGraph || graph); return String((g && g.id) || ''); } catch (_) { return ''; }
+}
+const _pvRuns = new Map();   // prompt_id → 排队时的工作流 id
+const _pvBuf = new Map();    // 工作流 id|节点 id → entries[]（最近一次排队的结果）
+
+// 用户按住卡片时不要重建列表：renderEntries 会 innerHTML='' 整块重建，如果重建正好发生在
+// mousedown 与 mouseup 之间，两个事件落在不同节点上，click 根本不会触发 —— 表现就是
+// 「偶尔点一下卡片没反应、点两下才开」。按住期间把重画挂起，松手后再补一次。
+let _pvPress = 0, _pvPressWatch = 0;
+const _pvPendNodes = new Set();
+
+// 「偶尔点一下卡片没反应」：切换工作流 / 刚生成完时 ComfyUI 会重建节点的 DOM 宿主（我们也会重画卡片），
+// 如果重建正好落在 pointerdown 与 pointerup 之间，两个事件落在不同元素上，浏览器根本不会派发 click。
+// 这里补一条兜底：按下时记住卡片和它的打开函数，抬起时若还是同一点、也没怎么移动，就主动打开；
+// 原生 click 正常触发时由 pvOpenOnce 去重（400ms 内只开一次）。
+let _pvTap = null, _pvOpenAt = 0;
+function pvOpenOnce(fn) {
+  const now = performance.now();
+  if (now - _pvOpenAt < 400) return;
+  _pvOpenAt = now;
+  try { fn(); } catch (_) {}
+}
+function pvTapInstall() {
+  if (pvTapInstall._done) return;
+  pvTapInstall._done = true;
+  document.addEventListener('pointerdown', (e) => {
+    _pvTap = null;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (t.closest('.ezpv-handle') || t.closest('.ezpv-badge') || t.closest('.ez-ap') || t.closest('button')) return;
+    const card = t.closest('.ezpv-card');
+    const box = card && card.querySelector('.ezpv-prev');
+    if (box && typeof box._pvOpen === 'function') _pvTap = { x: e.clientX, y: e.clientY, t: performance.now(), open: box._pvOpen };
+  }, true);
+  document.addEventListener('pointerup', (e) => {
+    const tap = _pvTap; _pvTap = null;
+    if (!tap) return;
+    if (performance.now() - tap.t > 800) return;
+    if (Math.abs(e.clientX - tap.x) > 6 || Math.abs(e.clientY - tap.y) > 6) return;   // 拖动/选择文字不算点击
+    setTimeout(() => { try { tap.open(); } catch (_) {} }, 0);   // 先让原生 click 跑，它没开才补
+  }, true);
+  document.addEventListener('pointercancel', () => { _pvTap = null; }, true);
+}
+try { pvTapInstall(); } catch (_) {}
+function pvPressBegin() {
+  _pvPress += 1;
+  // 兜底：极端情况下收不到 pointerup（失焦/切窗口）也不能让面板永远不重画
+  try { clearTimeout(_pvPressWatch); _pvPressWatch = setTimeout(pvPressEnd, 3000); } catch (_) {}
+}
+function pvPressEnd() {
+  try { clearTimeout(_pvPressWatch); _pvPressWatch = 0; } catch (_) {}
+  if (!_pvPress) return;
+  _pvPress = 0;
+  const pend = Array.from(_pvPendNodes); _pvPendNodes.clear();
+  pend.forEach((n) => { try { renderEntries(n); } catch (_) {} });
+}
+try {
+  window.addEventListener('pointerdown', (e) => {
+    const t = e.target;
+    if (t && t.closest && t.closest('.ezpv-root')) pvPressBegin();
+  }, true);
+  window.addEventListener('pointerup', pvPressEnd, true);
+  window.addEventListener('pointercancel', pvPressEnd, true);
+} catch (_) {}
+function pvBufKey(wid, nid) { return wid + '|' + String(nid); }
+function pvBufClear(wid) {
+  if (!wid) return;
+  Array.from(_pvBuf.keys()).forEach((k) => { if (k.indexOf(wid + '|') === 0) _pvBuf.delete(k); });
+}
+function pvBufAdd(wid, nid, entries) {
+  if (!wid || !entries || !entries.length) return;
+  const k = pvBufKey(wid, nid);
+  _pvBuf.set(k, (_pvBuf.get(k) || []).concat(entries).slice(-64));
+  while (_pvBuf.size > 64) _pvBuf.delete(_pvBuf.keys().next().value);
+}
+function pvBufGet(node) {
+  try { return _pvBuf.get(pvBufKey(pvWorkflowId(node && node.graph) || pvWorkflowId(app && app.graph), node && node.id)) || null; } catch (_) { return null; }
+}
+function pvEntrySig(e) {
+  if (!e) return '';
+  const p = String(e.preview || '');
+  return [e.input, e.caption, e.type, e.thumb_src, e.image_src, e.saved_path, e.value != null ? String(e.value) : '',
+    e.batch_kind, e.batch_total, p.length, p.slice(0, 24)].join('|');
+}
+function pvEntriesSig(es) { return (es || []).map(pvEntrySig).join(','); }
+function pvSyncBuffered(node) {
+  const live = pvBufGet(node);
+  if (!live || !live.length) return false;
+  const st = stateFor(node);
+  const cur = Array.isArray(st.entries) ? st.entries : [];
+  if (pvEntriesSig(cur) === pvEntriesSig(live)) return false;
+  st.entries = live.slice();
+  live.forEach((e) => pvMakeThumb(e, node));
+  pvPersist(node);
+  return true;
 }
 function loadFromConfig(node) {
   const st = stateFor(node);
@@ -155,12 +341,14 @@ function loadFromConfig(node) {
   st.savePath = typeof cfg.savePath === 'string' ? cfg.savePath : '';
   st.saveFormats = (cfg.saveFormats && typeof cfg.saveFormats === 'object') ? cfg.saveFormats : {};
   st.batchMode = ['auto', 'images', 'video', 'animation'].indexOf(cfg.batchMode) >= 0 ? cfg.batchMode : 'auto';
+  st.batchMax = Number.isFinite(parseInt(cfg.batchMax, 10)) ? Math.max(0, parseInt(cfg.batchMax, 10)) : 64;
   st.previewMode = cfg.previewMode === 'list' ? 'list' : 'normal';   // 默认「普通」：只有显式存过 list 才用列表模式
   st.dirty = false;
+  pvRestore(node);   // ★ 切工作流 / 重开图后从 node.properties 还原上次的预览卡片
 }
 function syncToConfig(node) {
   const st = stateFor(node);
-  writeConfig(node, { save: st.save, savePath: st.savePath, saveFormats: st.saveFormats, batchMode: st.batchMode || 'auto', previewMode: st.previewMode || 'normal' });
+  writeConfig(node, { save: st.save, savePath: st.savePath, saveFormats: st.saveFormats, batchMode: st.batchMode || 'auto', batchMax: st.batchMax == null ? 64 : st.batchMax, previewMode: st.previewMode || 'normal' });
 }
 
 // ===== socket：动态「连一个加一个」= 已连接输入前置 + 末尾 1 个空槽；输出与卡片 1:1。
@@ -187,7 +375,7 @@ function syncSockets(node) {
   try {
     for (let i = (node.inputs || []).length - 1; i >= 0; i--) {
       const _in = node.inputs[i];
-      if (_in && _in.name === 'config') { try { node.inputs.splice(i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } }
+      if (_in && _in.name === 'config') { try { ezDropInput(node, i); } catch (_) { try { _in.hidden = true; } catch (_) {} } }
     }
   } catch (_) {}
 
@@ -200,6 +388,10 @@ function syncSockets(node) {
   // 让 ComfyUI 按保存的 origin_slot/target_slot 把线接回原 socket；稍后延后再统一重排。
   const pending = (node.inputs || []).some((i) => i.link != null && !(node.graph && node.graph.links && node.graph.links[i.link]));
   if (pending) { deferSync(node); return; }
+
+  // 重排前按 socket 拍连线快照：新版前端 socket.links/link 是按**当前下标**现拼的视图，
+  // 搬完再读就指到别的口上了（旧版 LiteGraph 是挂在 socket 上的真数组，两种都靠快照才对）。
+  const cap = ezCaptureSocketLinks(node);
 
   // ---- 输入：已连接前置 + 末尾留 1 个空槽（连一个加一个） ----
   const desiredIn = Math.min(MAX, Math.max(1, conn + 1));
@@ -229,14 +421,8 @@ function syncSockets(node) {
   while (node.outputs.length < conn) { node.addOutput(`output_${node.outputs.length + 1}`, '*'); if (node.graph) node.graph.setDirtyCanvas(true, true); }
   node.outputs.forEach((o, idx) => { try { o.name = `output_${idx + 1}`; hideNativeSlotText(o); o.hidden = false; } catch (_) {} });
 
-  // ---- 回写 slot（链路已就绪，链接对象在）----
-  node.inputs.forEach((i, idx) => { if (i.link != null && node.graph && node.graph.links && node.graph.links[i.link]) { try { node.graph.links[i.link].target_slot = idx; } catch (_) {} } });
-  node.outputs.forEach((o, idx) => {
-    const ids = [];
-    if (Array.isArray(o.links)) ids.push(...o.links);
-    if (o.link != null) ids.push(o.link);
-    ids.forEach((lid) => { if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) { try { node.graph.links[lid].origin_slot = idx; } catch (_) {} } });
-  });
+  // ---- 回写 slot（链路已就绪，链接对象在）：按快照改 link 的下标，不去读搬完后的 socket.links ----
+  ezApplySocketLinks(node, cap);
 
   if (node.graph) node.graph.setDirtyCanvas(true, true);
   syncOutputTypes(conn);
@@ -425,7 +611,7 @@ function mediaEl() {
   if (_media && _media.parentNode) return _media;
   _media = el('div', 'ezpv-media');
   const body = el('div', 'ezpv-media-body');
-  const img = el('img'); img.style.display = 'none';
+  const img = el('img'); img.style.display = 'none'; img.draggable = false;
   const video = document.createElement('video'); video.controls = true; video.style.display = 'none'; video.style.width = '100%'; video.style.maxWidth = '720px';
   const audio = document.createElement('audio'); audio.controls = true; audio.style.display = 'none'; audio.style.width = '100%';
   const meta = document.createElement('pre'); meta.className = 'ezpv-media-meta'; meta.style.display = 'none';
@@ -658,10 +844,13 @@ function open3DViewer(url, title) {
   document.body.appendChild(_threeModal);
 
   let _raf = 0, _listeners = [];
+  let _closed = false, _freeGL = null;
   const cleanup = () => {
+    _closed = true;
     if (_raf) cancelAnimationFrame(_raf);
     _listeners.forEach((fn) => { try { fn(); } catch (_) {} });
     _listeners = [];
+    if (_freeGL) { try { _freeGL(); } catch (_) {} _freeGL = null; }
     if (_threeModal) { _threeModal.remove(); _threeModal = null; }
   };
   close.addEventListener('click', cleanup);
@@ -683,6 +872,8 @@ function open3DViewer(url, title) {
       const ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 100000);
       const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
       renderer.setSize(canvas.clientWidth || 800, canvas.clientHeight || 600, false);
+      // 关闭弹窗时释放 WebGL 上下文：浏览器同时存活的上下文有限，3D 预览反复开关会掉帧/黑屏
+      _freeGL = () => { try { renderer.dispose(); renderer.forceContextLoss(); } catch (_) {} };
       const ro = new ResizeObserver(() => { try { renderer.setSize(canvas.clientWidth || 800, canvas.clientHeight || 600, false); const a = (canvas.clientWidth || 800) / (canvas.clientHeight || 600); persp.aspect = a; persp.updateProjectionMatrix(); } catch (_) {} });
       ro.observe(canvas);
       _listeners.push(() => { try { ro.disconnect(); } catch (_) {} });
@@ -718,6 +909,7 @@ function open3DViewer(url, title) {
 
       loader.load(url,
         (obj) => {
+          if (_closed) return;          // 加载期间弹窗已关：别再往已卸载的画布上挂场景
           status.textContent = '';
           const wrap = new THREE.Group(); wrap.add(obj);
           const b3 = new THREE.Box3().setFromObject(wrap);
@@ -941,7 +1133,13 @@ function open3DViewer(url, title) {
           });
           fsBtn.addEventListener('click', (e) => { e.stopPropagation(); setFs(!fsOn); setTimeout(fit, 60); });
 
-          const loop = () => { _raf = requestAnimationFrame(loop); const c = activeCam(); placeCam(c); renderer.render(scene, c); };
+          // ★ 关闭时不能只靠 cleanup 里那一次 cancelAnimationFrame：模型可能还在加载，
+          //   回调晚于关闭才启动渲染链 ⇒ 这里必须自己认 _closed，否则 rAF 会一直空转。
+          const loop = () => {
+            if (_closed) { _raf = 0; return; }
+            _raf = requestAnimationFrame(loop);
+            const c = activeCam(); placeCam(c); renderer.render(scene, c);
+          };
           _raf = requestAnimationFrame(loop);
           defaultView();
           setTimeout(fit, 60);
@@ -976,26 +1174,31 @@ function renderPreview(entry) {
     box.appendChild(ap);
     box.title = ((entry.caption || '') + '  ' + val).trim();
     // 控件左右收窄、上下居中，两边留灰：点灰边（不是播放控件）开大预览弹窗；列表卡片整块由 list 的捕获点击先接管
+    const openA = () => pvOpenOnce(() => openMediaPreview({ audio: entry.audio, audio_src: entry.audio_src, caption: ((entry.caption || '') + '  ' + val).trim() }));
+    box._pvOpen = openA;
     box.addEventListener('click', (e) => {
       if (e.target && e.target.closest && e.target.closest('.ez-ap')) return;
       e.stopPropagation();
-      openMediaPreview({ audio: entry.audio, audio_src: entry.audio_src, caption: ((entry.caption || '') + '  ' + val).trim() });
+      openA();
     });
     return box;
   }
   if (entry.video || entry.video_src) {
     const box = el('div', 'ezpv-prev img');
-    const img = el('img'); if (entry.preview) img.src = 'data:image/png;base64,' + entry.preview; img.alt = val;
+    const thumb = entryThumbSrc(entry);
+    const img = el('img'); if (thumb) img.src = thumb; img.alt = val;
     box.appendChild(img);
     const play = el('span', 'ezpv-play'); play.textContent = '▶'; box.appendChild(play);
     if (entry.frames > 1) { const b = el('span', 'ezpv-badge'); b.textContent = entry.frames + ezT(' frames'); box.appendChild(b); }
-    box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ video: entry.video, video_src: entry.video_src, poster: entry.preview ? ('data:image/png;base64,' + entry.preview) : null, caption: (entry.caption || '') + '  ' + val }); });
+    const openV = () => pvOpenOnce(() => openMediaPreview({ video: entry.video, video_src: entry.video_src, poster: thumb, caption: (entry.caption || '') + '  ' + val }));
+    box._pvOpen = openV;
+    box.addEventListener('click', (e) => { e.stopPropagation(); openV(); });
     return box;
   }
-  if (entry.preview) {
+  if (entry.preview || entry.thumb_src || entry.image_src) {
     const box = el('div', 'ezpv-prev img');
     box.style.position = 'relative';
-    const img = el('img'); img.src = 'data:image/png;base64,' + entry.preview; img.alt = val;
+    const img = el('img'); img.src = entryThumbSrc(entry); img.alt = val;
     box.appendChild(img);
     const imgs = entry.images || [];
     if (imgs.length > 1) {
@@ -1003,7 +1206,9 @@ function renderPreview(entry) {
       b.style.left = '5px'; b.style.right = 'auto'; box.appendChild(b);
     }
     if (entry.gen_meta) box.appendChild(genInfoBadge(entry));
-    box.addEventListener('click', (e) => { e.stopPropagation(); openMediaPreview({ images: imgs, batch_total: entry.batch_total, image: img.src, image_src: entry.image_src, caption: (entry.caption || '') + '  ' + val, meta: entry.meta, frames: entry.frames, type }); });
+    const openI = () => pvOpenOnce(() => openMediaPreview({ images: imgs, batch_total: entry.batch_total, image: img.src, image_src: entry.image_src, caption: (entry.caption || '') + '  ' + val, meta: entry.meta, frames: entry.frames, type }));
+    box._pvOpen = openI;
+    box.addEventListener('click', (e) => { e.stopPropagation(); openI(); });
     return box;
   }
   if (type === 'MODEL_3D' || type === 'FILE_3D' || type === 'MESH') {   // MESH：顶点/面张量已在后端导成临时 OBJ
@@ -1014,7 +1219,8 @@ function renderPreview(entry) {
     }
     // 和 MediaLoader 同款：卡片 = 3D 图标 + 「打开 3D 查看器」，摘要文字挪进查看器标题
     const box = el('div', 'ezpv-prev d3');
-    const open = () => open3DViewer(entry.model3d, ((entry.caption || '') + '  ' + val).trim());
+    const open = () => pvOpenOnce(() => open3DViewer(entry.model3d, ((entry.caption || '') + '  ' + val).trim()));
+    box._pvOpen = open;
     const ic = el('div', 'ezpv-d3ic'); ic.textContent = '🧊'; box.appendChild(ic);
     const btn = el('button', 'ezpv-d3btn', { type: 'button' }); btn.textContent = ezT('Open 3D viewer');
     btn.addEventListener('click', (e) => { e.stopPropagation(); open(); });
@@ -1027,14 +1233,15 @@ function renderPreview(entry) {
     const box = el('div', 'ezpv-prev long');
     box.textContent = val;
     box.title = ezT('Click to view details (metadata)');
-    box.addEventListener('click', (e) => {
-      e.stopPropagation();
+    const openMeta = () => pvOpenOnce(() => {
       const metaStr = entry.meta || full;
       if (typeof metaStr === 'string' && (metaStr.trim().startsWith('{') || metaStr.trim().startsWith('['))) {
         try { openKeyValueModal(entry.caption || ezT('Details'), JSON.parse(metaStr)); return; } catch (_) {}
       }
       openTextModal(entry.caption || ezT('Details'), typeof metaStr === 'string' ? metaStr : full);
     });
+    box._pvOpen = openMeta;
+    box.addEventListener('click', (e) => { e.stopPropagation(); openMeta(); });
     return box;
   }
   if (val) {
@@ -1042,18 +1249,82 @@ function renderPreview(entry) {
     box.textContent = val;
     const isKV = type === 'DICT' || type === 'LIST' || type === 'TUPLE';
     box.title = isKV ? ezT('Click to view key-value details') : ezT('Click to view full content');
-    box.addEventListener('click', (e) => { e.stopPropagation(); if (isKV) openKeyValueModal(entry.caption || ezT('Details'), full); else openTextModal(entry.caption || ezT('Preview'), full); });
+    const openText = () => pvOpenOnce(() => { if (isKV) openKeyValueModal(entry.caption || ezT('Details'), full); else openTextModal(entry.caption || ezT('Preview'), full); });
+    box._pvOpen = openText;
+    box.addEventListener('click', (e) => { e.stopPropagation(); openText(); });
     return box;
   }
   const box = el('div', 'ezpv-prev'); return box;
 }
 
+// ===== DOM 宿主自愈（切换工作流 / 折叠 / 刷新 / Vue 重建后内容空掉）=====
+// ComfyUI（Vue 或经典）在**切换工作流标签**、折叠、展开、载入、刷新时会卸载并重建 DOM widget 的宿主容器。
+// 我们手动挂进去的 `node._ezRoot` 于是变成**脱离文档的幽灵 DOM**：对象/children 都还在，但 `isConnected === false`
+// —— 之后所有 renderEntries 都画进这棵没人看的树里，用户看到面板【内容全消失】（数据没丢，只是画到了废树）。
+// 所以：① 每次拿面板列表都从 `widget.element` 现取（不长期信 `_ezRoot`）；② 早退判断带 `isConnected` 校验。
+function pvHost(node) {
+  try { const w = (node.widgets || []).find((x) => x && x.type === 'ezpv-panel'); return (w && (w.element || w.el)) || null; } catch (_) { return null; }
+}
+// ★★ 两个坑都要防：
+//   ① widget 宿主被重建后是**空壳**（里面没有我们的 .ezpv-list）→ 直接采纳它会丢结构，必须仍用缓存 shell。
+//   ② 缓存 shell 已脱离文档（幽灵）→ 要回挂进新宿主（healDom 干这事），而不是继续用它。
+//   ⇒ 只有「宿主里真的挂着我们的面板」时才把它当 shell；否则回落到缓存的 _ezRoot（由 healDom 负责搬进去）。
+function pvShell(node) {
+  let host = pvHost(node);
+  if (host && host.querySelector && !host.querySelector('.ezpv-list')) host = null;   // 空壳，不认
+  let shell = host || (node && node._ezRoot) || null;
+  if (shell && shell.querySelector && !shell.querySelector('.ezpv-list') && node && node._ezRoot && node._ezRoot.querySelector && node._ezRoot.querySelector('.ezpv-list')) shell = node._ezRoot;
+  if (!shell || !shell.querySelector) return null;
+  node._ezRoot = shell;                    // 回写：黑框标签等也用最新的
+  return shell;
+}
+function panelList(node) { const s = pvShell(node); return (s && s.querySelector) ? s.querySelector('.ezpv-list') : null; }
+
+function healDom(node) {
+  if (!node || !node._ezRoot) return;
+  const shell = node._ezRoot;
+  const list = (shell.querySelector && shell.querySelector('.ezpv-list')) || null;
+  if (!list) return;
+  const connected = (el) => (el && el.isConnected === undefined) ? true : !!(el && el.isConnected);
+  const host = pvHost(node);
+
+  // (A) config widget 每次都要重新藏一遍（ComfyUI 重建宿主时会把它显示回来）。
+  try { hideConfigWidget(node); } catch (_) {}
+
+  // (B) shell 尺寸也每次硬设一遍：ComfyUI 重建容器时可能把它压扁 → 面板盖不满、底下露内容。
+  try {
+    const si = (p, v) => { try { shell.style.setProperty(p, v, 'important'); } catch (_) {} };
+    si('position', 'absolute'); si('inset', '0'); si('width', '100%'); si('height', '100%');
+    si('max-width', '100%'); si('max-height', '100%'); si('box-sizing', 'border-box');
+  } catch (_) {}
+
+  // (C) 宿主对不上就重挂
+  const shellOk = connected(shell) && connected(list);
+  // ★ 宿主若已重建（新宿主里**没有**我们的 .ezpv-list，或干脆不含 shell）→ 必须把 shell 搬进去。
+  //   只比 `host.contains(shell)` 不够：新宿主是空壳时 contains 为 false，这里正好要重挂。
+  const hostHasShell = !!(host && host.contains && host.contains(shell));
+  const hostOk = !host || host === shell || hostHasShell;
+  if (shellOk && hostOk) {
+    // 结构没问题，但可能「宿主里另有旧壳」→ 清掉重复的，避免两份面板
+    try {
+      if (host && host !== shell) {
+        Array.prototype.slice.call(host.querySelectorAll('.ezpv-shell')).forEach((s) => { if (s !== shell) s.remove(); });
+      }
+    } catch (_) {}
+    return;
+  }
+  try { if (host && host !== shell && host.appendChild) host.appendChild(shell); } catch (_) {}
+  // (D) 强制重画
+  try { renderEntries(node); } catch (_) {}
+}
+
 function renderEntries(node) {
   const st = stateFor(node);
-  const root = node && node._ezRoot;
+  const root = pvShell(node);
   if (!root) return;
   const list = root.querySelector('.ezpv-list');
   if (!list) return;
+  if (_pvPress) { _pvPendNodes.add(node); return; }   // 按住期间不重建（见 pvPressBegin 注释）
   const linked = (node.inputs || []).filter((i) => i.link != null);
   const conn = linked.length;
   list.innerHTML = '';
@@ -1069,7 +1340,6 @@ function renderEntries(node) {
     list.appendChild(renderCard(node, i, entry, inp));
   }
   attachDnD(list, '.ezpv-card', '.ezpv-handle', (from, to) => reorderCard(node, from, to));
-  fitNode(node);
   try { ezRelabel(root); } catch (_) {}   // 后端返回的是英文源串，按当前语言就地译一次（切语言时各面板重画后再走这里）
 }
 function entriesOfInput(node, input, entry) {
@@ -1102,7 +1372,8 @@ function collapseEntries(entries) {
 }
 function listThumb(e) {
   const th = el('div'); th.style.cssText = 'position:relative;width:64px;height:64px;border-radius:8px;overflow:hidden;background:var(--ez-surface-3);display:flex;align-items:center;justify-content:center;font-size:18px;color:var(--ez-fg-muted);cursor:pointer;flex:0 0 auto;border:2px solid transparent;box-sizing:border-box;';
-  if (e && e.preview) { const im = el('img'); im.src = 'data:image/png;base64,' + e.preview; im.style.cssText = 'width:100%;height:100%;object-fit:cover;'; th.appendChild(im); }
+  const src = entryThumbSrc(e);
+  if (src) { const im = el('img'); im.src = src; im.style.cssText = 'width:100%;height:100%;object-fit:cover;'; th.appendChild(im); }
   else th.textContent = ({ IMAGE: '🖼', VIDEO: '🎬', AUDIO: '🎵', MODEL_3D: '🧊', FILE_3D: '🧊' })[String((e && e.type) || '').toUpperCase()] || '📄';
   return th;
 }
@@ -1120,12 +1391,13 @@ function listMainItem(e) {
   if (e && (e.video || e.video_src)) {
     const v = el('video'); v.controls = true; v.src = e.video || e.video_src;
     v.style.cssText = 'max-width:100%;max-height:100%;border-radius:8px;background:#000;';
-    if (e.preview) v.poster = 'data:image/png;base64,' + e.preview;
+    const poster = entryThumbSrc(e);
+    if (poster) v.poster = poster;
     return v;
   }
-  if (e && e.preview && ((e.images || []).length <= 1)) {   // 单图直接铺在主区（批次图仍是卡片：点开看整批）
+  if (e && (e.preview || e.thumb || e.thumb_src || e.image_src) && ((e.images || []).length <= 1)) {   // 单图直接铺在主区（批次图仍是卡片：点开看整批）
     const wrap = el('div', 'ezpv-lmain');
-    const img = el('img'); img.src = 'data:image/png;base64,' + e.preview; img.alt = e.value || '';
+    const img = el('img'); img.src = entryThumbSrc(e); img.alt = e.value || '';
     wrap.appendChild(img);
     if (e.gen_meta) wrap.appendChild(genInfoBadge(e));
     return wrap;
@@ -1162,7 +1434,12 @@ function renderCard(node, index, entry, input) {
   body.appendChild(crow);
   const prev = renderPreview(entry);
   if (prev) {
-    if (isList) prev.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); openListPreview(grp, (entry && entry.caption) || ''); }, true);
+    if (isList) {
+      // 列表卡：点开列表预览。同样登记 _pvOpen，让「按住→抬起」的兜底也能打开（click 被重建吞掉时）
+      const openList = () => pvOpenOnce(() => openListPreview(grp, (entry && entry.caption) || ''));
+      prev._pvOpen = openList;
+      prev.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); openList(); }, true);
+    }
     body.appendChild(prev);
   }
   row.appendChild(handle); row.appendChild(body);
@@ -1175,6 +1452,13 @@ function pickFolder(node) {
   fetchApi('/preview_any/pick_folder', { method: 'POST', headers: { 'Content-Type': 'application/json' } }).then((r) => r.json()).then((data) => {
     if (data.ok && data.path) { const st = stateFor(node); st.savePath = data.path; syncToConfig(node); refreshUI(node); }
   }).catch(() => {});
+}
+// 「保存位置」按钮上直接显示当前选中的目录名（空 = 默认 output），否则用户看不出选没选上
+function syncLocBtn(btn, p) {
+  const s = String(p || '').trim();
+  // 按钮文字固定「保存位置」，目录名只放 title（和 SegmentPanel 等节点保持一致）
+  btn.textContent = ezT('Save location');
+  btn.title = s || ezT('Default: output');
 }
 let _fmtModal = null;
 function formatModalEl() {
@@ -1190,7 +1474,7 @@ function formatModalEl() {
   const fields = document.createElement('div'); fields.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto;';
   // 图片只列静态图格式；动图独立成一项（对齐内置 SaveAnimatedWEBP/PNG：格式 + 帧率 + 无损 + 质量，
   // 无损是勾选框不是 Yes/No 下拉）。gif 不作为「视频」容器：真视频→gif 要抽帧，后端不做。
-  const opts = { image: ['', 'png', 'jpeg', 'webp', 'bmp', 'tiff'], animated: ['webp', 'png', 'gif'], audio: ['', 'wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac', 'opus'], video: ['', 'mp4', 'webm', 'mov', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'], model3d: [''] };
+  const opts = { image: ['', 'png', 'jpeg', 'webp', 'bmp', 'tiff'], animated: ['webp', 'png', 'gif'], audio: ['', 'wav', 'mp3', 'flac', 'ogg', 'm4a', 'aac', 'opus'], video: ['', 'auto', 'mp4', 'webm', 'mov', 'avi', 'mkv'], text: ['txt', 'md', 'json', 'csv', 'log', 'html'], model3d: [''] };
   const labels = { image: ezT('Image'), animated: ezT('Animated'), audio: ezT('Audio'), video: ezT('Video'), text: ezT('Text'), model3d: ezT('3D model') };
   // 只有有损格式才显示「质量」：png/bmp/tiff 无损、wav/flac 无损（码率由内容决定）。
   // 数值参数一律可手输（number + 常用值 datalist），枚举才用下拉
@@ -1203,7 +1487,7 @@ function formatModalEl() {
       { key: 'method', label: ezT('Compression'), values: ['', 'fastest', 'default', 'slowest'], when: (f) => f === 'webp' },
     ],
     audio: [{ key: 'bitrate', label: ezT('Bitrate (kbps)'), number: { min: 8, max: 512, step: 1, presets: ['128', '192', '320'] }, when: (f) => f !== 'wav' && f !== 'flac' }, { key: 'sr', label: ezT('Sample rate (Hz)'), number: { min: 0, max: 384000, step: 1, presets: ['22050', '44100', '48000'] } }],
-    video: [{ key: 'codec', label: ezT('Encoder'), values: ['', 'h264', 'vp9', 'av1'] }, { key: 'crf', label: ezT('Quality CRF'), number: { min: 0, max: 51, step: 1, presets: ['18', '23', '28'] } }, { key: 'fps', label: ezT('Frame rate'), number: { min: 0.01, max: 240, step: 0.01, presets: ['24', '30', '60'] } }],
+    video: [{ key: 'codec', label: ezT('Encoder'), labels: { h265: 'h265 (extra)', vp9: 'vp9 (extra)' }, values: ['', 'auto', 'h264', 'h265', 'vp9', 'av1'] }, { key: 'crf', label: ezT('Quality CRF'), number: { min: 0, max: 63, step: 1, presets: ['18', '24', '32'] } }, { key: 'fps', label: ezT('Frame rate') + ' ' + ezT('(extra)'), number: { min: 0.01, max: 240, step: 0.01, presets: ['24', '30', '60'] } }, { key: 'bit_depth', label: ezT('Bit depth'), values: ['', '8', '10'] }, { key: 'color_space', label: ezT('Color space'), values: ['', 'sRGB', 'HDR', 'HDR PQ'] }, { key: 'preset', label: ezT('Preset'), values: ['', 'fast', 'medium', 'slow'] }, { key: 'acodec', label: ezT('Audio codec') + ' ' + ezT('(extra)'), values: ['', 'copy', 'aac', 'opus', 'mp3'] }, { key: 'abitrate', label: ezT('Audio bitrate') + ' ' + ezT('(extra)'), number: { min: 8, max: 512, step: 1, presets: ['128', '192', '320'] } }, { key: 'asr', label: ezT('Audio sample rate') + ' ' + ezT('(extra)'), number: { min: 0, max: 384000, step: 1, presets: ['32000', '44100', '48000'] } }],
     text: [], model3d: []
   };
   const selects = {}; const subSelects = {}; const subRows = [];
@@ -1213,7 +1497,8 @@ function formatModalEl() {
     const tog = document.createElement('span'); tog.textContent = '▸'; tog.style.cssText = 'cursor:pointer;width:14px;text-align:center;color:var(--ez-fg-3);flex:0 0 auto;';
     const lab = document.createElement('span'); lab.textContent = labels[cat]; lab.style.cssText = 'flex:0 0 48px;font-size:12px;color:var(--ez-fg);';
     const sel = document.createElement('select'); sel.style.cssText = 'flex:1 1 auto;appearance:none;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:5px 10px;font-size:12px;font-family:inherit;';
-    opts[cat].forEach((f) => { const o = document.createElement('option'); o.value = f; o.textContent = f || ezT('Keep source'); sel.appendChild(o); });
+    const fmtLabels = { mov: 'mov (extra)', avi: 'avi (extra)' };
+    opts[cat].forEach((f) => { const o = document.createElement('option'); o.value = f; o.textContent = (fmtLabels[f] || f) || ezT('Keep source'); sel.appendChild(o); });
     row.appendChild(tog); row.appendChild(lab); row.appendChild(sel);
     wrap.appendChild(row);
     const sub = document.createElement('div'); sub.style.cssText = 'display:none;flex-direction:column;gap:6px;padding-left:18px;';
@@ -1228,6 +1513,8 @@ function formatModalEl() {
         ss = document.createElement('input'); ss.type = 'number';
         ss.min = String(sd.number.min); ss.max = String(sd.number.max); ss.step = String(sd.number.step);
         ss.style.cssText = 'flex:1 1 auto;min-width:0;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:3px 8px;font-size:11px;font-family:inherit;color:var(--ez-fg);';
+        ss.title = ezT('Click a preset or double-click to type a custom value');
+        ss.addEventListener('dblclick', () => { try { ss.focus(); ss.select(); } catch (_) {} });
         if (sd.number.presets && sd.number.presets.length) {
           const dl = document.createElement('datalist'); dl.id = 'ezpv-dl-' + cat + '-' + sd.key;
           sd.number.presets.forEach((v) => { const o = document.createElement('option'); o.value = v; dl.appendChild(o); });
@@ -1247,10 +1534,75 @@ function formatModalEl() {
     selects[cat] = sel;
   });
   const subVals = (cat) => { const o = {}; (subDefs[cat] || []).forEach((sd) => { const ss = subSelects[cat + '.' + sd.key]; if (ss) o[sd.key] = sd.check ? !!ss.checked : ss.value; }); return o; };
+  const extraNote = document.createElement('div');
+  extraNote.style.cssText = 'font-size:11px;color:var(--ez-fg-3);padding:2px 0 0 18px;';
+  extraNote.textContent = ezT('Uses the PreviewAny extra encoder (PyAV), not the built-in path');
+  fields.appendChild(extraNote);
+  const updateExtraNote = () => {
+    const v = subVals('video');
+    const on = ['mov', 'avi'].includes(String(selects.video.value || '').toLowerCase())
+      || ['h265', 'vp9'].includes(String(v.codec || '').toLowerCase())
+      || !!(v.fps || v.acodec || v.abitrate || v.asr);
+    extraNote.style.display = on ? '' : 'none';
+  };
   const applySubs = () => { subRows.forEach((g) => { g.row.style.display = (!g.when || g.when(selects[g.cat].value, subVals(g.cat))) ? 'flex' : 'none'; }); };
-  Object.keys(selects).forEach((cat) => selects[cat].addEventListener('change', applySubs));
-  Object.keys(subSelects).forEach((k) => subSelects[k].addEventListener('change', applySubs));
-  applySubs();
+  // ★ 与内置 DynamicCombo 同方向：容器 ↔ 视频编码 ↔ 音频编码 三项互相约束（非法项禁用 + 回正）。
+  //   表与后端 __init__.py 的 _VIDEO_CODECS_BY_FMT / _AUDIO_CODECS_BY_FMT 一一对应；
+  //   后端编码前还会再校验一次（旧工作流里可能存着非法组合）。
+  const V_CODECS = {
+    '': null, auto: null,
+    mp4: ['h264', 'h265', 'av1'], mov: ['h264', 'h265'],
+    webm: ['vp9', 'av1'], avi: ['h264'], mkv: ['h264', 'h265', 'vp9', 'av1']
+  };
+  const A_CODECS = {
+    '': null, auto: null,
+    mp4: ['aac', 'mp3'], mov: ['aac', 'mp3'],
+    webm: ['opus'], avi: ['mp3', 'aac'], mkv: ['aac', 'opus', 'mp3']
+  };
+  // 反方向：选了编码器后，容器跟着收敛（vp9 只能 webm/mkv …；选编码器时不留「跟随源」）
+  const FMT_OF_CODEC = {
+    h264: ['mp4', 'mov', 'avi', 'mkv'],
+    h265: ['mp4', 'mov', 'mkv'],
+    vp9: ['webm', 'mkv'],
+    av1: ['mp4', 'webm', 'mkv']
+  };
+  const disOpts = (sel, ok) => {
+    if (!sel) return;
+    Array.from(sel.options).forEach((o) => { if (String(o.value) !== '') o.disabled = !ok(String(o.value).toLowerCase()); });
+  };
+  const curOptDisabled = (sel) => !!(sel && sel.selectedOptions && sel.selectedOptions[0] && sel.selectedOptions[0].disabled);
+  const syncVideoCombo = () => {
+    const cSel = subSelects['video.codec'];
+    const aSel = subSelects['video.acodec'];
+    const csSel = subSelects['video.color_space'];
+    const bdSel = subSelects['video.bit_depth'];
+    for (let pass = 0; pass < 2; pass++) {
+      const vf = String(selects.video.value || '').toLowerCase();
+      // ① 容器 → 编码器 / 音频编码：容器不吃的编码直接禁用，已被选中的回正
+      disOpts(cSel, (v) => !V_CODECS[vf] || V_CODECS[vf].includes(v));
+      disOpts(aSel, (v) => v === 'copy' || !A_CODECS[vf] || A_CODECS[vf].includes(v));
+      if (curOptDisabled(cSel)) cSel.value = '';
+      if (curOptDisabled(aSel)) aSel.value = '';
+      // ② 编码器 → 容器：当前容器装不下这个编码器就自动切到第一个能装下的
+      const codec = String(cSel && cSel.value || '').toLowerCase();
+      const okFmts = codec ? FMT_OF_CODEC[codec] : null;
+      disOpts(selects.video, (f) => !okFmts || okFmts.includes(f));
+      if (okFmts && !okFmts.includes(vf)) {
+        selects.video.value = okFmts[0];
+        continue;                       // 容器变了 ⇒ 再跑一遍，把编码器/音频选项跟着收敛
+      }
+      // ③ HDR 必须是 10 bit：HDR 时禁掉 8bit 并自动切到 10bit
+      const hdr = ['hdr', 'hdr pq'].includes(String(csSel && csSel.value || '').toLowerCase());
+      disOpts(bdSel, (v) => !(hdr && v === '8'));
+      if (hdr && bdSel && String(bdSel.value) === '8') bdSel.value = '10';
+    }
+  };
+  Object.keys(selects).forEach((cat) => selects[cat].addEventListener('change', () => { applySubs(); if (cat === 'video') syncVideoCombo(); updateExtraNote(); }));
+  Object.keys(subSelects).forEach((k) => subSelects[k].addEventListener('change', () => {
+    if (k.startsWith('video.')) syncVideoCombo();   // 改编码器/色彩空间会反过来约束容器与位深
+    applySubs(); updateExtraNote();
+  }));
+  applySubs(); syncVideoCombo(); updateExtraNote();
   // 文件名模板（%year% %month% %day% %hour% %minute% %second%），空 = 用卡片名
   const nameRow = document.createElement('div'); nameRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
   const nameLab = document.createElement('span'); nameLab.textContent = ezT('File name prefix'); nameLab.style.cssText = 'flex:0 0 96px;font-size:12px;color:var(--ez-fg);';
@@ -1275,12 +1627,19 @@ function formatModalEl() {
   const modeSel = mkGlobal(ezT('List / Normal'), [['normal', ezT('Normal')], ['list', ezT('List')]], 'normal');
   batchSel.addEventListener('change', () => { const n = _fmtModal._node; if (!n) return; stateFor(n).batchMode = batchSel.value; syncToConfig(n); });
   modeSel.addEventListener('change', () => { const n = _fmtModal._node; if (!n) return; stateFor(n).previewMode = modeSel.value === 'list' ? 'list' : 'normal'; syncToConfig(n); renderEntries(n); });
+  const maxRow = document.createElement('div'); maxRow.style.cssText = 'display:flex;align-items:center;gap:8px;flex-wrap:nowrap;';
+  const maxLab = document.createElement('span'); maxLab.textContent = ezT('Frame sequence limit'); maxLab.style.cssText = 'flex:0 0 96px;font-size:12px;color:var(--ez-fg);white-space:nowrap;';
+  const maxInp = document.createElement('input'); maxInp.type = 'text'; maxInp.inputMode = 'numeric'; maxInp.placeholder = '64';
+  maxInp.title = ezT('Default 64; there is no upper limit. 0 = unlimited.');
+  maxInp.style.cssText = 'flex:1 1 auto;min-width:0;box-sizing:border-box;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:5px 10px;font-size:12px;font-family:inherit;';
+  maxInp.addEventListener('change', () => { const n = _fmtModal._node; if (!n) return; const v = Math.max(0, parseInt(maxInp.value, 10) || 0); maxInp.value = String(v); stateFor(n).batchMax = v; syncToConfig(n); });
+  maxRow.appendChild(maxLab); maxRow.appendChild(maxInp); gbox.appendChild(maxRow);
   fields.insertBefore(gbox, fields.firstChild);   // 全局两块放最上面
   fields.appendChild(nameRow);
   box.appendChild(hd); box.appendChild(fields); box.appendChild(ft);
   _fmtModal.appendChild(box); document.body.appendChild(_fmtModal);
   attachFullscreen(box, () => { _fmtModal.style.display = 'none'; }, close);
-  _fmtModal._selects = selects; _fmtModal._subSelects = subSelects; _fmtModal._subDefs = subDefs; _fmtModal._subVals = subVals; _fmtModal._applySubs = applySubs; _fmtModal._nameInput = nameInput; _fmtModal._batchSel = batchSel; _fmtModal._modeSel = modeSel; _fmtModal._node = null;
+  _fmtModal._selects = selects; _fmtModal._subSelects = subSelects; _fmtModal._subDefs = subDefs; _fmtModal._subVals = subVals; _fmtModal._applySubs = applySubs; _fmtModal._syncVideoCombo = syncVideoCombo; _fmtModal._nameInput = nameInput; _fmtModal._batchSel = batchSel; _fmtModal._modeSel = modeSel; _fmtModal._batchMax = maxInp; _fmtModal._node = null;
   close.addEventListener('click', () => { _fmtModal.style.display = 'none'; });
   _fmtModal.addEventListener('click', (e) => { if (e.target === _fmtModal) _fmtModal.style.display = 'none'; });
   save.addEventListener('click', () => {
@@ -1316,7 +1675,9 @@ function openFormatModal(node) {
   if (m._nameInput) m._nameInput.value = st.saveFormats._name || '';
   if (m._batchSel) m._batchSel.value = st.batchMode || 'auto';
   if (m._modeSel) m._modeSel.value = st.previewMode === 'list' ? 'list' : 'normal';
+  if (m._batchMax) m._batchMax.value = String(st.batchMax == null ? 64 : st.batchMax);
   if (m._applySubs) m._applySubs();   // 按当前格式显示/隐藏质量、码率等
+  if (m._syncVideoCombo) m._syncVideoCombo();   // 旧工作流里的非法组合（webm+h264 等）在打开时回正
   m.style.display = 'flex';
 }
 let _dpModal = null;
@@ -1371,11 +1732,16 @@ function buildRoot(node) {
   injectStyle();
   const shell = el('div', 'ezpv-shell');
   const root = el('div', 'ezpv-root');
+  // Nodes 2.0：addDOMWidget 传的是 root（不是 shell），必须让 root 从标题栏下方开始，否则标题被盖住
+  if (window.__ezflexIsVueNodes && window.__ezflexIsVueNodes()) {
+    root.style.top = 'var(--ezfx-vue-title, 30px)';
+  }
   shell.appendChild(root);
   node._ezRoot = shell;
   const hd = el('div', 'ezpv-hd');
   const saveBtn = el('button', 'ezpv-btn ezpv-save');
   const locBtn = el('button', 'ezpv-btn ezpv-loc'); locBtn.textContent = ezT('Save location');
+  syncLocBtn(locBtn, stateFor(node).savePath);
   const fmtBtn = el('button', 'ezpv-btn'); fmtBtn.textContent = ezT('Save options');
   const infoBtn = el('button', 'ezpv-btn'); infoBtn.textContent = ezT('Data preview');
   const nameBtn = el('button', 'ezpv-btn'); nameBtn.textContent = ezT('Names');
@@ -1413,20 +1779,13 @@ function refreshSaveBtn(btn, save) {
 }
 function renderSaveBtn(btn, save) { refreshSaveBtn(btn, save); }
 
-function fitNode(node) {
-  try {
-    const root = node && node._ezRoot && node._ezRoot.querySelector('.ezpv-root');
-    if (!root || typeof node.setSize !== 'function') return;
-    const cur = node.size || [0, 96];
-    const contentH = root.scrollHeight + 12;
-    if (contentH > cur[1] + 4) node.setSize([Math.max(340, cur[0]), Math.min(560, contentH)]);
-  } catch (_) {}
-}
 function refreshUI(node) {
-  const root = node && node._ezRoot;
+  const root = pvShell(node);
   if (!root) return;
   const saveBtn = root.querySelector('.ezpv-save');
   if (saveBtn) renderSaveBtn(saveBtn, stateFor(node).save);
+  const locBtn = root.querySelector('.ezpv-loc');
+  if (locBtn) syncLocBtn(locBtn, stateFor(node).savePath);
   renderEntries(node);
 }
 
@@ -1493,14 +1852,27 @@ function attachDnD(container, itemSel, handleSel, onDrop) {
 
 // ===== 挂载 =====
 function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
-  const w = configWidget(node); if (!w || node._ezPrevCfgHid) return; node._ezPrevCfgHid = true;
+  const w = configWidget(node); if (!w) return; node._ezPrevCfgHid = true;
+  // ★ 幂等、每次重压一遍：切换工作流 / 刷新时 config 的宿主会被重建，`display:none` 会丢失 → 文字露在面板下。
   try {
     w.origComputeSize = w.computeSize; w.computeSize = () => [0, 0]; w.computedHeight = 0; w.y = 0; w.last_y = 0; w.width = 0;
     w.draw = () => {}; w.hidden = true; w.options = w.options || {}; w.options.hidden = true;
     w.options.getMinHeight = () => 0; w.options.getMaxHeight = () => 0;
     if (w.element && w.element.style) { w.element.style.display = 'none'; w.element.style.height = '0'; w.element.style.minHeight = '0'; w.element.style.maxHeight = '0'; }
+    // 连它的 .dom-widget 宿主容器一起藏（容器没了，里面就不可能画东西）
+    // ⚠️ 判断「这是不是**我们预览面板**的宿主」用 pvHost(node)（按 widget.type==='ezpv-panel' 找），
+    //    绝不能用「里面有没有 .ezpv-shell」—— 切工作流后新宿主是空壳，那时 shell 还没搬进去，会被误藏。
+    try {
+      let host = w.element && w.element.parentElement; let hop = 0;
+      while (host && host.classList && !host.classList.contains('dom-widget') && hop < 6) { host = host.parentElement; hop += 1; }
+      const pv = pvHost(node);
+      let pvWrap = pv && pv.parentElement; let h2 = 0;
+      while (pvWrap && pvWrap.classList && !pvWrap.classList.contains('dom-widget') && h2 < 6) { pvWrap = pvWrap.parentElement; h2 += 1; }
+      const isPreviewWrap = !!(pvWrap && host && pvWrap === host);
+      if (host && host.style && !isPreviewWrap) host.style.setProperty('display', 'none', 'important');
+    } catch (_) {}
   } catch (_) {}
 }
 function setupNode(node) {
@@ -1517,18 +1889,25 @@ function setupNode(node) {
     node.widgets_start_y = 0;
     try { const wi = node.widgets.indexOf(widget); if (wi > 0) { node.widgets.splice(wi, 1); node.widgets.unshift(widget); } } catch (_) {}
     installResizeHandles(node, root);
-    try { node.setSize([460, Math.max(150, node.size ? node.size[1] : 150)]); } catch (_) {}
+    try { ezApplyDefaultSize(node, 410, 200); } catch (_) {}
     hideConfigWidget(node);
     syncSockets(node);
     refreshUI(node);
     // 黑框标签：输入/输出端口都用对应预览卡片的名（卡片名 = entry.caption，回传后 onExecuted 里刷新）
     installEdgeLabels(node, {
       side: 'both',
-      labelOf: (sock, index) => {
+      labelOf: (sock, index, isIn) => {
         if (!pvLabelsOn()) return '';                   // 「名称」关掉就不画端口黑框标签
+        const ents = stateFor(node).entries || [];
+        const linked = (node.inputs || []).filter((i) => i.link != null);
+        // 输入口按端口名对位；输出口（output_N）没有自己的 entry，按位置映射到第 index 个已连输入。
+        // 以前一律取 entries[index]：同一个口有多条 entry（列表广播 / 循环多轮）时整体错位，后面的端口会显示成别人的标题。
+        const own = entriesOfInput(node, isIn ? sock : (linked[index] || null));
+        const legacy = !ents.some((e) => e && e.input);
+        const e = own.length ? own[0] : (legacy ? ents[index] : null);
+        if (e && e.caption) return e.caption;
         if (index >= connectedCount(node)) return '';   // 末尾那个空输入槽还没有卡片
-        const e = (stateFor(node).entries || [])[index];
-        return (e && e.caption) || (ezT('Input') + ' ' + (index + 1));
+        return ezT('Input') + ' ' + (index + 1);
       },
     });
     setTimeout(() => { syncSockets(node); refreshUI(node); }, 80);
@@ -1537,7 +1916,14 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__ezPrevHooked) return; nt.__ezPrevHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { const r = prevCfg ? prevCfg.apply(this, arguments) : undefined; loadFromConfig(this); syncSockets(this); refreshUI(this); return r; };
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { this.__ezSizeRestored = true;
+    const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
+    loadFromConfig(this); pvSyncBuffered(this); syncSockets(this); refreshUI(this);
+    // ★ 切换工作流 / 载入图：DOM 宿主可能刚被重建 → 延后自愈两次（结构 + 布局各一次）
+    setTimeout(() => { try { healDom(this); refreshUI(this); } catch (_) {} }, 60);
+    setTimeout(() => { try { healDom(this); refreshUI(this); } catch (_) {} }, 400);
+    return r;
+  };
   const prevConn = nt.prototype.onConnectionsChange; nt.prototype.onConnectionsChange = function (type, index, connected, link_info) {
     const r = prevConn ? prevConn.apply(this, arguments) : undefined;
     try { if (this._ezPrevSetup) { setTimeout(() => { syncSockets(this); refreshUI(this); }, 0); } } catch (_) {}
@@ -1547,30 +1933,135 @@ function hookPrototype(nt) {
     const r = prevExec ? prevExec.apply(this, arguments) : undefined;
     // 循环展开时每轮都会来一次 onExecuted（都挂在本节点 id 上）：累加各轮，换一次执行再清空 ——
     // 直接覆盖会只剩最后一轮的值。原样存，去不去重在卡片上的模式里决定。
-    try { if (message && message.entries) { const st = stateFor(this); st.entries = (Array.isArray(st.entries) ? st.entries : []).concat(message.entries); renderEntries(this); if (this._ezEdgeUpdate) this._ezEdgeUpdate(); } } catch (_) {}
+    // ★ 内存里那份也要封顶（与 pvStripEntries 的 64 一致）：每条 entry 带一张 640 px base64 预览，
+    //   长循环不封顶会攒到上百 MB（2026-11 审计 P2-12）。
+    try { if (message && message.entries) { const st = stateFor(this); const added = message.entries; st.entries = (Array.isArray(st.entries) ? st.entries : []).concat(added).slice(-64); pvPersist(this); added.forEach((e) => pvMakeThumb(e, this)); renderEntries(this); if (this._ezEdgeUpdate) this._ezEdgeUpdate(); } } catch (_) {}
     return r;
   };
-  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPrevSetup = false; return r; };
-  const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () { const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this); return r; };
+  const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezPrevSyncTimer) { clearTimeout(this._ezPrevSyncTimer); this._ezPrevSyncTimer = null; } } catch (_) {} try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPrevSetup = false; return r; };
+  const prevAdded = nt.prototype.onAdded; nt.prototype.onAdded = function () {
+    const r = prevAdded ? prevAdded.apply(this, arguments) : undefined; registerNode(this);
+    // ★ 展开折叠 / 重新加回画布 / 切回本工作流：宿主可能刚被重建，延后自愈两次。
+    setTimeout(() => { try { healDom(this); refreshUI(this); } catch (_) {} }, 0);
+    setTimeout(() => { try { healDom(this); refreshUI(this); } catch (_) {} }, 120);
+    return r;
+  };
+  // ★ 每帧兜一次（画布重绘时）：折叠/切工作流后 DOM 宿主被换掉时没人通知我们，
+  //   只有这里能发现 `_ezRoot` 已脱离文档并重挂 + 重画。`!collapsed` 时才有意义。
+  //   多实例时每帧都查太贵（拖动画布掉帧）→ 限流 200ms。
+  const prevDraw = nt.prototype.onDrawForeground; nt.prototype.onDrawForeground = function (ctx) {
+    if (prevDraw) prevDraw.call(this, ctx);
+    const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (!this._ezPrevSetup || this.collapsed) return;
+    if (_now - (this._ezHealAt || 0) < 200) return;
+    this._ezHealAt = _now;
+    try { healDom(this); } catch (_) {}
+  };
 }
 // 语言切换后重画同类型节点的面板（ezT 在渲染时求值，重画即换语言）
 onLocaleChange(() => {
   ((app && app.graph && app.graph._nodes) || []).forEach((n) => { if (n && n.type === NODE) { try { refreshUI(n); } catch (_) {} } });
 });
 
-// 一次执行 = 一个 prompt：execution_start 时清空所有 PreviewAny 的 entries（循环累加只在一轮执行内生效）
-function previewAnyNodes() { return ((app && app.graph && app.graph._nodes) || []).filter((n) => n && nodeTypeOf(n) === NODE); }
-function resetPreviewEntries() {
-  previewAnyNodes().forEach((n) => {
-    try { stateFor(n).entries = []; renderEntries(n); if (n._ezEdgeUpdate) n._ezEdgeUpdate(); } catch (_) {}
+// 一次执行 = 一个 prompt：**排队时**清空本工作流所有 PreviewAny 的 entries（循环累加只在一轮执行内生效）。
+// 以前挂 execution_start：排队后立刻切到别的工作流时，执行开始那一刻会把**当前显示的那个**工作流清空。
+function previewAnyNodes(graph) {
+  const g = graph || (app && app.graph);
+  return ((g && g._nodes) || []).filter((n) => n && nodeTypeOf(n) === NODE);
+}
+function resetPreviewEntries(graph) {
+  previewAnyNodes(graph).forEach((n) => {
+    try { stateFor(n).entries = []; pvPersist(n); renderEntries(n); if (n._ezEdgeUpdate) n._ezEdgeUpdate(); } catch (_) {}
   });
 }
-try { api.addEventListener('execution_start', resetPreviewEntries); } catch (_) {}
+// 排队：记下「这个 prompt 属于哪个工作流」+ 清空本工作流旧预览与旧结果缓存
+function pvHookQueue() {
+  if (!api || api.__ezPrevQueueHooked || typeof api.queuePrompt !== 'function') return;
+  api.__ezPrevQueueHooked = true;
+  const prev = api.queuePrompt;
+  api.queuePrompt = function (number, prompt, extra) {
+    let wid = '';
+    try {
+      const g = (app && app.graph) || null;
+      wid = pvWorkflowId(g);
+      if (wid) { resetPreviewEntries(g); pvBufClear(wid); }
+    } catch (_) {}
+    const res = prev.apply(this, arguments);
+    try {
+      Promise.resolve(res).then((r) => {
+        const pid = r && r.prompt_id;
+        if (pid != null && wid) {
+          _pvRuns.set(String(pid), wid);
+          while (_pvRuns.size > 32) _pvRuns.delete(_pvRuns.keys().next().value);
+        }
+      }).catch(() => {});
+    } catch (_) {}
+    return res;
+  };
+}
+// 自己收 executed：即使节点不在当前显示的工作流里，也按「工作流 id|节点 id」存一份结果
+function pvCollectExecuted(ev) {
+  try {
+    const d = (ev && ev.detail) || {};
+    const entries = d.output && d.output.entries;
+    if (!Array.isArray(entries) || !entries.length) return;
+    const pid = d.prompt_id != null ? String(d.prompt_id) : '';
+    const wid = pid ? _pvRuns.get(pid) : '';
+    if (!wid) return;   // 不是本插件排队的 prompt（别的客户端 / 队列面板补跑）：不猜，免得把别的工作流的结果串过来
+    pvBufAdd(wid, String(d.node != null ? d.node : '').split(':').pop(), entries);
+  } catch (_) {}
+}
+pvHookQueue();
+try { api.addEventListener('executed', pvCollectExecuted); } catch (_) {}
+
+// ★★ 切换工作流标签的兜底自愈：切 tab 时 ComfyUI 只换 `app.graph`，本节点的 onConfigure/onAdded 不一定再触发，
+//    而此时 DOM widget 的宿主已被重建 → `_ezRoot` 变幽灵 DOM → 面板空掉。这里每次画布重绘都巡检一遍：
+//    发现「本节点在当前显示图里、但 shell 已脱离文档」→ 立刻 healDom + 重画。
+// ⚠️⚠️ 但**只挂 scheduleOnRedraw 不够**：切换工作流是纯 UI 动作，用户不动鼠标就不会触发 pumpFrames
+//    （EZ_PERF.labelFallbackMs = 0，没有兜底定时器）→ 巡检永远不跑 → 症状「切回来后要再点一下画布才显示」。
+//    所以下面**另加一个只在「疑似切换」期间才活的短时轮询**（400ms 内每 40ms 巡检一次，之后自动停，静止零开销）。
+const PV_SWITCH_POLL_MS = 40, PV_SWITCH_WINDOW_MS = 600;
+let _pvLastGraph = null, _pvPollTimer = 0, _pvPollUntil = 0;
+function pvSweep(force) {
+  try {
+    const shown = (app && app.canvas && app.canvas.graph) || (app && app.graph) || null;
+    const switched = shown !== _pvLastGraph;
+    if (switched) { _pvLastGraph = shown; pvArmSwitchPoll(); }   // 发现换图 → 起一轮短时轮询
+    if (!force && !switched) {
+      // 图没换：只在「有幽灵 shell」时才逐节点巡检（静止时零开销）
+      let any = false;
+      for (const n of previewAnyNodes()) { const sh = n && n._ezRoot; if (sh && sh.isConnected === false) { any = true; break; } }
+      if (!any) return;
+    }
+    for (const n of previewAnyNodes()) {
+      if (!n || !n._ezPrevSetup) continue;
+      try { pvSyncBuffered(n); } catch (_) {}   // 切回来：把「在别的 tab 跑完」的结果补上
+      healDom(n); refreshUI(n);
+    }
+  } catch (_) {}
+}
+function pvArmSwitchPoll() {
+  _pvPollUntil = Date.now() + PV_SWITCH_WINDOW_MS;
+  if (_pvPollTimer) return;
+  const tick = () => {
+    pvSweep(true);
+    if (Date.now() < _pvPollUntil) { _pvPollTimer = setTimeout(tick, PV_SWITCH_POLL_MS); }
+    else { _pvPollTimer = 0; }
+  };
+  _pvPollTimer = setTimeout(tick, 0);
+}
+scheduleOnRedraw(() => pvSweep(false));
+// 切换工作流也可能是「新图先挂上、DOM 稍后才重建」：换图那一刻起多扫几轮（只在这一小段时间里跑）
+// ★ ComfyApp 是普通 class、没有 addEventListener：这些事件在 api 上（以前挂 app 被 try 吞掉，
+//   切工作流后的主动巡检从来没生效过）。graphConfigured 事件不存在 ⇒ 用扩展钩子 afterConfigureGraph。
+try { api.addEventListener('graphChanged', () => pvArmSwitchPoll()); } catch (_) {}
+try { api.addEventListener('graphCleared', () => pvArmSwitchPoll()); } catch (_) {}
 
 app.registerExtension({
   name: 'Comfy.EzFlex.PreviewAny',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },
   nodeCreated(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
   loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
+  afterConfigureGraph() { try { pvArmSwitchPoll(); } catch (_) {} },
   setup() { ((app.graph && app.graph._nodes) || []).forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); }); },
 });

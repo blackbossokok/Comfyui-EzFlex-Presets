@@ -1,3 +1,4 @@
+// 模块：媒体索引（编号引擎：端口↔素材的稳定编号）
 // EzFlex 媒体编号表：实时扫描画布上「生成节点」的媒体输入端口，算出哪个素材接在哪个编号端口上。
 // 编号规则（通用，不写死某个模型）：按目标节点自身的输入端口顺序，按媒体类型各自从 1 开始，只数已连接的端口。
 //   MiniMaxH3UnifiedToVideo → first_frame=图片1、last_frame=图片2、ref_image_1=图片3、
@@ -5,8 +6,8 @@
 //   与 ComfyUI-MiniMax-ContextIR/h3_unified.py 的 <Picture i>/<Video k>/<Audio j> 一致（伴奏排在它的视频之前）。
 // 多生成节点：各自独立编号（互不冲突），节点标识 = 画布上看到的节点标题（重命名后用新名字）。
 // PromptHelper 的每个提示词卡片绑定一个生成节点，@ 引用按该节点自己的编号表算。
-import { app } from "../../scripts/app.js";
-import { EZ_PERF, scheduleOnRedraw } from "./ezflex_service.js";
+import { app } from "../../../scripts/app.js";
+import { EZ_PERF, scheduleOnRedraw, ezSafeUrl } from "./ezflex_service.js";
 
 const BUILTIN_WORDS = { image: '图片', video: '视频', audio: '音频', model: '模型' };
 const TAG_WORDS = { image: 'Picture', video: 'Video', audio: 'Audio' };
@@ -77,7 +78,6 @@ export function mediaTargetCfg() { return _mediaCfg; }
 // 设置页保存后调用：换配置 + 强制重建编号表（下一帧合并重建）。
 export function setMediaTargetCfg(o) { _mediaCfg = normMediaCfg(o); _reg.dirty = true; try { refreshIndexSoon(); } catch (_) {} }
 export function mediaKeyOf(m) { return (m && (m.path || m.url || m.name)) || ''; }
-export function mediaSizeText(b) { if (b == null || b === '') return ''; const n = Number(b); if (!isFinite(n)) return ''; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'; return (n / 1048576).toFixed(1) + ' MB'; }
 export function mediaFormatOf(m) { const s = String((m && (m.name || m.path)) || ''); const t = s.match(/\.([a-z0-9]{1,6})(?:[?#]|$)/i); return t ? t[1].toLowerCase() : ''; }
 // 媒体类型以扩展名为准（卡片里存的 type 可能是旧值/猜错的）
 export function kindOfName(name) {
@@ -94,7 +94,7 @@ function pushMediaFile(out, f) {
   const typ = byName || ((f.type || 'other') === 'model_3d' ? 'model' : (f.type || 'other'));
   out.push({
     id: f.id, name: f.name || '', path: f.path, type: typ, size: f.size,
-    url: f.url || ('/view?type=input&filename=' + encodeURIComponent(f.name || '') + (f.subfolder ? '&subfolder=' + encodeURIComponent(f.subfolder) : '')),
+    url: ezSafeUrl(f.url) || ('/view?type=input&filename=' + encodeURIComponent(f.name || '') + (f.subfolder ? '&subfolder=' + encodeURIComponent(f.subfolder) : '')),
   });
 }
 // 单个内置加载节点（Load Image / VHS 视频 / Load Audio …）widget 里的媒体文件。
@@ -320,7 +320,7 @@ function scanTargetPorts(node) {
 }
 
 // ===== 编号表注册表：每个生成节点一张表（互不冲突），画布变化时实时重建 =====
-const _reg = { sig: '', targets: [], maps: new Map(), active: null, listeners: [], timer: 0, hooked: false, dirty: false, pending: 0 };
+const _reg = { sig: '', targets: [], maps: new Map(), active: null, listeners: [], timer: 0, hooked: false, dirty: false, pending: 0, at: 0 };
 export function indexTargets() { return _reg.targets; }
 export function indexTargetById(id) { return _reg.targets.find((t) => t.id === String(id)) || null; }
 export function activeIndexTarget() { return _reg.active; }
@@ -384,9 +384,14 @@ function rebuildIndex(g) {
   _reg.listeners.forEach((fn) => { try { fn(); } catch (_) {} });
 }
 // 画布有变化才重建（返回是否重建过），可随时安全调用。
-export function refreshIndex() {
+export function refreshIndex(force) {
+  // 全图签名扫描 = 每个目标节点的每个端口跑一次 filesOnInput：拖动/连续重绘时 rAF 每帧都会调到这里，
+  // 不合并就是每帧一次 O(节点数 × 端口数) 的扫描。120ms 窗口内只扫一次，窗口外再补扫，不会漏更新。
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (!force && now - (_reg.at || 0) < 120) { refreshIndexSoon(); return false; }
   const g = app && app.graph;
   if (!g) return false;
+  _reg.at = now;
   const sig = graphSignature(g);
   if (!_reg.dirty && sig === _reg.sig) return false;
   _reg.dirty = false; _reg.sig = sig;
@@ -401,7 +406,7 @@ export function refreshIndexSoon() {
 // 立刻重建（打开引用媒体面板 / @ 菜单前调用，保证读到最新编号）。
 export function refreshIndexNow() {
   if (_reg.pending) { cancelAnimationFrame(_reg.pending); _reg.pending = 0; }
-  return refreshIndex();
+  return refreshIndex(true);
 }
 function markIndexDirty() { _reg.dirty = true; refreshIndexSoon(); }
 // 事件驱动：连线/断线/增删节点（LiteGraph 钩子）+ 媒体节点配置变更（ezflex:config-changed）。

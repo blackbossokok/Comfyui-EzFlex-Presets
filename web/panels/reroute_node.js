@@ -1,3 +1,4 @@
+// 面板：Reroute 面板：逐口命名与增删
 // EzFlex-Reroute 转接点节点面板。
 // 与内置 Reroute 一样做「原样转接」（逐口 1:1 透传，不合并/拆分），但：
 //   ① 动态端口：连一根加一个（尾部常留 1 个空槽接下一根线），没有 +/- 按钮；
@@ -8,17 +9,17 @@
 //
 // 实现参照 PreviewAny（syncSockets 动态端口 + 连线守卫 + 卡片拖拽排序）与 ModelsCombo（面板留端口位 + 每帧黑框）。
 // ⚠️ 与 MergeList（N→1）/ SplitList（1→N）语义不同，三个节点都保留 —— Reroute 只做 1:1 透传。
-import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
-import {
-  NODE_TYPES, registerNode, unregisterNode, nodeTypeOf,
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
+import {ezBindHooks, ezApplyDefaultSize,
+  NODE_TYPES, registerNode, unregisterNode, nodeTypeOf, nodesOfType,
   configWidget, writeConfig, readConfig,
   installResizeHandles, makeDomWidgetHitThrough,
-  ezPruneDanglingLinks, scheduleOnRedraw, pumpFrames, on,
+  ezPruneDanglingLinks, ezCaptureSocketLinks, ezApplySocketLinks, scheduleOnRedraw, pumpFrames, on,
   hideNativeSlotText,
-} from "./ezflex_service.js";
+  ezDropInput , ezScheduleNodeRedraw } from "../core/ezflex_service.js";
 
 const NODE = NODE_TYPES.REROUTE;
 const OUTPUTS_API = "/ezreroute/outputs";
@@ -312,7 +313,7 @@ function syncSockets(node) {
   try {
     for (let i = (node.inputs || []).length - 1; i >= 0; i--) {
       const _in = node.inputs[i];
-      if (_in && _in.name === 'config') { try { node.inputs.splice(i, 1); } catch (_) { try { _in.hidden = true; } catch (_2) {} } }
+      if (_in && _in.name === 'config') { try { ezDropInput(node, i); } catch (_) { try { _in.hidden = true; } catch (_2) {} } }
     }
   } catch (_) {}
 
@@ -324,6 +325,8 @@ function syncSockets(node) {
   // 链路未恢复守卫：有带 link 的输入其 link 对象还没进 graph.links，此时不重排/改名/删槽。
   const pending = (node.inputs || []).some((i) => i.link != null && !(node.graph && node.graph.links && node.graph.links[i.link]));
   if (pending) { deferSync(node); return; }
+  // 重排前按 socket 拍连线快照（新版前端 socket.links/link 是按当前下标现拼的视图，搬完再读会指错口）。
+  const cap = ezCaptureSocketLinks(node);
 
   // ★ 关键顺序（修「换位/断线后连锁断裂」）：
   //   先按「新数组下标」回写 target_slot/origin_slot，再 prune。
@@ -363,19 +366,8 @@ function syncSockets(node) {
   // 输出 socket 的 name 保持 output_N（后端按槽位取），显示名由黑框标签 / 卡片负责
   node.outputs.forEach((o, idx) => { try { o.name = `output_${idx + 1}`; hideNativeSlotText(o); o.hidden = false; } catch (_) {} });
 
-  // ---- ★ 先回写 slot（链路已就绪），再 prune ----
-  node.inputs.forEach((i, idx) => {
-    if (i.link != null && node.graph && node.graph.links && node.graph.links[i.link]) {
-      try { node.graph.links[i.link].target_slot = idx; } catch (_) {}
-    }
-  });
-  node.outputs.forEach((o, idx) => {
-    linksOf(o).forEach((lid) => {
-      if (lid != null && node.graph && node.graph.links && node.graph.links[lid]) {
-        try { node.graph.links[lid].origin_slot = idx; } catch (_) {}
-      }
-    });
-  });
+  // ---- ★ 先按快照回写 slot（链路已就绪），再 prune ----
+  ezApplySocketLinks(node, cap);
 
   // 回写后再清坏线（此时 slot 已对齐，只会清掉真正越界的线）
   ezPruneDanglingLinks(node);
@@ -648,7 +640,7 @@ function hideConfigWidget(node) {
     const ins = node.inputs || [];
     for (let i = ins.length - 1; i >= 0; i--) {
       const inp = ins[i];
-      if (inp && inp.name === 'config') { try { ins.splice(i, 1); } catch (_) { try { inp.hidden = true; } catch (_2) {} } }
+      if (inp && inp.name === 'config') { try { ezDropInput(node, i); } catch (_) { try { inp.hidden = true; } catch (_2) {} } }
     }
   } catch (_) {}
   const w = configWidget(node); if (!w || node._ezRzCfgHid) return; node._ezRzCfgHid = true;
@@ -746,8 +738,11 @@ function installOutsideLabels(node) {
     } catch (_) {}
     update();
   };
-  scheduleOnRedraw(update);
-  onLocaleChange(() => { try { node._ezRz.sig = ''; render(node); } catch (_) {} update(); });
+  const cleanup = () => { try { all.forEach((x) => { try { x.el.remove(); } catch (_) {} }); } catch (_) {} all = []; };
+  const prevRemoved = node.onRemoved;
+  node.onRemoved = function () { try { cleanup(); } catch (_) {} const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; return r; };
+  ezScheduleNodeRedraw(node, update, cleanup);
+  ezBindHooks(node, onLocaleChange(() => { try { node._ezRz.sig = ''; render(node); } catch (_) {} update(); }));
   schedule();
   node._ezRzEdgeUpdate = update;
 }
@@ -821,10 +816,10 @@ function setupNode(node) {
     // ===== 尺寸（照 PreviewAny）=====
     // 不覆盖 computeSize / 不设 getMaxHeight：让 DOM widget 只吃它自己那点空间，
     // 面板高度由 node.size 决定；卡片溢出走 .rzr-list 的内部滚动条，想更高就拖下缘手柄。
-    // 初始尺寸**显式压到 INIT_H**（不能跟 ComfyUI 默认大尺寸取 max，否则新节点会高得离谱）。
+    // 初始尺寸**显式压到 INIT_H**（不能跟 ComfyUI 默认大尺寸取 max，否则新节点会高得离谱）；
+    // 但用户拖出来的尺寸要保留 —— ezApplyDefaultSize 只放大不缩小。
     node.min_size = [220, MIN_H];
-    if (typeof node.setSize === 'function') node.setSize([DEF_W, INIT_H]);
-    else node.size = [DEF_W, INIT_H];
+    ezApplyDefaultSize(node, DEF_W, INIT_H);
 
     setTimeout(hideConfigWidget, 60, node);
     installResizeHandles(node, shell);
@@ -861,7 +856,7 @@ function hookPrototype(nt) {
   const prevCreated = nt.prototype.onNodeCreated;
   nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
   const prevCfg = nt.prototype.onConfigure;
-  nt.prototype.onConfigure = function (info) {
+  nt.prototype.onConfigure = function (info) { this.__ezSizeRestored = true;
     const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
     // ★★ 载入工作流 / 刷新 / 重启 / 复制粘贴的唯一可靠入口：
     //   `info` 是**原始序列化数据**，直接从这里把名字捞出来，
@@ -916,10 +911,45 @@ function hookPrototype(nt) {
   };
 }
 
+// ★★ 切换工作流标签的兜底自愈（与 preview_any 同款，见 MEMORY §1f / §11b）：
+//    切 tab 时 ComfyUI 只换 `app.graph`、重建 DOM widget 宿主 → `_ezRoot` 变幽灵 DOM → 面板空掉。
+//    ⚠️ 光挂 scheduleOnRedraw / onDrawForeground **不够**：切工作流是纯 UI 动作，不动鼠标就不触发 pumpFrames
+//    （EZ_PERF.labelFallbackMs = 0，无兜底定时器）→ 巡检永不跑。所以另加「只在疑似换图期间才活的短时轮询」。
+const RZ_SWITCH_POLL_MS = 40, RZ_SWITCH_WINDOW_MS = 600;
+let _rzLastGraph = null, _rzPollTimer = 0, _rzPollUntil = 0;
+function rzNodes() { try { return nodesOfType(NODE) || []; } catch (_) { return []; } }
+function rzSweep(force) {
+  try {
+    const shown = (app && app.canvas && app.canvas.graph) || (app && app.graph) || null;
+    const switched = shown !== _rzLastGraph;
+    if (switched) { _rzLastGraph = shown; rzArmSwitchPoll(); }
+    if (!force && !switched) {
+      let any = false;
+      for (const n of rzNodes()) { const sh = n && n._ezRoot; if (sh && sh.isConnected === false) { any = true; break; } }
+      if (!any) return;
+    }
+    for (const n of rzNodes()) { if (n && n._ezRzSetup) { try { healDom(n); } catch (_) {} } }
+  } catch (_) {}
+}
+function rzArmSwitchPoll() {
+  _rzPollUntil = Date.now() + RZ_SWITCH_WINDOW_MS;
+  if (_rzPollTimer) return;
+  const tick = () => {
+    rzSweep(true);
+    if (Date.now() < _rzPollUntil) { _rzPollTimer = setTimeout(tick, RZ_SWITCH_POLL_MS); }
+    else { _rzPollTimer = 0; }
+  };
+  _rzPollTimer = setTimeout(tick, 0);
+}
+scheduleOnRedraw(() => rzSweep(false));
+try { api.addEventListener('graphChanged', () => rzArmSwitchPoll()); } catch (_) {}
+try { api.addEventListener('graphCleared', () => rzArmSwitchPoll()); } catch (_) {}
+
 app.registerExtension({
   name: 'Comfy.EzFlex.Reroute',
   async beforeRegisterNodeDef(nt, nd) { if (nd && nd.name === NODE) hookPrototype(nt); },
   nodeCreated(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
   loadedGraphNode(n) { if (nodeTypeOf(n) === NODE) setupNode(n); },
+  afterConfigureGraph() { try { rzArmSwitchPoll(); } catch (_) {} },
   setup() { ((app.graph && app.graph._nodes) || []).forEach((n) => { if (nodeTypeOf(n) === NODE) setupNode(n); }); },
 });

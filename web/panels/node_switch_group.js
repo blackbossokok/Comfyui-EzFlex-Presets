@@ -1,19 +1,19 @@
+// 面板：NodeSwitchGroup 面板：开关 + 画布分组匹配规则 + 分组预设
 // EzFlex-NodeSwitchGroup 分组预设节点（rgthree 式）。
 // 自动扫描工作流中的 ComfyUI 分组（Ctrl+G），按 节点级 匹配颜色/匹配标题/子工作流/排序 过滤后自动成行；
 // 每行 = 一个画布分组，3 态（开启/禁用/绕过）滑块一键给该分组内节点设 node.mode 0/2/4。
 // 匹配配置存 config（面板可改，序列化保存）；分组预设（全部开启/全部禁用/全部绕过 + 自定义快照）也存**本节点 config**。
 // 刻意如此：同名分组在不同节点上含义不同，存服务器预设库会互相冲突（多节点同名会串）；代价是删掉节点，预设就没了。
-import { app } from "../../scripts/app.js";
-import { ezT, onLocaleChange } from "./ezflex_i18n.js";
-import { ezThemeInit } from "./ezflex_theme.js";
-import {
-  NODE_TYPES, MODE_NUM, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
+import { app } from "../../../scripts/app.js";
+import { ezT, onLocaleChange } from "../core/ezflex_i18n.js";
+import { ezThemeInit } from "../core/ezflex_theme.js";
+import {ezBindHooks, NODE_TYPES, MODE_NUM, BASE_PRESETS, isBasePreset, isReservedPresetName, basePresetName, basePresetMode,
   registerNode, unregisterNode, nodeTypeOf,
   configWidget, writeConfig, readConfig,
   uiPrompt,
   allGraphGroups, groupNodes, changeModeOfNodes, normalizeColor, installResizeHandles, makeDomWidgetHitThrough,
   EZ_PERF, scheduleOnRedraw,
-} from "./ezflex_service.js";
+  ezDropInput, ezScheduleNodeRedraw } from "../core/ezflex_service.js";
 
 const NODE = NODE_TYPES.GROUP;
 
@@ -472,7 +472,7 @@ function buildFilters(node, onChange) {
   return wrap;
 }
 
-function renderRow(node, group, refresh) {
+function renderRow(node, group) {
   const st = stateFor(node);
   const row = el('div', 'ezg-row');
   const name = el('span', 'gname'); name.textContent = group.title || ezT('Unnamed group'); name.title = group.title || '';
@@ -505,7 +505,7 @@ function refreshRows(node) {
   if (!list) return;
   list.innerHTML = '';
   if (!groups.length) { list.appendChild(el('div', 'ezg-empty')).textContent = ezT('No groups matched (create a group with Ctrl+G in the workflow, or adjust the match filters above)'); return; }
-  groups.forEach((g) => list.appendChild(renderRow(node, g, null)));
+  groups.forEach((g) => list.appendChild(renderRow(node, g)));
 }
 function refreshUI(node) {
   const st = stateFor(node);
@@ -515,7 +515,7 @@ function refreshUI(node) {
   if (!list) return;
   list.innerHTML = '';
   if (!st._groups.length) { list.appendChild(el('div', 'ezg-empty')).textContent = ezT('No groups matched (create a group with Ctrl+G in the workflow, or adjust the match filters above)'); }
-  st._groups.forEach((g) => list.appendChild(renderRow(node, g, null)));
+  st._groups.forEach((g) => list.appendChild(renderRow(node, g)));
   const presetSel = node._ezRoot.querySelector('.ezg-hd select');
   const opts = presetOptions(node);
   if (opts.indexOf(st.current) < 0) st.current = BASE_PRESETS[0];
@@ -528,7 +528,7 @@ function fitNode(node) {
     if (!root || typeof node.setSize !== 'function') return;
     const cur = node.size || [300, 96];
     const contentH = root.scrollHeight + 12;
-    if (contentH > cur[1] + 4) node.setSize([Math.max(320, cur[0]), Math.min(420, contentH)]);
+    // 尺寸由用户决定：内容超出走面板内部滚动条，这里不再自动加高
   } catch (_) {}
 }
 
@@ -557,14 +557,15 @@ function startAutoScan(node) {
   node._ezScanBound = true;
   const prevDraw = node.onDrawForeground;
   node.onDrawForeground = function (ctx) { if (prevDraw) prevDraw.call(this, ctx); try { scheduleScan(this); } catch (e) { console.error('[NodeSwitchGroup] scan failed:', e); } };
-  scheduleOnRedraw(() => scheduleScan(node));
-  onLocaleChange(() => { try { refreshUI(node); } catch (_) {} scheduleScan(node); });   // 语言切换即时重画
+  // 用「按节点注册」的版本：节点被删后自动从全局调度表注销，不会每帧空跑/刷 console
+  ezScheduleNodeRedraw(node, () => scheduleScan(node));
+  ezBindHooks(node, onLocaleChange(() => { try { refreshUI(node); } catch (_) {} scheduleScan(node); }));
   if (EZ_PERF.groupPollMs > 0) node._ezScanIv = setInterval(() => scheduleScan(node), EZ_PERF.groupPollMs);
 }
 
 // ===== 挂载 =====
 function hideConfigWidget(node) {
-  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { node.inputs.splice(_i, 1); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
+  try { const _ins = node.inputs || []; for (let _i = _ins.length - 1; _i >= 0; _i--) { const _in = _ins[_i]; if (_in && (_in.name === 'config')) { try { ezDropInput(node, _i); } catch (_) { try { _in.hidden = true; } catch (_) {} } } } } catch (_) {}
 
   const w = configWidget(node); if (!w || node._ezCfgHid) return; node._ezCfgHid = true;
   try {
@@ -596,7 +597,7 @@ function setupNode(node) {
 function hookPrototype(nt) {
   if (!nt || nt.__ezGroupHooked) return; nt.__ezGroupHooked = true;
   const prevCreated = nt.prototype.onNodeCreated; nt.prototype.onNodeCreated = function () { const r = prevCreated ? prevCreated.apply(this, arguments) : undefined; setupNode(this); return r; };
-  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () {
+  const prevCfg = nt.prototype.onConfigure; nt.prototype.onConfigure = function () { this.__ezSizeRestored = true;
     const r = prevCfg ? prevCfg.apply(this, arguments) : undefined;
     loadFromConfig(this);
     // 复制/载入：setupNode 可能先于 configure 跑（面板那时用的是默认 match），配置到位后要同步过滤器 DOM + 重扫行
