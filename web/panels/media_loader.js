@@ -594,7 +594,7 @@ function maxLoopRounds(node) {
       }
     } catch (_) {}
   });
-  return Math.max(1, max || 20);
+  return Math.max(1, max);
 }
 async function editLoopIndices(node, card) {
   const max = maxLoopRounds(node);

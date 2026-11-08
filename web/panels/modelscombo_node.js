@@ -1032,6 +1032,8 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
   let _openList = null;
   let _comboListEl = null;
   let _comboDocBound = false;
+  let _comboWatchRaf = 0;
+  let _comboWatchSig = '';
   function comboListEl() {
     if (!_comboListEl || !_comboListEl.parentNode) {
       _comboListEl = el('div', 'mc-combo-list');
@@ -1046,12 +1048,51 @@ console.info('[ModelsCombo] modelscombo_node.js loaded, addDOMWidget support:',
     listEl.style.left = Math.max(4, r.left) + 'px';
     listEl.classList.add('visible');
     _openList = listEl;
+    startComboViewWatch();
+  }
+  function comboViewSig() {
+    try {
+      const ds = app && app.canvas && app.canvas.ds;
+      if (!ds || !ds.offset) return '';
+      return String(ds.scale) + '|' + String(ds.offset[0]) + '|' + String(ds.offset[1]);
+    } catch (_) { return ''; }
+  }
+  // 画布平移/缩放（含滚轮、拖拽、按钮、快捷键、fit）都会改 ds.scale/offset；
+  // 每帧比对签名，变了就关掉下拉，避免下拉停在原地而 trigger 已经移走。
+  function comboWatchView() {
+    _comboWatchRaf = 0;
+    if (!_openList) return;
+    const sig = comboViewSig();
+    if (!sig) return;   // 没有 canvas API：交给 pointerdown/wheel 监听
+    if (_comboWatchSig && sig !== _comboWatchSig) { closeAllCombos(); return; }
+    _comboWatchSig = sig;
+    _comboWatchRaf = requestAnimationFrame(comboWatchView);
+  }
+  function startComboViewWatch() {
+    _comboWatchSig = comboViewSig();
+    if (!_comboWatchRaf && _comboWatchSig && typeof requestAnimationFrame === 'function') {
+      _comboWatchRaf = requestAnimationFrame(comboWatchView);
+    }
   }
   function closeAllCombos() { hidePreview(); if (_openList) _openList.classList.remove('visible'); _openList = null; }
   function bindComboDoc() {
     if (_comboDocBound || typeof document === 'undefined') return;
     _comboDocBound = true;
     document.addEventListener('click', closeAllCombos);
+    // 画布平移/缩放前先收起下拉：否则下拉是 fixed 定位，会停在原地/跟着画布动，
+    // 而它的 trigger 已经移走。pointerdown 捕获阶段能赶上画布拖动（拖动通常不产生 click）。
+    document.addEventListener('pointerdown', (ev) => {
+      if (!_openList) return;
+      const t = ev.target;
+      if (_openList.contains(t) || (t && t.closest && t.closest('.mc-combo-trigger'))) return;
+      closeAllCombos();
+    }, true);
+    document.addEventListener('wheel', (ev) => {
+      if (!_openList) return;
+      if (_openList.contains(ev.target)) return;
+      closeAllCombos();
+    }, { capture: true, passive: true });
+    document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') closeAllCombos(); }, true);
   }
   function fileComboEl(node, loader, files) {
     bindComboDoc();

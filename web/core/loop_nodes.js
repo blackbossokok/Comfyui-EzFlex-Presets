@@ -1115,91 +1115,6 @@ function savePersist(node, st) {
     node.setDirtyCanvas && node.setDirtyCanvas(true, true);
   } catch (_) {}
 }
-const EZ_PERSIST_TYPES = ['latent', 'image', 'audio', 'video', 'mask', 'tensor', 'conditioning'];
-function persistPanel(node, paint) {
-  const st = readPersist(node);
-  const wrap = el('div', 'ezlp-persist');
-  const bar = el('div', 'ezlp-persist-bar');
-  const mk = (txt, fn) => { const b = el('button', 'ezlp-chip', { type: 'button' }); b.textContent = txt; b.addEventListener('click', fn); return b; };
-  const repaint = () => { try { paint(); } catch (_) {} };   // 由 setupLoopEnd 传入
-  bar.appendChild(mk(ezT('Select all'), () => {
-    (node.inputs || []).forEach((s) => { const m = /^value(\d+)$/.exec(s.name || ''); if (m && s.link != null) st.ports.add(parseInt(m[1], 10)); });
-    EZ_PERSIST_TYPES.forEach((t) => st.types.add(t)); savePersist(node, st); repaint();
-  }));
-  bar.appendChild(mk(ezT('Invert'), () => {
-    const all = (node.inputs || []).map((s) => { const m = /^value(\d+)$/.exec(s.name || ''); return (m && s.link != null) ? parseInt(m[1], 10) : 0; }).filter(Boolean);
-    st.ports = new Set(all.filter((k) => !st.ports.has(k)));
-    st.types = new Set(EZ_PERSIST_TYPES.filter((t) => !st.types.has(t)));
-    savePersist(node, st); repaint();
-  }));
-  bar.appendChild(mk(ezT('Clear'), () => { st.ports.clear(); st.types.clear(); savePersist(node, st); repaint(); }));
-  wrap.appendChild(bar);
-  // 端口（已连接的 valueK）：1 行 3 个，点击变绿 = 落盘
-  const grid = el('div', 'ezlp-persist-grid');
-  let row = null;
-  (node.inputs || []).forEach((s) => {
-    const m = /^value(\d+)$/.exec(s.name || '');
-    if (!m || s.link == null) return;
-    const k = parseInt(m[1], 10);
-    if (!row || row.childNodes.length >= 3) { row = el('div', 'ezlp-persist-row'); grid.appendChild(row); }
-    const c = el('button', 'ezlp-chip' + (st.ports.has(k) ? ' on' : ''), { type: 'button' });
-    c.textContent = 'value' + k;
-    c.addEventListener('click', () => { if (st.ports.has(k)) st.ports.delete(k); else st.ports.add(k); savePersist(node, st); repaint(); });
-    row.appendChild(c);
-  });
-  wrap.appendChild(grid);
-  // 类型筛选：点击变绿
-  const trow = el('div', 'ezlp-persist-row');
-  EZ_PERSIST_TYPES.forEach((t) => {
-    const c = el('button', 'ezlp-chip' + (st.types.has(t) ? ' on' : ''), { type: 'button' });
-    c.textContent = t;
-    c.addEventListener('click', () => { if (st.types.has(t)) st.types.delete(t); else st.types.add(t); savePersist(node, st); repaint(); });
-    trow.appendChild(c);
-  });
-  wrap.appendChild(trow);
-  return wrap;
-}
-function persistFilter(node, paint) {
-  const st = readPersist(node);
-  const d = el('details', 'ezlp-filter');
-  d.open = !!node._ezPersistOpen;
-  const sum = el('summary'); sum.textContent = ezT('Persist filter');
-  d.appendChild(sum);
-  try {
-    if (node._ezPersistDoc) document.removeEventListener('pointerdown', node._ezPersistDoc, true);
-  } catch (_) {}
-  d.addEventListener('toggle', () => {
-    node._ezPersistOpen = !!d.open;
-    if (node._ezPersistOpen) {
-      node._ezPersistDoc = (ev) => {
-        if (d.contains(ev.target)) return;
-        node._ezPersistOpen = false;
-        try { document.removeEventListener('pointerdown', node._ezPersistDoc, true); } catch (_) {}
-        node._ezPersistDoc = null;
-        paint();
-      };
-      document.addEventListener('pointerdown', node._ezPersistDoc, true);
-    } else {
-      try { if (node._ezPersistDoc) document.removeEventListener('pointerdown', node._ezPersistDoc, true); } catch (_) {}
-      node._ezPersistDoc = null;
-    }
-  });
-  const body = el('div', 'ezlp-filter-body');
-  const mk = (txt, fn, on) => { const b = el('button', 'ezlp-chip' + (on ? ' on' : ''), { type: 'button' }); b.textContent = txt; b.addEventListener('click', fn); return b; };
-  const row = el('div', 'ezlp-persist-bar');
-  row.appendChild(mk(ezT('Select all'), () => { EZ_PERSIST_TYPES.forEach((t) => st.types.add(t)); savePersist(node, st); paint(); }, st.types.size === EZ_PERSIST_TYPES.length));
-  row.appendChild(mk(ezT('Invert'), () => { st.types = new Set(EZ_PERSIST_TYPES.filter((t) => !st.types.has(t))); savePersist(node, st); paint(); }, false));
-  row.appendChild(mk(ezT('Clear'), () => { st.types.clear(); savePersist(node, st); paint(); }, false));
-  body.appendChild(row);
-  const trow = el('div', 'ezlp-persist-row');
-  EZ_PERSIST_TYPES.forEach((t) => {
-    const c = mk(t, () => { if (st.types.has(t)) st.types.delete(t); else st.types.add(t); savePersist(node, st); paint(); }, st.types.has(t));
-    trow.appendChild(c);
-  });
-  body.appendChild(trow);
-  d.appendChild(body);
-  return d;
-}
 function persistCards(node, paint) {
   const st = readPersist(node);
   st.cards = (st.cards && typeof st.cards === 'object') ? st.cards : {};
@@ -1267,68 +1182,6 @@ function applyPersistLabels(node, st) {
   }
   try { node.graph && node.graph.setDirtyCanvas && node.graph.setDirtyCanvas(true, true); } catch (_) {}
   try { if (node._eztlRefresh) node._eztlRefresh(); } catch (_) {}
-}
-function persistPorts(node, paint) {
-  const st = readPersist(node);
-  const wrap = el('div', 'ezlp-ports');
-  let anchor = -1;
-  (node.inputs || []).forEach((s) => {
-    const m = /^value(\d+)$/.exec(s.name || '');
-    if (!m || s.link == null) return;
-    const k = parseInt(m[1], 10);
-    const labelOf = () => 'value' + k + (st.names[k] ? ' · ' + st.names[k] : '');
-    const c = el('button', 'ezlp-chip' + (st.ports.has(k) ? ' on' : ''), { type: 'button' });
-    c.textContent = labelOf();
-    c.title = ezT('Click to toggle; double-click to rename the saved file');
-    let clickTimer = 0;
-    const toggle = (e) => {
-      if (e.shiftKey && anchor > 0) {
-        const all = (node.inputs || []).map((x) => { const mm = /^value(\d+)$/.exec(x.name || ''); return (mm && x.link != null) ? parseInt(mm[1], 10) : 0; }).filter(Boolean);
-        const a = all.indexOf(anchor), b = all.indexOf(k);
-        if (a >= 0 && b >= 0) { for (let i = Math.min(a, b); i <= Math.max(a, b); i++) st.ports.add(all[i]); }
-      } else if (e.ctrlKey || e.metaKey) {
-        if (st.ports.has(k)) st.ports.delete(k); else st.ports.add(k);
-      } else {
-        st.ports.clear(); st.ports.add(k);
-      }
-      anchor = k;
-      savePersist(node, st); paint();
-    };
-    c.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (e.detail > 1) { if (clickTimer) { clearTimeout(clickTimer); clickTimer = 0; } return; }
-      if (clickTimer) clearTimeout(clickTimer);
-      clickTimer = setTimeout(() => { clickTimer = 0; toggle(e); }, 180);
-    });
-    c.addEventListener('dblclick', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      if (clickTimer) { clearTimeout(clickTimer); clickTimer = 0; }
-      const inp = el('input', 'ezlp-pname');
-      inp.type = 'text';
-      inp.value = st.names[k] || '';
-      inp.placeholder = 'value' + k;
-      inp.title = ezT('Double-click to edit; blur/Enter saves');
-      c.style.display = 'none';
-      wrap.insertBefore(inp, c.nextSibling);
-      const done = () => {
-        if (!inp.isConnected) return;
-        const v = String(inp.value || '').trim();
-        if (v) st.names[k] = v; else delete st.names[k];
-        savePersist(node, st);
-        inp.remove();
-        c.style.display = '';
-        c.textContent = labelOf();
-      };
-      inp.addEventListener('blur', done);
-      inp.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter') { ev.preventDefault(); inp.blur(); }
-        else if (ev.key === 'Escape') { inp.value = st.names[k] || ''; inp.blur(); }
-      });
-      setTimeout(() => { try { inp.focus(); inp.select(); } catch (_) {} }, 0);
-    });
-    wrap.appendChild(c);
-  });
-  return wrap;
 }
 function setupLoopEnd(node) {
   migrateLoopSockets(node);
@@ -1867,8 +1720,10 @@ async function tlPickVersion(node, idx, final, x, y) {
         });
         const sj = await sr.json().catch(() => null);
         if (!sj || !sj.ok) { uiConfirm(ezT('Version switch failed') + ': ' + ((sj && sj.error) || '?')); return; }
-        if (final) node._ezSegFinal = String(sj.dir || dir) + '/final.mp4';
-        else node._ezSegDone[idx + 1] = { path: String(sj.dir || dir) + '/' + base + '.mp4', file: base + '.mp4' };
+        // 后端返回真实文件路径：成片可能是 final.mkv / final.webm，不能再硬拼 final.mp4
+        const vp = String(sj.video || ((sj.dir || dir) + '/' + base + '.mp4'));
+        if (final) node._ezSegFinal = vp;
+        else node._ezSegDone[idx + 1] = { path: vp, file: String(sj.file || vp.split(/[\\/]/).pop()) };
         node._ezSegDir = String(sj.dir || dir);
         node._ezSegVer = (node._ezSegVer || 0) + 1;
         try { node.properties.ezSegDone = Object.assign({}, node._ezSegDone); node.properties.ezSegDir = node._ezSegDir; node.properties.ezSegFinal = node._ezSegFinal || ''; } catch (_) {}
@@ -3157,11 +3012,11 @@ setTimeout(() => { try { tlSyncManifest(node); } catch (_) {} }, 200);
                 { label: ezT('Trim segment head/tail'), fn: () => { tlTrimSegment(node, sg.i - 1, false); } },
                 { label: ezT('Restore segment trim'), fn: () => { tlTrimSegment(node, sg.i - 1, true); } },
                 { label: ezT('Replace this segment video'), fn: () => { tlReplaceSegment(node, sg.i - 1); } },
+                { label: ezT('Replace final video'), fn: () => { tlReplaceFinal(node); } },
                 { label: ezT('Select segment version…'), fn: () => { tlPickVersion(node, sg.i - 1, false, e.clientX, e.clientY); } },
                 { label: ezT('Select final version…'), fn: () => { tlPickVersion(node, 0, true, e.clientX, e.clientY); } },
                 { label: ezT('Clean old versions'), fn: () => { tlClearVersions(node, sg.i - 1, false); } },
                 { label: ezT('Clean old final versions'), fn: () => { tlClearVersions(node, 0, true); } },
-                { label: ezT('Replace final video'), fn: () => { tlReplaceFinal(node); } },
                 { label: ezT('Clear this segment cache'), fn: () => { tlClearCache(node, sg.i - 1); } },
               ], e.clientX, e.clientY);
             });

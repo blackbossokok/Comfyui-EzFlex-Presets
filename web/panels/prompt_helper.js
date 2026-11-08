@@ -1299,6 +1299,7 @@ audio.eph-mv-media::-webkit-media-controls-timeline,audio.eph-rp-media::-webkit-
 .eph-rule-hint:hover{border-color:var(--ez-border-strong);color:var(--ez-fg);}
 .eph-merge-btn{height:22px;min-width:26px;padding:0 7px;border-radius:6px;border:1px solid var(--ez-border);background:var(--ez-surface-3);color:var(--ez-fg-muted);font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;flex:0 0 auto;line-height:1;}
 .eph-merge-btn.on{background:var(--ez-ok-bg);border-color:var(--ez-ok-border);color:var(--ez-ok-fg);}
+.eph-merge-btn:focus,.eph-merge-btn:focus-visible{outline:none;box-shadow:none;}
 .eph-toolbar .eph-merge-btn,.eph-all-toolbar .eph-merge-btn{height:30px;padding:4px 11px;border-radius:9px;}   /* 工具栏里跟 .eph-btn 等高 */
 .eph-rule-pop{position:fixed;z-index:100040;width:440px;max-width:92vw;max-height:70vh;overflow:auto;background:var(--ez-bg);border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,.2);padding:10px 12px;font-family:Inter,sans-serif;font-size:11px;color:var(--ez-fg-2);line-height:1.6;box-sizing:border-box;}
 .eph-rule-pop-t{font-size:12px;font-weight:600;color:var(--ez-fg);margin-bottom:6px;}
@@ -1817,6 +1818,45 @@ function syncEditModalTitle(node, card) {
   if (!_editModal._titleEl || stateFor(node).editingId !== card.id) return;
   _editModal._titleEl.textContent = card.title || ezT('Edit prompt');
 }
+// 「合」按钮：Shift 点另一张 = 按被点那张的状态铺满首尾之间；锚点按 Windows 规则固定，不随 Shift 移动
+function toggleMergeAt(node, index, shift) {
+  const st = stateFor(node);
+  const cards = (st && st.cards) || [];
+  if (!cards[index]) return;
+  const anchor = node._ezPhMergeAnchor;
+  const want = !cards[index].mergeOff;   // 被点那张的新状态；整段按它铺，不看第一张
+  if (shift && Number.isInteger(anchor) && anchor >= 0 && anchor < cards.length && anchor !== index) {
+    const a = Math.min(anchor, index), b = Math.max(anchor, index);
+    for (let i = a; i <= b; i++) cards[i].mergeOff = want;
+  } else {
+    cards[index].mergeOff = want;
+    node._ezPhMergeAnchor = index;       // 只有单击/Ctrl 才移动锚点（Windows 规则：Shift 只移动另一端）
+  }
+  syncToConfig(node);
+  paintMergeButtons(node);
+}
+function paintMergeButtons(node) {
+  const st = stateFor(node);
+  const cards = (st && st.cards) || [];
+  const root = node && node._ezRoot;
+  if (root) {
+    const rows = root.querySelectorAll('.eph-list .eph-card');
+    rows.forEach((row, i) => {
+      const card = cards[i];
+      const b = row.querySelector('.eph-merge-btn');
+      if (card && b) b.classList.toggle('on', !card.mergeOff);
+    });
+  }
+  try {
+    if (_allModal && _allModal.classList.contains('active') && _allModal._node === node && _allModal._ed) {
+      _allModal._ed.querySelectorAll('.eph-all-block').forEach((blk) => {
+        const card = cards[parseInt(blk.dataset.idx, 10)];
+        const b = blk.querySelector('.eph-merge-btn');
+        if (card && b) b.classList.toggle('on', !card.mergeOff);
+      });
+    }
+  } catch (_) {}
+}
 function buildCardRow(node, card, index) {
   const linked = !!(node._ezLinkedCards && node._ezLinkedCards[card.id]);
   const live = !!card.liveIn;
@@ -1858,8 +1898,10 @@ function buildCardRow(node, card, index) {
   // 预览文字跟随该卡滑块：在「优化提示词」页签显示优化后的正文，在「默认」页签显示默认正文
   const preview = el('span', 'eph-preview'); preview.textContent = (card.useOptimized ? card.contentOptimized : card.content) || '';
   const time = el('span', 'eph-time'); time.textContent = (card.timelineStart && card.timelineEnd) ? `${card.timelineStart}-${card.timelineEnd}s` : '';
-  const mg = el('button', 'eph-merge-btn' + (card.mergeOff ? '' : ' on')); mg.textContent = ezT('Merge'); mg.title = ezT('Merge into "Merged prompt": green = merged, gray = not merged');
-  mg.addEventListener('click', (e) => { e.stopPropagation(); card.mergeOff = !card.mergeOff; syncToConfig(node); refreshUI(node); });
+  const mg = el('button', 'eph-merge-btn' + (card.mergeOff ? '' : ' on')); mg.textContent = ezT('Merge');
+  mg.title = ezT('Merge into "Merged prompt": green = merged, gray = not merged') + ' · ' + ezT('Shift-click another Merge button to apply the same state to the whole range');
+  mg.addEventListener('mousedown', (e) => { if (e.shiftKey || e.ctrlKey || e.metaKey) e.preventDefault(); });
+  mg.addEventListener('click', (e) => { e.stopPropagation(); toggleMergeAt(node, index, e.shiftKey); });
   const del = el('button', 'eph-del'); del.textContent = '×'; del.title = ezT('Delete card');
   del.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -1868,9 +1910,16 @@ function buildCardRow(node, card, index) {
   //  只有「单点」卡片（无拖动位移）才打开编辑弹窗，避免在标题里拖动误触。
     let _rowDown = null;
   row.addEventListener('pointerdown', (e) => { _rowDown = { x: e.clientX, y: e.clientY }; });
+  row.addEventListener('mousedown', (e) => { if (e.shiftKey && !e.target.closest('button') && !e.target.closest('[contenteditable]')) e.preventDefault(); });
   row.addEventListener('click', (e) => {
     if (e.target.closest('button') || e.target.closest('.eph-handle') || e.target.closest('[contenteditable]')) return;
     if (node._ezBatch) { batchPickCard(node, index, e.shiftKey, e.ctrlKey || e.metaKey); return; }
+    if (e.shiftKey) {
+      if (_rowDown) { const dx = e.clientX - _rowDown.x, dy = e.clientY - _rowDown.y; if (Math.hypot(dx, dy) > 4) { _rowDown = null; return; } _rowDown = null; }
+      // Shift 点卡片本体：没有锚点时先切这张并设锚点；有锚点时铺首尾区间。不打开编辑弹窗。
+      toggleMergeAt(node, index, Number.isInteger(node._ezPhMergeAnchor));
+      return;
+    }
     if (_rowDown) { const dx = e.clientX - _rowDown.x, dy = e.clientY - _rowDown.y; if (Math.hypot(dx, dy) > 4) { _rowDown = null; return; } _rowDown = null; }
     openEditModal(node, card.id);
   });
@@ -1905,7 +1954,7 @@ function maxLoopRoundsPH(node) {
       }
     } catch (_) {}
   });
-  return Math.max(1, max || 20);
+  return Math.max(1, max);
 }
 async function editLoopIndicesPH(node, card) {
   const picked = await ezPickLoopIndices({
@@ -12287,9 +12336,11 @@ function renderAllEditor(node) {
       openRefBrowser(node, body, card);
     });
     // 「合」放在小标题行、引用媒体按钮前面
-    const mergeBtnH = el('button', 'eph-merge-btn'); mergeBtnH.type = 'button'; mergeBtnH.textContent = ezT('Merge'); mergeBtnH.title = ezT('Merge into the merged prompt: green = merge, gray = skip');
+    const mergeBtnH = el('button', 'eph-merge-btn'); mergeBtnH.type = 'button'; mergeBtnH.textContent = ezT('Merge');
+    mergeBtnH.title = ezT('Merge into the merged prompt: green = merge, gray = skip') + ' · ' + ezT('Shift-click another Merge button to apply the same state to the whole range');
     mergeBtnH.classList.toggle('on', !card.mergeOff);
-    mergeBtnH.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); card.mergeOff = !card.mergeOff; syncToConfig(node); mergeBtnH.classList.toggle('on', !card.mergeOff); refreshUI(node); });
+    mergeBtnH.addEventListener('mousedown', (e) => { if (e.shiftKey || e.ctrlKey || e.metaKey) e.preventDefault(); });
+    mergeBtnH.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); toggleMergeAt(node, idx, e.shiftKey); });
     rw.appendChild(num); rw.appendChild(titleEl); rw.appendChild(foldEl); rw.appendChild(mergeBtnH); rw.appendChild(refEl); rw.appendChild(delEl);
     block.appendChild(rw);
     // 下方内容（按当前页签）

@@ -240,7 +240,24 @@ function pvWorkflowId(graph) {
   // 子图里的节点用 rootGraph.id（= 工作流 id）；root 图返回自己
   try { const g = graph && (graph.rootGraph || graph); return String((g && g.id) || ''); } catch (_) { return ''; }
 }
+const PV_RUNS_KEY = 'ezflex.previewAny.runs';
+function pvRunsSave() {
+  try {
+    const arr = Array.from(_pvRuns.entries()).slice(-32);
+    sessionStorage.setItem(PV_RUNS_KEY, JSON.stringify(arr));
+  } catch (_) {}
+}
+function pvRunsLoad() {
+  try {
+    const arr = JSON.parse(sessionStorage.getItem(PV_RUNS_KEY) || '[]');
+    if (!Array.isArray(arr)) return;
+    arr.forEach((it) => {
+      if (Array.isArray(it) && it[0] && it[1]) _pvRuns.set(String(it[0]), String(it[1]));
+    });
+  } catch (_) {}
+}
 const _pvRuns = new Map();   // prompt_id → 排队时的工作流 id
+pvRunsLoad();                 // 运行中刷新：prompt_id→工作流 的映射要活过 reload，否则 executed 全被丢掉
 const _pvBuf = new Map();    // 工作流 id|节点 id → entries[]（最近一次排队的结果）
 
 // 用户按住卡片时不要重建列表：renderEntries 会 innerHTML='' 整块重建，如果重建正好发生在
@@ -267,7 +284,7 @@ function pvTapInstall() {
     _pvTap = null;
     const t = e.target;
     if (!t || !t.closest) return;
-    if (t.closest('.ezpv-handle') || t.closest('.ezpv-badge') || t.closest('.ez-ap') || t.closest('button')) return;
+    if (t.closest('.ezpv-handle') || t.closest('.ezpv-badge') || t.closest('.ezpv-gen') || t.closest('.ez-ap') || t.closest('button')) return;
     const card = t.closest('.ezpv-card');
     const box = card && card.querySelector('.ezpv-prev');
     if (box && typeof box._pvOpen === 'function') _pvTap = { x: e.clientX, y: e.clientY, t: performance.now(), open: box._pvOpen };
@@ -451,7 +468,7 @@ function modalEl() {
   box.style.cssText = 'background:var(--ez-bg);border-radius:12px;padding:12px 14px;width:92%;max-width:640px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid var(--ez-border-2);box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const title = document.createElement('b'); title.textContent = ezT('Preview');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;height:24px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const ta = document.createElement('textarea'); ta.readOnly = true; ta.spellcheck = false;
   ta.style.cssText = 'width:100%;min-height:180px;max-height:60vh;padding:8px;border:1px solid var(--ez-border);border-radius:9px;font:11px/1.5 monospace;color:var(--ez-fg);background:var(--ez-surface);resize:none;overflow:auto;box-sizing:border-box;outline:none;';
@@ -474,7 +491,7 @@ function kvModalEl() {
   box.style.cssText = 'background:var(--ez-bg);border-radius:12px;padding:12px 14px;width:92%;max-width:600px;max-height:84vh;display:flex;flex-direction:column;gap:10px;border:1px solid var(--ez-border-2);box-shadow:0 12px 40px rgba(0,0,0,.14);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const title = document.createElement('b'); title.textContent = ezT('Details');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;height:24px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const list = document.createElement('div');
   list.style.cssText = 'display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:60vh;border:1px solid var(--ez-border-2);border-radius:9px;padding:6px;';
@@ -626,7 +643,7 @@ function mediaEl() {
   strip.appendChild(stripPrev); strip.appendChild(stripList); strip.appendChild(stripNext); strip.appendChild(stripCount);
   body.appendChild(video); body.appendChild(img); body.appendChild(audio); body.appendChild(meta); body.appendChild(cap); body.appendChild(strip);
   const closeBtn = document.createElement('button'); closeBtn.textContent = '✕'; closeBtn.title = ezT('Close');
-  closeBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;padding:2px 9px;font-size:12px;cursor:pointer;font-family:inherit;z-index:2;';
+  closeBtn.style.cssText = 'position:absolute;top:8px;right:8px;width:26px;height:26px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:8px;font-size:12px;cursor:pointer;font-family:inherit;z-index:2;';
   const navL = el('button', 'ezpv-nav l'); navL.textContent = '‹'; navL.title = ezT('Previous');
   const navR = el('button', 'ezpv-nav r'); navR.textContent = '›'; navR.title = ezT('Next');
   navL.addEventListener('click', (e) => { e.stopPropagation(); _media._imgPrev(); });
@@ -1438,7 +1455,7 @@ function renderCard(node, index, entry, input) {
       // 列表卡：点开列表预览。同样登记 _pvOpen，让「按住→抬起」的兜底也能打开（click 被重建吞掉时）
       const openList = () => pvOpenOnce(() => openListPreview(grp, (entry && entry.caption) || ''));
       prev._pvOpen = openList;
-      prev.addEventListener('click', (e) => { e.stopPropagation(); e.preventDefault(); openList(); }, true);
+      prev.addEventListener('click', (e) => { if (e.target && e.target.closest && e.target.closest('.ezpv-gen')) return; e.stopPropagation(); e.preventDefault(); openList(); }, true);
     }
     body.appendChild(prev);
   }
@@ -1469,7 +1486,7 @@ function formatModalEl() {
   box.style.cssText = 'background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:92%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.2);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const title = document.createElement('b'); title.textContent = ezT('Save options');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;height:24px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(title); hd.appendChild(close);
   const fields = document.createElement('div'); fields.style.cssText = 'display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow:auto;';
   // 图片只列静态图格式；动图独立成一项（对齐内置 SaveAnimatedWEBP/PNG：格式 + 帧率 + 无损 + 质量，
@@ -1689,7 +1706,7 @@ function openDataPreviewModal() {
   box.style.cssText = 'background:var(--ez-bg);border-radius:16px;padding:14px 16px;width:94%;max-width:560px;max-height:84vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 20px 60px rgba(0,0,0,.35);font-family:Inter,sans-serif;box-sizing:border-box;';
   const hd = document.createElement('div'); hd.style.cssText = 'display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--ez-border-2);padding-bottom:8px;';
   const t = document.createElement('b'); t.textContent = ezT('Data preview types / formats');
-  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;font-size:12px;cursor:pointer;font-family:inherit;';
+  const close = document.createElement('button'); close.textContent = '✕'; close.style.cssText = 'background:var(--ez-surface-2);border:1px solid var(--ez-border);border-radius:9px;padding:3px 11px;height:24px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;font-family:inherit;';
   hd.appendChild(t); hd.appendChild(close);
   const rows = [
     ['IMAGE', ezT('PNG / JPEG / WebP / BMP / TIFF (zoom to view); batches can save as image sequence / video / animated WebP-PNG-GIF')],
@@ -1933,9 +1950,11 @@ function hookPrototype(nt) {
     const r = prevExec ? prevExec.apply(this, arguments) : undefined;
     // 循环展开时每轮都会来一次 onExecuted（都挂在本节点 id 上）：累加各轮，换一次执行再清空 ——
     // 直接覆盖会只剩最后一轮的值。原样存，去不去重在卡片上的模式里决定。
+    // ★ 清空挪到「真正收到本轮 entries」这一刻：点击运行时先保留旧卡片，失败/取消不会白丢；
+    //   同一 prompt 的多轮只清第一次，后面继续累加。
     // ★ 内存里那份也要封顶（与 pvStripEntries 的 64 一致）：每条 entry 带一张 640 px base64 预览，
     //   长循环不封顶会攒到上百 MB（2026-11 审计 P2-12）。
-    try { if (message && message.entries) { const st = stateFor(this); const added = message.entries; st.entries = (Array.isArray(st.entries) ? st.entries : []).concat(added).slice(-64); pvPersist(this); added.forEach((e) => pvMakeThumb(e, this)); renderEntries(this); if (this._ezEdgeUpdate) this._ezEdgeUpdate(); } } catch (_) {}
+    try { if (message && message.entries) { const st = stateFor(this); const added = message.entries; if (this._ezPrevNewRun) { st.entries = []; this._ezPrevNewRun = false; } st.entries = (Array.isArray(st.entries) ? st.entries : []).concat(added).slice(-64); pvPersist(this); added.forEach((e) => pvMakeThumb(e, this)); renderEntries(this); if (this._ezEdgeUpdate) this._ezEdgeUpdate(); } } catch (_) {}
     return r;
   };
   const prevRemoved = nt.prototype.onRemoved; nt.prototype.onRemoved = function () { const r = prevRemoved ? prevRemoved.apply(this, arguments) : undefined; unregisterNode(this); try { if (this._ezPrevSyncTimer) { clearTimeout(this._ezPrevSyncTimer); this._ezPrevSyncTimer = null; } } catch (_) {} try { if (this._ezRoot) this._ezRoot.remove(); } catch (_) {} this._ezPrevSetup = false; return r; };
@@ -1963,16 +1982,14 @@ onLocaleChange(() => {
   ((app && app.graph && app.graph._nodes) || []).forEach((n) => { if (n && n.type === NODE) { try { refreshUI(n); } catch (_) {} } });
 });
 
-// 一次执行 = 一个 prompt：**排队时**清空本工作流所有 PreviewAny 的 entries（循环累加只在一轮执行内生效）。
-// 以前挂 execution_start：排队后立刻切到别的工作流时，执行开始那一刻会把**当前显示的那个**工作流清空。
+// 一次执行 = 一个 prompt：**排队时只标记新一轮，不立即清空**。旧卡片留到本节点真正输出
+// 第一帧时再换（见 onExecuted），失败/取消不会把上一次的结果白丢。循环多轮同一 prompt 只清一次。
 function previewAnyNodes(graph) {
   const g = graph || (app && app.graph);
   return ((g && g._nodes) || []).filter((n) => n && nodeTypeOf(n) === NODE);
 }
-function resetPreviewEntries(graph) {
-  previewAnyNodes(graph).forEach((n) => {
-    try { stateFor(n).entries = []; pvPersist(n); renderEntries(n); if (n._ezEdgeUpdate) n._ezEdgeUpdate(); } catch (_) {}
-  });
+function markPreviewRun(graph) {
+  previewAnyNodes(graph).forEach((n) => { n._ezPrevNewRun = true; });
 }
 // 排队：记下「这个 prompt 属于哪个工作流」+ 清空本工作流旧预览与旧结果缓存
 function pvHookQueue() {
@@ -1984,7 +2001,8 @@ function pvHookQueue() {
     try {
       const g = (app && app.graph) || null;
       wid = pvWorkflowId(g);
-      if (wid) { resetPreviewEntries(g); pvBufClear(wid); }
+      markPreviewRun(g);
+      if (wid) pvBufClear(wid);
     } catch (_) {}
     const res = prev.apply(this, arguments);
     try {
@@ -1993,6 +2011,7 @@ function pvHookQueue() {
         if (pid != null && wid) {
           _pvRuns.set(String(pid), wid);
           while (_pvRuns.size > 32) _pvRuns.delete(_pvRuns.keys().next().value);
+          pvRunsSave();
         }
       }).catch(() => {});
     } catch (_) {}
@@ -2009,6 +2028,7 @@ function pvCollectExecuted(ev) {
     const wid = pid ? _pvRuns.get(pid) : '';
     if (!wid) return;   // 不是本插件排队的 prompt（别的客户端 / 队列面板补跑）：不猜，免得把别的工作流的结果串过来
     pvBufAdd(wid, String(d.node != null ? d.node : '').split(':').pop(), entries);
+    try { pvArmSwitchPoll(); } catch (_) {}   // 刷新后没有 onExecuted 时，也要把 buffer 同步到面板
   } catch (_) {}
 }
 pvHookQueue();

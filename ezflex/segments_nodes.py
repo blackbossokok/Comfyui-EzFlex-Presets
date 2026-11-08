@@ -1172,9 +1172,10 @@ def _ezmc_next_head(timeplan, pin_next_head, steps, rt, fpt, fps):
     p = ""
     meta = _ez_resume_media_meta(nr_dir, nr_idx)
     fname = str((meta.get("files") or {}).get(str(port)) or "")
-    cand = [str(nr.get("latentPath") or "")]
+    cand = []
     if fname:
         cand.append(fname)
+    cand.append(str(nr.get("latentPath") or ""))
     cand += ["seg_%04d.v%d.pt" % (nr_idx, port), "seg_%04d_v%d.pt" % (nr_idx, port),
              "seg_%04d_v%d.latent" % (nr_idx, port)]
     for c in cand:
@@ -1532,12 +1533,11 @@ class MotionContextNode:
                     _latent_port = 2
                 _nr_meta = _ez_resume_media_meta(_nr_dir, _nr_idx)
                 _nr_file = str((_nr_meta.get("files") or {}).get(str(_latent_port)) or "")
-                _np = ""
-                _nlp = str(_nr.get("latentPath") or "").strip()
-                if _nlp:
-                    _np = _nlp if os.path.isabs(_nlp) else os.path.join(_nr_dir, _nlp)
+                # ★ media.json 的 files 才是真实文件名（LoopEnd 落盘可带自定义名）；latentPath 只是兜底。
+                _np = os.path.join(_nr_dir, _nr_file) if _nr_file else ""
                 if not _np or not os.path.isfile(_np):
-                    _np = os.path.join(_nr_dir, _nr_file) if _nr_file else ""
+                    _nlp = str(_nr.get("latentPath") or "").strip()
+                    _np = (_nlp if os.path.isabs(_nlp) else os.path.join(_nr_dir, _nlp)) if _nlp else ""
                 if not _np or not os.path.isfile(_np):
                     for _cand in ("seg_%04d.v%d.pt" % (_nr_idx, _latent_port),
                                   "seg_%04d_v%d.pt" % (_nr_idx, _latent_port),
@@ -1959,16 +1959,29 @@ async def _ezsp_pick_video(req):
         data = await req.json()
     except Exception:
         data = {}
-    initial = str((data or {}).get("dir") or "").strip() or None
-    if initial:
+    raw = str((data or {}).get("dir") or "").strip()
+
+    def _first_dir(*cands):
+        for c in cands:
+            try:
+                p = os.path.abspath(str(c or ""))
+            except Exception:
+                continue
+            if os.path.isfile(p):
+                p = os.path.dirname(p)
+            if os.path.isdir(p):
+                return p
+        return ""
+
+    # 传入的 run 目录可能已被删（例如用户先在资源管理器里删了视频/整个 run），
+    # 逐级退到父目录、最近一次 run、默认段目录，别让原生框落到「此电脑 / 库」。
+    initial = _first_dir(raw, os.path.dirname(os.path.abspath(raw)) if raw else "")
+    if not initial:
         try:
-            initial = os.path.abspath(initial)
-            if os.path.isfile(initial):
-                initial = os.path.dirname(initial)
-            if not os.path.isdir(initial):
-                initial = None
+            initial = _first_dir(_ezsp_latest_run(_ezsp_out_root()), _ezsp_out_root())
         except Exception:
-            initial = None
+            initial = ""
+    initial = initial or None
 
     def _pick():
         p = ""
@@ -2291,21 +2304,42 @@ async def _ezsp_version_set(req):
         await asyncio.to_thread(shutil.copy2, vp, _tmp)
         os.replace(_tmp, _dst)
         ap = os.path.join(root, str(files.get("audio") or ""))
-        if os.path.isfile(ap):
-            _tmpa = os.path.join(root, base + ".wav.tmp")
-            await asyncio.to_thread(shutil.copy2, ap, _tmpa)
-            os.replace(_tmpa, os.path.join(root, base + ".wav"))
+        if base != "final":
+            if os.path.isfile(ap):
+                _tmpa = os.path.join(root, base + ".wav.tmp")
+                await asyncio.to_thread(shutil.copy2, ap, _tmpa)
+                os.replace(_tmpa, os.path.join(root, base + ".wav"))
+            else:
+                # 该版本没有音频侧车 ⇒ 清掉当前留下的旧 WAV，否则成片/重跑会带着上一版的音轨
+                try:
+                    if os.path.isfile(os.path.join(root, base + ".wav")):
+                        os.remove(os.path.join(root, base + ".wav"))
+                except Exception:
+                    pass
+        # ★ latent 有两种落盘格式：.pt（旧）/ .latent（核心 safetensors）。恢复时必须保留原扩展名，
+        #   否则把 safetensors 内容写成 .pt，LoopStart/MotionContext 会被 torch.load 当 pickle 读而失败。
+        _lat_name = os.path.basename(str(files.get("latent") or ""))
+        _lat_ext = os.path.splitext(_lat_name)[1].lower()
+        if _lat_ext not in (".pt", ".latent"):
+            _lat_ext = ".pt"
+        _lat_dst = ""
         lp = os.path.join(root, str(files.get("latent") or ""))
-        if os.path.isfile(lp) and base != "final":
-            _tmpl = os.path.join(root, base + "_v2.pt.tmp")
-            await asyncio.to_thread(shutil.copy2, lp, _tmpl)
-            os.replace(_tmpl, os.path.join(root, base + "_v2.pt"))
-        elif base != "final":
-            try:
-                if os.path.isfile(os.path.join(root, base + "_v2.pt")):
-                    os.remove(os.path.join(root, base + "_v2.pt"))
-            except Exception:
-                pass
+        if base != "final":
+            # 先清掉旧版固定写出来的 <base>_v2.*，否则 nextRef 的兜底路径会抢先命中旧 latent
+            for _old in (base + "_v2.pt", base + "_v2.latent"):
+                _op = os.path.join(root, _old)
+                try:
+                    if os.path.abspath(_op) != os.path.abspath(lp) and os.path.isfile(_op):
+                        os.remove(_op)
+                except Exception:
+                    pass
+            if os.path.isfile(lp):
+                _lat_dst = re.sub(r"[^0-9A-Za-z_.\-\u4e00-\u9fff]+", "_", _lat_name).strip(" ._-")
+                if not _lat_dst.lower().endswith((".pt", ".latent")):
+                    _lat_dst = base + "_v2" + _lat_ext
+                _tmpl = os.path.join(root, _lat_dst + ".tmp")
+                await asyncio.to_thread(shutil.copy2, lp, _tmpl)
+                os.replace(_tmpl, os.path.join(root, _lat_dst))
         # 旧版这里会把 files["ref"] 目录 copytree 到 <base>.ref；但 files 从来没有 ref 键，
         # os.path.join(root, "") == root，于是第一次恢复就把整条 run 复制进 <base>.ref，
         # 第二次开始嵌套膨胀（copytree 先 list 完 src 再建 dst，第一次扫不到新建的目标目录）。
@@ -2321,14 +2355,22 @@ async def _ezsp_version_set(req):
                 media = {}
             if isinstance(media, dict):
                 _fm = media.get("files") if isinstance(media.get("files"), dict) else {}
-                _lat_ports = [str(k) for k, v in _fm.items() if str(v).lower().endswith(".pt")]
-                _lp = str((files or {}).get("latentPort") or (_lat_ports[0] if _lat_ports else "2"))
+                _lat_ports = [str(k) for k, v in _fm.items()
+                              if os.path.splitext(str(v))[1].lower() in (".pt", ".latent")]
+                _lp = str((files or {}).get("latentPort") or "")
+                if not _lp:
+                    _lp = next((str(k) for k, v in _fm.items()
+                                if _lat_name and os.path.basename(str(v)) == _lat_name), "")
+                if not _lp:
+                    _lp = _lat_ports[0] if _lat_ports else "2"
                 _vk = next((str(k) for k, v in media.items() if str(v).lower() == "video"), "3")
                 media[_vk] = "video"
-                for _k in _lat_ports:
-                    _fm.pop(_k, None)
-                if os.path.isfile(os.path.join(root, base + "_v2.pt")):
-                    _fm[_lp] = base + "_v2.pt"
+                if _lat_dst:
+                    _fm.pop(_lp, None)
+                    _fm[_lp] = _lat_dst
+                else:
+                    for _k in _lat_ports:
+                        _fm.pop(_k, None)
                 media["files"] = _fm
                 with _io.open(mp, "w", encoding="utf-8") as f:
                     json.dump(media, f, ensure_ascii=False)
@@ -2336,7 +2378,8 @@ async def _ezsp_version_set(req):
                 _ezsp_rebuild_final(root)
             except Exception as exc:
                 print("[EzFlex-SegmentPanel] version final rebuild failed: %s" % exc)
-        return _web.json_response({"ok": True, "dir": root, "base": base, "current": vid})
+        return _web.json_response({"ok": True, "dir": root, "base": base, "current": vid,
+                                   "video": _dst, "file": os.path.basename(_dst)})
     except Exception as exc:
         return _web.json_response({"ok": False, "error": str(exc)}, status=500)
 
@@ -2360,18 +2403,26 @@ async def _ezsp_versions_clear(req):
     man = _ezsp_versions_load(root, base)
     items = [it for it in man.get("items", []) if isinstance(it, dict)]
     items.sort(key=lambda it: str(it.get("id")))
-    drop = items[:-keep] if len(items) > keep else []
+    cur = str(man.get("current") or "")
+    item_ids = {str(it.get("id")) for it in items}
     keep_ids = {str(it.get("id")) for it in items[-keep:]}
+    # ★ 当前版本必须留下：用户可能切到旧版本后再清理，只按「最新 N 个」删会把正在用的那版删掉，
+    #   根目录里的视频还在、versions.json 却指向空目录，后面再切版本就全乱了。
+    if cur and cur in item_ids:
+        keep_ids.add(cur)
+    drop = [it for it in items if str(it.get("id")) not in keep_ids]
     for it in drop:
         try:
             shutil.rmtree(_ezsp_ver_dir(root, base, str(it.get("id"))), ignore_errors=True)
         except Exception:
             pass
     man["items"] = [it for it in items if str(it.get("id")) in keep_ids]
-    if str(man.get("current") or "") not in keep_ids:
+    if cur in keep_ids:
+        man["current"] = cur
+    else:
         man["current"] = max(keep_ids) if keep_ids else ""
     _ezsp_versions_save(root, base, man)
-    return _web.json_response({"ok": True, "kept": len(keep_ids), "removed": len(drop)})
+    return _web.json_response({"ok": True, "kept": len(man["items"]), "removed": len(drop)})
 
 
 async def _ezsp_trim_segment(req):
@@ -2509,7 +2560,7 @@ async def _ezsp_trim_segment(req):
 
 
 async def _ezsp_cache_clear(req):
-    """删掉 run 目录里的 handoff 缓存（seg_XXXX_<名称>.pt，含旧版的 seg_XXXX.vN.pt）。可选 index 只删某一段。"""
+    """删掉 run 目录里的 handoff 缓存（seg_XXXX_<名称>.pt / .latent，含旧版的 seg_XXXX.vN.pt）。可选 index 只删某一段。"""
     if not _ez_local(req):
         return _web.json_response({"ok": False, "error": "forbidden: local clients only"}, status=403)
     try:
@@ -2529,8 +2580,9 @@ async def _ezsp_cache_clear(req):
     total = 0
     try:
         for fn in os.listdir(root):
-            # 实际落盘是 seg_0001_v1.pt（LoopEnd）/ seg_0002_v2.pt（版本）,旧版曾写过 seg_0001.v1.pt
-            m = re.match(r"seg_(\d{4})[._].+\.pt$", fn)
+            # 实际落盘是 seg_0001_v1.pt（LoopEnd）/ seg_0002_v2.pt（版本）/ seg_0003_<自定义名>.latent，
+            # 旧版曾写过 seg_0001.v1.pt
+            m = re.match(r"seg_(\d{4})[._].+\.(?:pt|latent)$", fn, re.IGNORECASE)
             if not m:
                 continue
             if idx is not None and int(m.group(1)) != idx:
@@ -2701,7 +2753,7 @@ def _ezsp_ver_ensure_current(root, base, kind="legacy"):
                     _m = json.load(_f) or {}
                 for _k, _fn in ((_m.get("files") or {}) if isinstance(_m, dict) else {}).items():
                     _p = os.path.join(root, str(_fn))
-                    if str(_fn).lower().endswith(".pt") and os.path.isfile(_p):
+                    if os.path.splitext(str(_fn))[1].lower() in (".pt", ".latent") and os.path.isfile(_p):
                         _lat = _p
                         _lat_k = _k
                         break

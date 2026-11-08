@@ -3499,6 +3499,13 @@ class LoopEndNode:
                     if _fn:
                         _meta[str(_k)] = _styp
                         _meta.setdefault("files", {})[str(_k)] = _fn
+                        if _styp == "latent":
+                            # 卡片落的是 .latent（safetensors），自动缓存可能是 .pt：两条路都要挂进当前版本，
+                            # 否则「选择本段版本」切视频时会把这段 latent 丢掉（MotionContext 钉错尾）。
+                            try:
+                                _ezsp_ver_attach_latent(_rd, "seg_%04d" % int(cur), os.path.join(_rd, _fn), _fn, int(_k))
+                            except Exception:
+                                pass
                 if _meta:
                     try:
                         with _io.open(os.path.join(_rd, "seg_%04d.media.json" % int(cur)), "w", encoding="utf-8") as _f:
